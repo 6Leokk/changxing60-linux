@@ -270,6 +270,21 @@ average. `top` shows about 98 % idle.
   passed on by LK, so a cmdline option alone would not work); MemTotal grew from 1447 to 1473 MiB.
 * `mu300-zram.service` adds lz4 zram swap of half the RAM (swappiness 100).
 
+
+### 28. Mali-G57 GPU (OpenCL) without Android
+* The stock `mali_kbase.ko` (DDK r40p0) does not load: 166 of its 335 imported symbol CRCs differ from this kernel.
+  realme's `kernel_modules` master branch has the same DDK (`gpu/natt/mali`, r40p0-01eac0, UK 11.36, platform
+  `qogirn6pro`); an older checkout of the tree has r34p0 (UK 11.31), which Android's r40p0 userspace would not accept.
+  `kernel/build-mali.sh` builds it; it probes `23140000.gpu` as "arch 9.0.9 r0p1" and creates `/dev/mali0`.
+* Userspace is Android's `libGLES_mali.so` (it is also `libOpenCL.so` and the Vulkan ICD), a bionic library with a
+  37-library closure (VNDK apex, bionic, gralloc/mapper HIDL stubs). It runs in the existing vendor chroot with
+  `LD_LIBRARY_PATH` covering vendor, egl, VNDK and bionic; `/dev/ion` is enough for OpenCL buffers.
+* Test programs are built for bionic with plain clang (`--target=aarch64-linux-android29`, linked against the device's
+  `libc.so`/`libdl.so`/`libOpenCL.so`) and a small `_start` that calls `__libc_init` (`tools/gpu/`), so no NDK is needed.
+  `android-gpu-run /system/bin/cltest`: "OpenCL 3.0 v1.r40p0-01eac0", device "Mali-G57 r0p1", 4M-element kernel
+  verified correct.
+* There is no display, so GLES/Vulkan are only usable off-screen. The driver adds about 45 MiB of memory use.
+
 ## Audio
 
 ### 24. No internal audio hardware
