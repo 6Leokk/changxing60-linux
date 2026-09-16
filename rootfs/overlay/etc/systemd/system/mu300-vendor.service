@@ -1,0 +1,14 @@
+[Unit]
+Description=MU300 Android vendor services (modem_control: PM/modem bring-up, disarms PM watchdog)
+DefaultDependencies=no
+After=local-fs.target systemd-udevd.service
+Before=sysinit.target
+
+[Service]
+Type=simple
+ExecStart=/opt/mu300/bin/android-vendor-start
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=sysinit.target
