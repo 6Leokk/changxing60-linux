@@ -33,8 +33,8 @@ Wi-Fi on the ZTE F50 5G mobile hotspot (hardware MU300, Unisoc T760 / UMS9620). 
 | Thermal throttling, status LEDs, SIM tray, DVFS drivers | ✅ `mu300-extra-modules` (blue LED = mobile data up) |
 | Default boot to Linux with automatic fallback | ✅ `mu300-next-boot linux\|android`; a Linux boot that never completes rolls back to Android |
 | OpenWrt rootfs (selectable next to Ubuntu) | ⏳ in progress |
-| Internal audio | ✗ not populated: the AW883xx amplifier (and charger IC) do not answer on I2C, and there is no audio DSP firmware partition |
-| Bluetooth (SC2355) | 🔧 `sprdbt_tty` (PCIe) built, `hci0` attaches and answers HCI; bring-up (vendor PSKey init) in progress |
+| Internal audio | ✗ no speaker/mic path; the AW883xx amplifier does not answer on I2C. The AGDSP can be booted with firmware from another device (Android community modules), Linux port pending |
+| Bluetooth (SC2355) | ✅ BlueZ `hci0` powered, scanning works: `sprdbt_tty` (PCIe H4) + `mu300-bt-init` vendor PSKey/RF upload + link-policy kernel patch |
 | GPU (Mali) | ✗ no display; driver source and Linux userspace unavailable |
 
 ## How it works
@@ -51,6 +51,7 @@ LK (slot b, tries=2) ─► custom 5.4 kernel + vendor_boot DTB
                ├─ mu300-lan      : br-lan (usb0 + wlan0) 192.168.77.1 + dnsmasq DHCP/DNS
                ├─ mu300-wifi     : pcie-sprd, wcn_bsp, sprd_wlan_combo
                ├─ mu300-mobile-data : AT on /dev/stty_nr1, sipa_eth0, nftables NAT
+               ├─ mu300-bluetooth : sprdbt_tty, mu300-bt-init (PSKey/RF), btattach → bluetoothd
                └─ ssh.socket, telnetd, serial-getty@ttyGS0
 ```
 
@@ -97,7 +98,13 @@ docker run --rm -v mu300-kernel:/src -v "$PWD/kernel":/work mu300-kbuild bash /w
 into `/src/out-linux`. Copy `Image`, `modules.builtin*` and all `*.ko` (flattened, `llvm-strip --strip-debug`) to `out/`.
 
 Wi-Fi driver: extract `kernel_modules/kernel5.4/wcn/wlan/wlan_combo` from the realme C51/C53 AndroidT kernel source into
-the volume as `/src/ext-wlan_combo`, then run `kernel/build-wlan.sh` (applies `patches/wlan_combo-default-board-config.patch`).
+the volume as `/src/ext-wlan_combo`, then run `kernel/build-wlan.sh` (applies the `patches/wlan_combo-*.patch` files).
+
+Kernel patches: apply `kernel/patches/bluetooth-marlin3-link-policy.patch` and `regdb-wens-certificate.patch` to the kernel tree
+before building, and `echo -gb50db5b6224c > .scmversion` so the release string does not get a `-dirty` suffix.
+
+Bluetooth: build `sprdbt_tty.ko` from the same realme tree (`wcn/bluetooth/driver/tty-pcie`, `BSP_BOARD_UNISOC_WCN_SOCKET=pcie`)
+and the vendor-init tool: `docker run --rm -v "$PWD/tools/bt-init":/w mu300-kbuild gcc -O2 -static -o /w/mu300-bt-init /w/mu300-bt-init.c`.
 
 ### 2. Android vendor subset (from your device)
 ```sh
@@ -124,10 +131,11 @@ python3 boot/build-boot-image.py --stock-boot dumps/boot_a.img --misc-head dumps
 cid=$(docker create mu300-ubuntu:26.04); docker export $cid > rootfs/base.tar; docker rm $cid
 docker run --rm -v "$PWD/rootfs":/w -v "$PWD/out/modules":/kmods:ro -v "$PWD/out":/kout:ro \
   -v "$PWD/firmware":/firmware:ro -v "$PWD/android-subset":/android-subset:ro -v "$PWD/tools/logdw/logdw":/logdw:ro \
-  mu300-ubuntu:26.04 bash /w/assemble.sh
+  -v "$PWD/tools/bt-init/mu300-bt-init":/bt-init:ro mu300-ubuntu:26.04 bash /w/assemble.sh
 ```
 Push `mu300-ubuntu-26.04-rootfs.tar.gz` to the device and extract it with `tools/android-mount-mu300root.sh`.
-`firmware/` holds `wcnmodem.bin`, `gnssmodem.bin` and `wifi_board_config*.ini` from the device's `/odm/firmware`.
+`firmware/` holds `wcnmodem.bin`, `gnssmodem.bin` and `wifi_board_config*.ini` from the device's `/odm/firmware`, plus
+`bt_configure_pskey.ini` and `bt_configure_rf.ini` from `/vendor/etc`.
 
 ### 5. Boot Linux
 ```sh

@@ -243,3 +243,30 @@ average. `top` shows about 98 % idle.
 * The DT enables a sound card, the UMP9620 codec and an AW883xx amplifier at `6-0034`, and Android disables audio.
   With `i2c-dev`, nothing answers at 0x34 (nor at the bq2560x address 0x6b), and there is no AGDSP firmware partition.
   The board has no speaker path; only Bluetooth or USB-host audio devices are possible.
+* Update: community Android modules show the audio DSP itself is usable. The F50 DT has `audiocp_boot` and `sound@0` but
+  no `audio-mem`/`audiodsp-mem` reserved memory (another UMS9620 device uses 0xaf700000 3 MiB and 0xafa00000 6 MiB).
+  Their flow loads an AGDSP image taken from a different device into `/sys/devices/platform/audiocp_boot/agdsp`
+  (`stop`, write, `start`), binds `sound@0` to `vbc-rxpx-codec-sc27xx`, and gets a `sprdphone-sc2730` card with Bluetooth
+  SCO call audio. The Unisoc ASoC/AGDSP driver sources are in the realme `unisoc-5.4` kernel_modules tree; porting this
+  to Linux is future work (A2DP over BlueZ does not need the DSP).
+
+## Bluetooth
+
+### 25. SC2355 Bluetooth on BlueZ
+* Transport: `sprdbt_tty` (realme `wcn/bluetooth/driver/tty-pcie`, built with `BSP_BOARD_UNISOC_WCN_SOCKET=pcie`) exposes
+  an H4 tty `/dev/ttyBT0` over the WCN PCIe link and registers a `bluetooth` rfkill that powers the BT function.
+  `btattach -B /dev/ttyBT0 -P h4` creates `hci0`.
+* Vendor init (Android `libbt-sprd_suite`, Marlin3): before the stack starts, send `0xFCA0` with the 176-byte PSKey block
+  from `bt_configure_pskey.ini` (BD address at bytes 20..25, little endian), `0xFCA2` with the 252-byte RF block from
+  `bt_configure_rf.ini`, then `0xFCA1 00 00 01` (dual mode, enable). `tools/bt-init/mu300-bt-init.c` does this. Without the
+  PSKey upload the controller reports a fixed placeholder address.
+* The firmware advertises Hold Mode and Park State in its LMP features, but `Write Default Link Policy Settings` returns
+  `Invalid HCI Command Parameters` for any value that includes them (0x0000/0x0001/0x0004/0x0005 accepted, 0x0007 rejected).
+  The 5.4 kernel sets every advertised mode, so the init sequence aborts and `hciconfig hci0 up` fails with `EINVAL`.
+  `kernel/patches/bluetooth-marlin3-link-policy.patch` requests only Role Switch and Sniff (Bluetooth is built in, so this
+  needs the kernel rebuild).
+* Android keeps the real BT address in `/data/vendor/bluetooth/btmac.txt` on encrypted `/data`; Linux uses
+  `BDADDR=` from `/etc/mu300/bluetooth.conf` or a stable locally administered address derived from `machine-id`.
+* Verified: `bluetoothd` powers the adapter and LE/BR-EDR scanning lists nearby devices.
+* Rebuilding with a modified tree appends `-dirty` to the kernel release and breaks module loading; `.scmversion` with
+  `-gb50db5b6224c` in the source tree keeps the release string stable.

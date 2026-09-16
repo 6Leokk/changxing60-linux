@@ -5,7 +5,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     systemd systemd-sysv systemd-timesyncd systemd-resolved udev dbus kmod \
     iproute2 iputils-ping net-tools nftables dnsmasq-base ethtool \
     openssh-server busybox-static \
-    wpasupplicant hostapd iw wireless-regdb rfkill \
+    wpasupplicant hostapd iw wireless-regdb rfkill bluez \
     ca-certificates curl wget nano vim-tiny less htop sudo bash-completion \
     libcap2-bin locales tzdata e2fsprogs dosfstools file procps psmisc lsof strace usbutils pciutils \
  && rm -rf /var/lib/apt/lists/*
