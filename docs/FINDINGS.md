@@ -175,3 +175,15 @@ average. `top` shows about 98 % idle.
   Link it to `../run/systemd/resolve/stub-resolv.conf`.
 * busybox/toybox tar drop xattrs, so `ping` loses `cap_net_raw`; `mu300-fixups.service` restores it.
 * Android's uid `system` (1000) is also Ubuntu's first user, so modem device nodes show up as owned by `ubuntu`.
+
+## Default boot
+
+### 17. Linux as default without losing the Android fallback
+* LK decrements `tries_remaining` before booting a slot and rolls back when it finds `tries == 1 && !successful`.
+  The one-shot trial arms slot b with `tries = 2`.
+* Default-Linux mode never sets `successful_boot`. Instead:
+  1. init skips the slot-a restore when `/etc/mu300/default-boot` in the rootfs says `linux` (slot b is left at `tries = 1`);
+  2. `mu300-boot-ok.service` runs 30 s after `multi-user.target` and writes the `tries = 2` block again.
+* A boot that never reaches `mu300-boot-ok` therefore leaves `tries = 1`, and the next boot rolls back to Android.
+* Verified: `mu300-next-boot linux` + reboot returned to Linux and re-armed slot b; `mu300-next-boot android` + reboot
+  booted slot a.

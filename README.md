@@ -28,7 +28,7 @@ Wi-Fi on the ZTE F50 5G mobile hotspot (hardware MU300, Unisoc T760 / UMS9620). 
 | Wi-Fi (SC2355 / Marlin3) | ✅ station scan and access-point mode (`hostapd` AP-ENABLED) |
 | Mobile data (5G NSA/LTE) | ✅ AT commands + `sipa_eth0`, about 75 Mbit/s down / 10 Mbit/s up measured |
 | Internet sharing to USB (NAT) | ✅ host behind `usb0` reaches the internet through the modem |
-| Default boot to Linux | ⏳ planned (currently a one-shot trial, reboot returns to Android) |
+| Default boot to Linux with automatic fallback | ✅ `mu300-next-boot linux\|android`; a Linux boot that never completes rolls back to Android |
 | OpenWrt rootfs | ⏳ planned |
 
 ## How it works
@@ -37,7 +37,7 @@ Wi-Fi on the ZTE F50 5G mobile hotspot (hardware MU300, Unisoc T760 / UMS9620). 
 LK (slot b, tries=2) ─► custom 5.4 kernel + vendor_boot DTB
    └─► initramfs /init (boot/init)
          ├─ load 86 modules in a fixed order (boot/module-order.txt)
-         ├─ write slot-a bootloader_control back to misc  (next reboot = Android)
+         ├─ misc: restore slot a, unless the rootfs says default-boot=linux
          ├─ bind USB gadget: ECM (usb0 up immediately) + ACM console
          ├─ losetup -o 27762098176 /dev/mmcblk0 → ext4 "mu300root" (free space after userdata)
          └─ switch_root → systemd
@@ -123,13 +123,22 @@ docker run --rm -v "$PWD/rootfs":/w -v "$PWD/out/modules":/kmods:ro -v "$PWD/out
 Push `mu300-ubuntu-26.04-rootfs.tar.gz` to the device and extract it with `tools/android-mount-mu300root.sh`.
 `firmware/` holds `wcnmodem.bin`, `gnssmodem.bin` and `wifi_board_config*.ini` from the device's `/odm/firmware`.
 
-### 5. Boot Linux (one-shot)
+### 5. Boot Linux
 ```sh
 boot/flash-trial.sh boot-linux-slotb.img
 ```
 After about 50 s: `ssh ubuntu@192.168.77.1` (password `ubuntu`, **change it**), `telnet 192.168.77.1`, or
 `screen /dev/cu.usbmodem* 115200`. `sudo /opt/mu300/bin/mobile-data status|up [APN]|down|sim-reset` controls the modem. `sudo reboot` returns to Android. If a trial fails, collect logs from Android with
 `tools/collect-logs.sh`.
+
+Make Linux the default (inside Linux):
+```sh
+sudo mu300-next-boot linux     # every successful boot re-arms slot b (mu300-boot-ok.service)
+sudo mu300-next-boot android   # next reboot goes to Android and stays there
+sudo mu300-next-boot status
+```
+From Android, `boot/android-boot-linux.sh boot-linux-slotb.img` boots the image already on `boot_b` again without reflashing.
+If Linux ever fails before `mu300-boot-ok` runs, LK sees `tries_remaining=1` on the next boot and falls back to Android.
 
 ## Credits and licenses
 

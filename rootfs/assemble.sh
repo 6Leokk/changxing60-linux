@@ -21,7 +21,7 @@ if [ -d /firmware ]; then mkdir -p $R/usr/lib/firmware && cp /firmware/* $R/usr/
 # the Android vendor subset (modem_control + libs + properties) comes from android-vendor/extract-subset.sh
 if [ -d /android-subset ]; then mkdir -p $R/opt/mu300/android && cp -a /android-subset/. $R/opt/mu300/android/ && mv $R/opt/mu300/android/dev/__properties__ $R/opt/mu300/android/dev-properties && rmdir $R/opt/mu300/android/dev; fi
 cp /logdw $R/opt/mu300/bin/logdw
-for u in mu300-vendor.service:sysinit.target mu300-usb-net.service:multi-user.target mu300-ssh-hostkeys.service:multi-user.target mu300-telnetd.service:multi-user.target serial-getty@ttyGS0.service:getty.target ssh.socket:sockets.target mu300-wifi.service:multi-user.target mu300-mobile-data.service:multi-user.target mu300-fixups.service:sysinit.target systemd-networkd.service:multi-user.target; do
+for u in mu300-vendor.service:sysinit.target mu300-usb-net.service:multi-user.target mu300-ssh-hostkeys.service:multi-user.target mu300-telnetd.service:multi-user.target serial-getty@ttyGS0.service:getty.target ssh.socket:sockets.target mu300-wifi.service:multi-user.target mu300-mobile-data.service:multi-user.target mu300-fixups.service:sysinit.target mu300-boot-ok.service:multi-user.target systemd-networkd.service:multi-user.target; do
   svc=${u%%:*}; tgt=${u##*:}
   mkdir -p $R/etc/systemd/system/$tgt.wants
   src=/etc/systemd/system/$svc; [ -e $R$src ] || src=/usr/lib/systemd/system/$svc
