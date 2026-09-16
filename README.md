@@ -32,6 +32,7 @@ Wi-Fi on the ZTE F50 5G mobile hotspot (hardware MU300, Unisoc T760 / UMS9620). 
 | Modem NV persistence (`cp_diskserver`), `refnotify` | ✅ Android daemons in the chroot |
 | Thermal throttling, status LEDs, SIM tray, DVFS drivers | ✅ `mu300-extra-modules` (blue LED = mobile data up) |
 | Default boot to Linux with automatic fallback | ✅ `mu300-next-boot linux\|android`; a Linux boot that never completes rolls back to Android |
+| RAM | ✅ 1473 MiB usable (464 MiB is the modem firmware's, unavoidable); unused logo/sysdump reservations freed, zram swap |
 | OpenWrt rootfs (selectable next to Ubuntu) | ⏳ in progress |
 | Internal audio | ✗ no speaker/mic path; the AW883xx amplifier does not answer on I2C. The AGDSP can be booted with firmware from another device (Android community modules), Linux port pending |
 | Bluetooth (SC2355) | ✅ BlueZ `hci0` powered, scanning works: `sprdbt_tty` (PCIe H4) + `mu300-bt-init` vendor PSKey/RF upload + link-policy kernel patch |
@@ -100,7 +101,7 @@ into `/src/out-linux`. Copy `Image`, `modules.builtin*` and all `*.ko` (flattene
 Wi-Fi driver: extract `kernel_modules/kernel5.4/wcn/wlan/wlan_combo` from the realme C51/C53 AndroidT kernel source into
 the volume as `/src/ext-wlan_combo`, then run `kernel/build-wlan.sh` (applies the `patches/wlan_combo-*.patch` files).
 
-Kernel patches: apply `kernel/patches/bluetooth-marlin3-link-policy.patch` and `regdb-wens-certificate.patch` to the kernel tree
+Kernel patches: apply `kernel/patches/bluetooth-marlin3-link-policy.patch`, `of-reserved-mem-skip.patch` and `regdb-wens-certificate.patch` to the kernel tree
 before building, and `echo -gb50db5b6224c > .scmversion` so the release string does not get a `-dirty` suffix.
 
 Bluetooth: build `sprdbt_tty.ko` from the same realme tree (`wcn/bluetooth/driver/tty-pcie`, `BSP_BOARD_UNISOC_WCN_SOCKET=pcie`)

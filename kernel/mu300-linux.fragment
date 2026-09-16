@@ -132,3 +132,6 @@ CONFIG_USB_F_ACM=y
 CONFIG_I2C_CHARDEV=m
 CONFIG_SPI_SPIDEV=m
 CONFIG_ZTE_AW883XX_SMART_PA=m
+
+# --- give unused reserved-memory back to Linux (no display, no bootloader sysdump)
+CONFIG_OF_RESERVED_MEM_SKIP="logobuffer,sysdump-uboot"

@@ -260,6 +260,16 @@ average. `top` shows about 98 % idle.
   runs `up` again after two failed checks; `mobile-data down` sets `/run/mu300-mobile-data-down` so a manual disconnect
   is respected. Verified by switching the radio off: data returned without intervention.
 
+### 27. Where the missing ~550 MiB of RAM goes
+* `Memory: 1430144K/2097084K available ... 617788K reserved`. The device tree reserves 464 MiB for the modem firmware
+  (`cp-modem@88000000`, needed for 4G/5G), 24 MiB for Trusty (`tos-mem`), 8 MiB SIPC shared memory, 3 MiB DDR training
+  data and a few small areas; the kernel image (~35 MiB) and the page tables for 2 GiB (~32 MiB) make up the rest.
+  `cma_share` (48 MiB) is still usable for movable pages.
+* Not needed on Linux: `logobuffer` (9 MiB, there is no display) and `sysdump-uboot` (16 MiB, bootloader crash dumps).
+  `kernel/patches/of-reserved-mem-skip.patch` adds `CONFIG_OF_RESERVED_MEM_SKIP` (the boot image command line is not
+  passed on by LK, so a cmdline option alone would not work); MemTotal grew from 1447 to 1473 MiB.
+* `mu300-zram.service` adds lz4 zram swap of half the RAM (swappiness 100).
+
 ## Audio
 
 ### 24. No internal audio hardware
