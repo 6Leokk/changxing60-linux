@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-server busybox-static \
     wpasupplicant hostapd iw wireless-regdb rfkill \
     ca-certificates curl wget nano vim-tiny less htop sudo bash-completion \
-    locales tzdata e2fsprogs dosfstools file procps psmisc lsof strace usbutils pciutils \
+    libcap2-bin locales tzdata e2fsprogs dosfstools file procps psmisc lsof strace usbutils pciutils \
  && rm -rf /var/lib/apt/lists/*
 RUN sed -i 's/^# *\(en_US.UTF-8\|tr_TR.UTF-8\)/\1/' /etc/locale.gen && locale-gen \
  && ln -sf /usr/share/zoneinfo/Europe/Istanbul /etc/localtime && echo Europe/Istanbul > /etc/timezone \
