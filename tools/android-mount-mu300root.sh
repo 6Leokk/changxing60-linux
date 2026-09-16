@@ -18,7 +18,8 @@ n=${f##*loop}
 [ -n "$n" ] || { echo NO-LOOP-INDEX; exit 1; }
 [ -e /sys/block/loop$n/dev ] || { echo NO-SYSFS-loop$n; exit 1; }
 L=/dev/block/loop$n
-[ -b "$L" ] || mknod "$L" b $(cut -d: -f1 /sys/block/loop$n/dev) $(cut -d: -f2 /sys/block/loop$n/dev)
+# ueventd may create the node concurrently; only fail if it still does not exist
+[ -b "$L" ] || mknod "$L" b $(cut -d: -f1 /sys/block/loop$n/dev) $(cut -d: -f2 /sys/block/loop$n/dev) 2>/dev/null || [ -b "$L" ]
 [ ! -e /sys/block/loop$n/loop/backing_file ] || { echo LOOP-BUSY-$L; exit 1; }
 losetup -o $OFF -S $SIZE "$L" /dev/block/mmcblk0
 [ "$(cat /sys/block/loop$n/loop/offset)" = "$OFF" ] && [ "$(cat /sys/block/loop$n/loop/backing_file)" = /dev/block/mmcblk0 ] && [ "$(blockdev --getsize64 $L)" = "$SIZE" ] || { echo LOOP-MISMATCH; losetup -d "$L"; exit 1; }

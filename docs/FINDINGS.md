@@ -187,3 +187,30 @@ average. `top` shows about 98 % idle.
 * A boot that never reaches `mu300-boot-ok` therefore leaves `tries = 1`, and the next boot rolls back to Android.
 * Verified: `mu300-next-boot linux` + reboot returned to Linux and re-armed slot b; `mu300-next-boot android` + reboot
   booted slot a.
+
+## Parity with Android
+
+### 18. Services and drivers Android runs that the minimal port lacked
+* `cp_diskserver` persists modem NV (`nr_fixnv*`, `nr_runtimenv*`); on first start it immediately wrote pending
+  "dirty" NV data, so without it modem NV changes are lost. `refnotify` handles modem reference-clock requests.
+  Both run from the same chroot; `srtd` needs Android's binder radio HAL and is skipped.
+* Drivers that load cleanly after the modem is up: `sprd_soc_thm`, `thermal-generic-adc`, `sprd_cpu_cooling` (binds
+  cpufreq and CPU hotplug cooling to `soc-thmzone` with trips at 70/85/110 °C), `leds-sc27xx-bltc` (RGB status LED),
+  `zte_card_holder_det`, `sc27xx-vibra`, `sprd_cp_dvfs`, `sprd_ddr_dvfs`. `zte_sar` loads but the aw9610x SAR sensor
+  is not populated on this board (`-201`).
+* Android disables audio entirely (`ro.audioserver.disabled=true`, no sound cards) although the device tree has an
+  enabled sound card (`unisoc,vbc-v4-codec-sc2730`), the UMP9620 codec and an AW883xx smart amplifier that answers on I2C.
+* Android's hotspot (`WifiConfigStoreSoftAp.xml`) lives on the metadata-encrypted `/data`, so Linux cannot read it; it
+  has to be copied while Android runs. No factory default Wi-Fi credential is stored in a readable partition.
+* RAM: Android uses about 960 MiB of the 1.4 GiB; Ubuntu with all services about 480 MiB, of which ~100 MiB is
+  unreclaimable vendor-driver slab. journald is capped (`RuntimeMaxUse=16M`).
+
+### 19. systemd ordering pitfall
+* A unit `Before=ssh.socket` that keeps default dependencies is ordered after `basic.target`, while `ssh.socket` is
+  before `sockets.target` (before `basic.target`). systemd silently drops `ssh.socket` from the boot transaction and SSH
+  never starts. Units that must run before sockets need `DefaultDependencies=no`.
+
+### 20. Diagnosing early power cuts
+* The initramfs log loop ends at `switch_root` and journald flushes only after local filesystems are up, so a power cut in
+  the first seconds of systemd leaves no log. `mu300-early-recorder.service` keeps writing `dmesg` to the boot_b log area
+  for the first five minutes.

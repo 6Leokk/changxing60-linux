@@ -1,0 +1,15 @@
+[Unit]
+Description=MU300 Wi-Fi hotspot (hostapd + DHCP on wlan0)
+After=mu300-wifi.service
+Requires=mu300-wifi.service
+# hostapd owns wlan0 in AP mode
+Conflicts=wpa_supplicant.service
+
+[Service]
+ExecStart=/opt/mu300/bin/hotspot-start
+ExecStopPost=/opt/mu300/bin/hotspot-stop
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

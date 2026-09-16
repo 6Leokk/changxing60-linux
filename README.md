@@ -28,8 +28,14 @@ Wi-Fi on the ZTE F50 5G mobile hotspot (hardware MU300, Unisoc T760 / UMS9620). 
 | Wi-Fi (SC2355 / Marlin3) | ✅ station scan and access-point mode (`hostapd` AP-ENABLED) |
 | Mobile data (5G NSA/LTE) | ✅ AT commands + `sipa_eth0`, about 75 Mbit/s down / 10 Mbit/s up measured |
 | Internet sharing to USB (NAT) | ✅ host behind `usb0` reaches the internet through the modem |
+| Wi-Fi hotspot out of the box | ✅ hostapd on `wlan0` (192.168.78.0/24), SSID/password imported from Android or generated |
+| Modem NV persistence (`cp_diskserver`), `refnotify` | ✅ Android daemons in the chroot |
+| Thermal throttling, status LEDs, SIM tray, DVFS drivers | ✅ `mu300-extra-modules` (blue LED = mobile data up) |
 | Default boot to Linux with automatic fallback | ✅ `mu300-next-boot linux\|android`; a Linux boot that never completes rolls back to Android |
-| OpenWrt rootfs | ⏳ planned |
+| OpenWrt rootfs (selectable next to Ubuntu) | ⏳ in progress |
+| Internal audio (UMP9620 codec + AW883xx amplifier, disabled by ZTE) | ⏳ planned |
+| Bluetooth (SC2355) | ⏳ planned |
+| GPU (Mali) | ✗ no display; driver source and Linux userspace unavailable |
 
 ## How it works
 
@@ -137,6 +143,9 @@ sudo mu300-next-boot linux     # every successful boot re-arms slot b (mu300-boo
 sudo mu300-next-boot android   # next reboot goes to Android and stays there
 sudo mu300-next-boot status
 ```
+Hotspot settings live in `/etc/mu300/hotspot.conf` (`SSID=`, `PSK=`, `CHANNEL=`, `COUNTRY=`); `tools/android-import-hotspot.sh`
+copies the current Android hotspot into it before the first boot, otherwise a random password is generated and shown at login.
+
 From Android, `boot/android-boot-linux.sh boot-linux-slotb.img` boots the image already on `boot_b` again without reflashing.
 If Linux ever fails before `mu300-boot-ok` runs, LK sees `tries_remaining=1` on the next boot and falls back to Android.
 

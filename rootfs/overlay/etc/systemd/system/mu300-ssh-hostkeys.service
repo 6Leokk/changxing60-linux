@@ -1,6 +1,10 @@
 [Unit]
 Description=Generate unique SSH host keys on first boot
-Before=ssh.service ssh.socket
+# no default dependencies: ssh.socket is ordered before sockets.target, which comes before basic.target,
+# so a normal service ordered Before=ssh.socket would create an ordering cycle and systemd drops ssh.socket
+DefaultDependencies=no
+After=local-fs.target
+Before=sockets.target ssh.socket ssh.service
 ConditionPathExists=!/etc/ssh/ssh_host_ed25519_key
 
 [Service]
@@ -8,4 +12,4 @@ Type=oneshot
 ExecStart=/usr/bin/ssh-keygen -A
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=sysinit.target
