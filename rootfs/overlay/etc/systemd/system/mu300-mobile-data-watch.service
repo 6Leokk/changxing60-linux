@@ -1,0 +1,13 @@
+[Unit]
+Description=MU300 mobile data watchdog (reconnect after modem resets)
+After=mu300-mobile-data.service
+Wants=mu300-mobile-data.service
+
+[Service]
+Type=simple
+ExecStart=/opt/mu300/bin/mobile-data watch
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

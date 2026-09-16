@@ -27,7 +27,7 @@ Wi-Fi on the ZTE F50 5G mobile hotspot (hardware MU300, Unisoc T760 / UMS9620). 
 | Modem firmware boot (`Modem Alive`) | ✅ |
 | Wi-Fi (SC2355 / Marlin3) | ✅ station scan and access-point mode (`hostapd` AP-ENABLED) |
 | Mobile data (5G NSA/LTE) | ✅ AT commands + `sipa_eth0`, about 75 Mbit/s down / 10 Mbit/s up measured |
-| Internet sharing to USB (NAT) | ✅ host behind `usb0` reaches the internet through the modem |
+| Internet sharing to USB (NAT) | ✅ host behind `usb0` reaches the internet through the modem; a watchdog reconnects after modem resets |
 | Wi-Fi hotspot out of the box | ✅ hostapd on `wlan0` bridged with USB into one LAN (192.168.77.0/24); SSID/password imported from Android or generated; `BAND=5` (802.11ac, 80 MHz, channels 36-48/149-165) or `BAND=2.4`; one band at a time |
 | Modem NV persistence (`cp_diskserver`), `refnotify` | ✅ Android daemons in the chroot |
 | Thermal throttling, status LEDs, SIM tray, DVFS drivers | ✅ `mu300-extra-modules` (blue LED = mobile data up) |
@@ -142,7 +142,7 @@ Push `mu300-ubuntu-26.04-rootfs.tar.gz` to the device and extract it with `tools
 boot/flash-trial.sh boot-linux-slotb.img
 ```
 After about 50 s: `ssh ubuntu@192.168.77.1` (password `ubuntu`, **change it**), `telnet 192.168.77.1`, or
-`screen /dev/cu.usbmodem* 115200`. `sudo /opt/mu300/bin/mobile-data status|up [APN]|down|sim-reset` controls the modem. `sudo reboot` returns to Android. If a trial fails, collect logs from Android with
+`screen /dev/cu.usbmodem* 115200`. `sudo /opt/mu300/bin/mobile-data status|up [APN]|down|sim-reset` controls the modem (`mu300-mobile-data-watch` reconnects automatically unless you ran `down`). `sudo reboot` returns to Android. If a trial fails, collect logs from Android with
 `tools/collect-logs.sh`.
 
 Make Linux the default (inside Linux):

@@ -251,6 +251,15 @@ average. `top` shows about 98 % idle.
 * The stock driver prints the SoftAP passphrase to the kernel log (`vendor_softap_convert_para`); Android `dmesg`
   captures contain it.
 
+### 26. Modem resets and mobile data recovery
+* The modem firmware occasionally resets: it sends an smsg (type 12, "channel 0 not opened" on the AP side),
+  `sipa_delegate: modem_reset`, and `modem_control` stops and reloads the modem through Trusty. It comes back with
+  `+CFUN: 0`, no registration and no PDP context, while `sipa_eth0` keeps its stale address, so clients lose internet.
+  Android's RIL reconnects silently.
+* `mobile-data watch` (`mu300-mobile-data-watch.service`) checks `AT+CGACT?` and the interface address every 30 s and
+  runs `up` again after two failed checks; `mobile-data down` sets `/run/mu300-mobile-data-down` so a manual disconnect
+  is respected. Verified by switching the radio off: data returned without intervention.
+
 ## Audio
 
 ### 24. No internal audio hardware
