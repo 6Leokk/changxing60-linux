@@ -231,11 +231,25 @@ average. `top` shows about 98 % idle.
   signed by a different certificate and is rejected too. `kernel/patches/regdb-wens-certificate.patch` adds mainline's
   `wens.hex`. cfg80211 tries to load the database before the rootfs is mounted, so userspace runs `iw reg reload` first.
 
-### 23. Only one AP, and 5 GHz AP is refused
+### 23. Only one AP; 5 GHz AP needs the DS Parameter Set element
 * `iw list`: `#{ managed, AP } <= 1` — only one AP interface, so 2.4 and 5 GHz cannot be served simultaneously.
-* With country TR, hostapd brings up channel 36/40 (with or without 802.11ac) and prints `AP-ENABLED`, but the firmware
-  answers `CMD_START_AP` with `SPRD_CMD_STATUS_NOT_SUPPORT_ERROR` and no beacons are sent. `hotspot-verify` checks the
-  firmware response and restarts the hotspot on 2.4 GHz. How Android enables 5 GHz SoftAP is still open.
+* Symptom: with hostapd on channel 36 the firmware answered `CMD_START_AP` with `SPRD_CMD_STATUS_NOT_SUPPORT_ERROR`
+  (HT/VHT), or accepted it and never sent beacons (non-HT), for every country, channel, rate set and HT/VHT/PMF setting
+  tried. Android's SoftAP on the same firmware runs on 5180 MHz with 80 MHz.
+* Stock (ZTE) and realme `sc2355_start_ap` are identical, so the command payload was captured on Android with a kprobe
+  on `sc2355_send_cmd_recv_rsp` (`msg->data` at +24, command id at data-11). Android's beacon contains a DS Parameter Set
+  element (`03 01 24`) on 5 GHz — Unisoc's hostapd adds it — while upstream hostapd only adds it on 2.4 GHz. The
+  firmware takes the AP channel from that element.
+* `kernel/patches/wlan_combo-5ghz-ap-ds-params.patch` inserts the element when hostapd omits it. Verified: 802.11a/n/ac
+  AP on channel 36 at 80 MHz (seen by a client, disappears when hostapd stops). The firmware offers 5 GHz AP only on
+  36-48 and 149-165 (its ACS channel list); `hotspot-start` uses HT40/VHT80 there, and `hotspot-verify` still falls back
+  to 2.4 GHz if the firmware refuses.
+* The wiphy rate table lists HT MCS rates as legacy bitrates, so hostapd advertises odd "extended rates" (some with the
+  basic-rate bit); Android does the same and the firmware ignores them.
+* hostapd's 20/40 MHz coexistence scan (`HT_SCAN`) completes on this driver; the log line after it can lag because
+  hostapd's stdout is block-buffered.
+* The stock driver prints the SoftAP passphrase to the kernel log (`vendor_softap_convert_para`); Android `dmesg`
+  captures contain it.
 
 ## Audio
 

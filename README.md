@@ -28,7 +28,7 @@ Wi-Fi on the ZTE F50 5G mobile hotspot (hardware MU300, Unisoc T760 / UMS9620). 
 | Wi-Fi (SC2355 / Marlin3) | ✅ station scan and access-point mode (`hostapd` AP-ENABLED) |
 | Mobile data (5G NSA/LTE) | ✅ AT commands + `sipa_eth0`, about 75 Mbit/s down / 10 Mbit/s up measured |
 | Internet sharing to USB (NAT) | ✅ host behind `usb0` reaches the internet through the modem |
-| Wi-Fi hotspot out of the box | ✅ hostapd on `wlan0` bridged with USB into one LAN (192.168.77.0/24); SSID/password imported from Android or generated; `BAND=2.4` (5 GHz AP is currently rejected by the Wi-Fi firmware and falls back to 2.4 GHz automatically) |
+| Wi-Fi hotspot out of the box | ✅ hostapd on `wlan0` bridged with USB into one LAN (192.168.77.0/24); SSID/password imported from Android or generated; `BAND=5` (802.11ac, 80 MHz, channels 36-48/149-165) or `BAND=2.4`; one band at a time |
 | Modem NV persistence (`cp_diskserver`), `refnotify` | ✅ Android daemons in the chroot |
 | Thermal throttling, status LEDs, SIM tray, DVFS drivers | ✅ `mu300-extra-modules` (blue LED = mobile data up) |
 | Default boot to Linux with automatic fallback | ✅ `mu300-next-boot linux\|android`; a Linux boot that never completes rolls back to Android |
@@ -151,7 +151,7 @@ sudo mu300-next-boot linux     # every successful boot re-arms slot b (mu300-boo
 sudo mu300-next-boot android   # next reboot goes to Android and stays there
 sudo mu300-next-boot status
 ```
-Hotspot settings live in `/etc/mu300/hotspot.conf` (`SSID=`, `PSK=`, `CHANNEL=`, `COUNTRY=`); `tools/android-import-hotspot.sh`
+Hotspot settings live in `/etc/mu300/hotspot.conf` (`SSID=`, `PSK=`, `BAND=5|2.4`, `CHANNEL=auto|n`, `COUNTRY=`); `tools/android-import-hotspot.sh`
 copies the current Android hotspot into it before the first boot, otherwise a random password is generated and shown at login.
 
 From Android, `boot/android-boot-linux.sh boot-linux-slotb.img` boots the image already on `boot_b` again without reflashing.
