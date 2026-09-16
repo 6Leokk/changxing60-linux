@@ -127,3 +127,8 @@ CONFIG_IKHEADERS=m
 # --- USB gadget serial console (CDC-ACM) for recovery access over USB
 CONFIG_USB_CONFIGFS_ACM=y
 CONFIG_USB_F_ACM=y
+
+# --- userspace hardware access and regulatory
+CONFIG_I2C_CHARDEV=m
+CONFIG_SPI_SPIDEV=m
+CONFIG_ZTE_AW883XX_SMART_PA=m

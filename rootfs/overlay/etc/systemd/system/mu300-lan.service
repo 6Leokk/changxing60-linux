@@ -1,10 +1,10 @@
 [Unit]
-Description=MU300 USB Ethernet (usb0 192.168.77.1 + DHCP)
+Description=MU300 LAN bridge br-lan (USB + Wi-Fi, 192.168.77.1/24, DHCP/DNS)
 After=network-pre.target
 Wants=network-pre.target
 
 [Service]
-ExecStart=/opt/mu300/bin/usb-net-start
+ExecStart=/opt/mu300/bin/lan-start
 Restart=always
 RestartSec=3
 

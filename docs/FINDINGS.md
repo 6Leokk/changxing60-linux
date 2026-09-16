@@ -214,3 +214,32 @@ average. `top` shows about 98 % idle.
 * The initramfs log loop ends at `switch_root` and journald flushes only after local filesystems are up, so a power cut in
   the first seconds of systemd leaves no log. `mu300-early-recorder.service` keeps writing `dmesg` to the boot_b log area
   for the first five minutes.
+
+## LAN, Wi-Fi bands and regulatory
+
+### 21. One LAN for USB and Wi-Fi
+* `br-lan` (192.168.77.1/24) bridges `usb0` and `wlan0`; one dnsmasq serves both.
+* cfg80211 refuses to bridge `wlan0` ("Device does not allow enslaving to a bridge") because `IFF_DONT_BRIDGE` stays set:
+  the SC2355 driver marks the interface as AP but returns an error from `change_virtual_intf` when tearing down the
+  previous firmware mode fails, so cfg80211 skips clearing the flag. `kernel/patches/wlan_combo-allow-bridging-ap.patch`.
+* After moving modules, delete old copies: `depmod` indexes every subdirectory and `modprobe` loaded stale drivers from
+  an `extra.old/` directory for several boots.
+
+### 22. Regulatory database
+* This 5.4 kernel only has the `sforshee` regdb certificate; current `wireless-regdb` is signed by `wens`, so
+  `iw reg reload` fails with `-ENODATA`, the domain stays `00` and 5 GHz is `NO-IR`. Android's own `regulatory.db` is
+  signed by a different certificate and is rejected too. `kernel/patches/regdb-wens-certificate.patch` adds mainline's
+  `wens.hex`. cfg80211 tries to load the database before the rootfs is mounted, so userspace runs `iw reg reload` first.
+
+### 23. Only one AP, and 5 GHz AP is refused
+* `iw list`: `#{ managed, AP } <= 1` — only one AP interface, so 2.4 and 5 GHz cannot be served simultaneously.
+* With country TR, hostapd brings up channel 36/40 (with or without 802.11ac) and prints `AP-ENABLED`, but the firmware
+  answers `CMD_START_AP` with `SPRD_CMD_STATUS_NOT_SUPPORT_ERROR` and no beacons are sent. `hotspot-verify` checks the
+  firmware response and restarts the hotspot on 2.4 GHz. How Android enables 5 GHz SoftAP is still open.
+
+## Audio
+
+### 24. No internal audio hardware
+* The DT enables a sound card, the UMP9620 codec and an AW883xx amplifier at `6-0034`, and Android disables audio.
+  With `i2c-dev`, nothing answers at 0x34 (nor at the bq2560x address 0x6b), and there is no AGDSP firmware partition.
+  The board has no speaker path; only Bluetooth or USB-host audio devices are possible.

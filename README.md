@@ -28,13 +28,13 @@ Wi-Fi on the ZTE F50 5G mobile hotspot (hardware MU300, Unisoc T760 / UMS9620). 
 | Wi-Fi (SC2355 / Marlin3) | ✅ station scan and access-point mode (`hostapd` AP-ENABLED) |
 | Mobile data (5G NSA/LTE) | ✅ AT commands + `sipa_eth0`, about 75 Mbit/s down / 10 Mbit/s up measured |
 | Internet sharing to USB (NAT) | ✅ host behind `usb0` reaches the internet through the modem |
-| Wi-Fi hotspot out of the box | ✅ hostapd on `wlan0` (192.168.78.0/24), SSID/password imported from Android or generated |
+| Wi-Fi hotspot out of the box | ✅ hostapd on `wlan0` bridged with USB into one LAN (192.168.77.0/24); SSID/password imported from Android or generated; `BAND=2.4` (5 GHz AP is currently rejected by the Wi-Fi firmware and falls back to 2.4 GHz automatically) |
 | Modem NV persistence (`cp_diskserver`), `refnotify` | ✅ Android daemons in the chroot |
 | Thermal throttling, status LEDs, SIM tray, DVFS drivers | ✅ `mu300-extra-modules` (blue LED = mobile data up) |
 | Default boot to Linux with automatic fallback | ✅ `mu300-next-boot linux\|android`; a Linux boot that never completes rolls back to Android |
 | OpenWrt rootfs (selectable next to Ubuntu) | ⏳ in progress |
-| Internal audio (UMP9620 codec + AW883xx amplifier, disabled by ZTE) | ⏳ planned |
-| Bluetooth (SC2355) | ⏳ planned |
+| Internal audio | ✗ not populated: the AW883xx amplifier (and charger IC) do not answer on I2C, and there is no audio DSP firmware partition |
+| Bluetooth (SC2355) | 🔧 `sprdbt_tty` (PCIe) built, `hci0` attaches and answers HCI; bring-up (vendor PSKey init) in progress |
 | GPU (Mali) | ✗ no display; driver source and Linux userspace unavailable |
 
 ## How it works
@@ -48,7 +48,7 @@ LK (slot b, tries=2) ─► custom 5.4 kernel + vendor_boot DTB
          ├─ losetup -o 27762098176 /dev/mmcblk0 → ext4 "mu300root" (free space after userdata)
          └─ switch_root → systemd
                ├─ mu300-vendor   : Android modem_control in a chroot (disarms PM watchdog, boots modem)
-               ├─ mu300-usb-net  : usb0 192.168.77.1 + dnsmasq DHCP
+               ├─ mu300-lan      : br-lan (usb0 + wlan0) 192.168.77.1 + dnsmasq DHCP/DNS
                ├─ mu300-wifi     : pcie-sprd, wcn_bsp, sprd_wlan_combo
                ├─ mu300-mobile-data : AT on /dev/stty_nr1, sipa_eth0, nftables NAT
                └─ ssh.socket, telnetd, serial-getty@ttyGS0
