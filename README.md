@@ -107,6 +107,10 @@ installation: `mu300-os ubuntu|openwrt` switches systems, `mu300-next-boot andro
 data and USB sharing are configured on first boot and stay editable (`/etc/mu300/hotspot.conf` on Ubuntu, UCI/LuCI on
 OpenWrt). `MU300_REUSE_BUILD=1` reuses the root filesystems built by a previous run.
 
+**Never flash OpenWrt firmware images or use sysupgrade on this device** (they target generic arm64 disks and would
+overwrite the eMMC); the installed OpenWrt blocks it. Updating packages with `apk upgrade` is fine, except `kernel`/`kmod-*`
+(this device runs its own 5.4 kernel).
+
 ## Build and run
 
 ### 1. Kernel
