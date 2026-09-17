@@ -1,4 +1,7 @@
 [Unit]
+# the vendor modem loader exists only in the 5.4 kernel
+ConditionPathExists=|/dev/modem
+ConditionPathExists=|/dev/pmsys
 Description=MU300 mobile data (AT + sipa_eth0) with NAT for USB/Wi-Fi clients
 After=mu300-vendor.service mu300-usb-net.service systemd-resolved.service
 Wants=mu300-vendor.service
