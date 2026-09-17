@@ -81,6 +81,7 @@ musb_hdrc.ko
 sprd_usbm.ko
 phy-sprd-qogirn6pro.ko
 phy-sprd-usb31-qogirn6pro.ko
+phy-sprd-dummy.ko
 sprd-pamu3.ko
 sc27xx_typec.ko
 dwc3-sprd.ko
