@@ -293,6 +293,15 @@ if [ -e /dev/ttyGS0 ]; then
 else
     log "stage=ttyGS0-console missing"
 fi
+# Trial-7 forensics (E23 hunt): Windows bound UsbNcm (usbncm.inf, Service=UsbNcm, no
+# ProblemCode) and NetworkProfile saw media-connect, but no Dhcp-Client events and the
+# network fell to "unidentified" — /run is tmpfs so lease/RX evidence died at rollback.
+# Log the L2/L3 truth into the persist buffer every 5s: RX/TX counters answer "did host
+# packets reach usb0 at all", leases answer "did udhcpd offer anything".
+( while :; do
+    sleep 5
+    log "stage=usb0-stats $(awk '/usb0/{print "rx",$2,$3,"tx",$10,$11}' /proc/net/dev 2>/dev/null) leases=[$(tr '\n' ';' < /run/udhcpd.leases 2>/dev/null)] arp=[$(tail -n +2 /proc/net/arp 2>/dev/null | tr '\n' ';')]"
+  done ) &
 log "stage=ready"
 
 # Android vendor services in a chroot. modem_control reloads pm_sys through Trusty; only then
