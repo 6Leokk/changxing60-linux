@@ -84,6 +84,29 @@ Related: the kernel source used here is mirrored at
 * macOS or Linux host with Docker (arm64 native or emulation), Python 3, `lz4`, `adb`.
 * Your own dumps: `boot_a.img` and the first 4 KiB of `misc` (`dd if=/dev/block/by-name/misc bs=4096 count=1`).
 
+## Quick install
+
+With the kernel built (step 1 below; outputs in `out/`: `Image`, `modules/`, `modules.builtin*`), the device in rooted
+Android and Docker running:
+
+```sh
+./install.sh
+```
+
+The installer
+* checks the device and finds the unpartitioned eMMC space after the last partition (or the existing `mu300root` ext4),
+* asks which systems to install (Ubuntu, OpenWrt or both), which one boots, whether Linux is the default boot, whether to
+  copy Android's hotspot name/password and whether to include the GPU userspace, and asks for a password
+  (`ubuntu` user on Ubuntu, `root` on OpenWrt),
+* pulls the vendor files it needs from the device into `work/` (never into the repository), builds both root filesystems
+  and the boot image, and shows a summary that must be confirmed with `INSTALL`,
+* unpacks the systems to `/ubuntu` and `/openwrt` on the Linux filesystem, writes `boot_b` and arms slot b, and reboots.
+
+Only the Linux region, `boot_b` and 32 bytes of `misc` are written; `boot_a`, the GPT and `userdata` stay untouched. After
+installation: `mu300-os ubuntu|openwrt` switches systems, `mu300-next-boot android` returns to Android. Hotspot, cellular
+data and USB sharing are configured on first boot and stay editable (`/etc/mu300/hotspot.conf` on Ubuntu, UCI/LuCI on
+OpenWrt). `MU300_REUSE_BUILD=1` reuses the root filesystems built by a previous run.
+
 ## Build and run
 
 ### 1. Kernel

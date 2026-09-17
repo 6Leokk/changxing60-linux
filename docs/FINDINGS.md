@@ -317,6 +317,15 @@ average. `top` shows about 98 % idle.
   boot_b for `tools/collect-logs.sh`.
 
 
+### 30. Installer notes
+* Android's `/system/bin/sh` (mksh) does 32-bit arithmetic: byte offsets of the Linux region (27 GiB) overflow, so the
+  device script works in sectors. mksh also lets a failing EXIT trap replace the exit status; the installer checks for an
+  explicit success line instead.
+* `adb shell`/`exec-out` read stdin and swallow answers piped into a script; every call uses `</dev/null`.
+* Android restarts once shortly after booting back from a Linux fallback; start the installer when Android has settled.
+* A first-generation install (Ubuntu directly in the filesystem root) is replaced by `/ubuntu`; `init` still boots the
+  old layout if no `/ubuntu` exists.
+
 ## Audio
 
 ### 24. No internal audio hardware

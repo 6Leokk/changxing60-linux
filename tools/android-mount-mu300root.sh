@@ -2,8 +2,9 @@
 # Attach the mu300root ext4 (free eMMC region) on Android via a bounded loop device and mount it.
 # usage: android-mount-mu300root.sh <mountpoint>   |   android-mount-mu300root.sh -u <mountpoint>
 set -e
-OFF=27762098176
-SIZE=34776023040
+# region of the free eMMC space after the last GPT partition (install.sh passes the values it computed)
+OFF=${MU300_OFF:-27762098176}
+SIZE=${MU300_SIZE:-34776023040}
 if [ "$1" = -u ]; then
     L=$(grep " $2 " /proc/mounts | cut -d' ' -f1)
     umount "$2"; [ -n "$L" ] && losetup -d "$L"; echo UNMOUNTED; exit 0
