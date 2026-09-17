@@ -1,0 +1,19 @@
+#!/bin/sh
+# Mainline bring-up probe: log what the kernel sees, keep it in pstore (ramoops), warm reboot so Android can read it.
+/bin/busybox mkdir -p /proc /sys /dev /tmp
+/bin/busybox mount -t proc proc /proc
+/bin/busybox mount -t sysfs sysfs /sys
+/bin/busybox mount -t devtmpfs devtmpfs /dev 2>/dev/null
+/bin/busybox --install -s /bin
+log() { echo "MU300-MAINLINE: $*" > /dev/kmsg; }
+log "userspace up: $(uname -a)"
+log "cpus online: $(cat /sys/devices/system/cpu/online) possible: $(cat /sys/devices/system/cpu/possible)"
+log "mem: $(grep -E 'MemTotal|MemFree' /proc/meminfo | tr -s ' ' | tr '\n' ' ')"
+log "cmdline: $(cat /proc/cmdline)"
+log "platform devices: $(ls /sys/bus/platform/devices | tr '\n' ' ')"
+log "drivers bound: $(ls /sys/bus/platform/drivers/*/ 2>/dev/null | grep -c @)"
+log "interrupts: $(head -3 /proc/interrupts | tr -s ' ' | tr '\n' '|')"
+log "pstore: $(ls /sys/fs/pstore 2>&1)"
+for c in 1 2 3 4; do log "uptime $(cut -d' ' -f1 /proc/uptime) load $(cut -d' ' -f1-3 /proc/loadavg)"; sleep 5; done
+log "rebooting (warm) so the console log survives in ramoops"
+echo b > /proc/sysrq-trigger
