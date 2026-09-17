@@ -137,18 +137,30 @@ ifconfig lo 127.0.0.1 up
 log "stage=usb-configfs"
 mount -t configfs configfs /config
 g=/config/usb_gadget/linux
-mkdir -p "$g/strings/0x409" "$g/configs/c.1/strings/0x409" "$g/functions/ecm.usb0"
+mkdir -p "$g/strings/0x409" "$g/configs/c.1/strings/0x409"
+# 7552n-port (E20): ZTE stock kernel config had NO ECM/RNDIS/NCM gadget function, so
+# trial-4 bound an empty gadget (host enumerated it, no usb0 ever existed). This build
+# enables all three; pick the first one configfs actually exposes. rndis first: the
+# rescue host is Windows (rndismp6/usb8023* present, no usbncm.sys, never ECM);
+# ncm/ecm for Linux/macOS hosts. All create their netdev as usb0 (first bound).
+netfn=
+for cand in rndis ncm ecm; do
+    mkdir "$g/functions/$cand.usb0" 2>/dev/null && { netfn=$cand; break; }
+done
 echo 0x0525 > "$g/idVendor"
 echo 0xa4a1 > "$g/idProduct"
 echo 0x0200 > "$g/bcdUSB"
 echo MU300LINUX > "$g/strings/0x409/serialnumber"
 echo Linux > "$g/strings/0x409/manufacturer"
 echo "MU300 Linux USB Ethernet" > "$g/strings/0x409/product"
-echo "Linux ECM + ACM console" > "$g/configs/c.1/strings/0x409/configuration"
+echo "Linux NET + ACM console" > "$g/configs/c.1/strings/0x409/configuration"
 echo 250 > "$g/configs/c.1/MaxPower"
-echo 02:50:00:00:77:01 > "$g/functions/ecm.usb0/dev_addr"
-echo 02:50:00:00:77:02 > "$g/functions/ecm.usb0/host_addr"
-ln -s "$g/functions/ecm.usb0" "$g/configs/c.1/f1"
+if [ -n "$netfn" ]; then
+    echo 02:50:00:00:77:01 > "$g/functions/$netfn.usb0/dev_addr"
+    echo 02:50:00:00:77:02 > "$g/functions/$netfn.usb0/host_addr"
+    ln -s "$g/functions/$netfn.usb0" "$g/configs/c.1/f1"
+fi
+log "stage=usb-netfn ${netfn:-none}"
 # USB serial console alongside ECM: recovery/debug access that does not depend on networking
 mkdir -p "$g/functions/acm.GS0" && ln -s "$g/functions/acm.GS0" "$g/configs/c.1/f2"
 log "stage=usb-wait-udc"
@@ -167,10 +179,14 @@ log "stage=usb-bind-start"
 log "stage=usb-bind-done rc=$?"
 persist
 
-# Bring usb0 up immediately after binding, before the host selects the ECM data interface:
+# Bring usb0 up immediately after binding, before the host selects the data interface:
 # f_ecm reports the link state in its first CONNECT notification, and macOS' ECM driver does not
 # pick up a later "connected" notification (v10 left usb0 down until systemd ran -> host "inactive").
+# 7552n-port: the netdev appears synchronously during the UDC write (composite bind); wait
+# briefly anyway and log the netdev list (E20 debug: an empty gadget leaves no usb0).
+for n in $(seq 1 10); do [ -e /sys/class/net/usb0 ] && break; sleep 1; done
 ifconfig usb0 up
+log "stage=usb0-netdevs $(ls /sys/class/net | tr '\n' ',')"
 ROOT_OFFSET=77858865152   # 7552N: mu300root region after the shrunk userdata (design S3.2);
                           # before Phase 3 repartition this offset is inside f2fs userdata, the
                           # ext4 magic check fails and init takes the rescue path (by design).

@@ -130,6 +130,19 @@ CONFIG_IKHEADERS=m
 CONFIG_USB_CONFIGFS_ACM=y
 CONFIG_USB_F_ACM=y
 
+# --- USB gadget network functions (7552n-port E20: ZTE stock config has NO ECM/RNDIS/NCM,
+# trial-4 bound an empty gadget -> host enumerated + configured it but no usb0 was ever
+# created -> no rescue network. init picks first available rndis->ncm->ecm:
+# the Windows rescue host has only RNDIS drivers (rndismp6/usb8023*, no usbncm.sys,
+# never ECM); Linux/macOS hosts use ECM or NCM.
+CONFIG_USB_CONFIGFS_RNDIS=y
+CONFIG_USB_F_RNDIS=y
+CONFIG_USB_CONFIGFS_NCM=y
+CONFIG_USB_F_NCM=y
+CONFIG_USB_CONFIGFS_ECM=y
+CONFIG_USB_F_ECM=y
+CONFIG_USB_U_ETHER=y
+
 # --- userspace hardware access and regulatory
 CONFIG_I2C_CHARDEV=m
 CONFIG_SPI_SPIDEV=m
