@@ -60,4 +60,15 @@ Fixes needed on top of the port:
 - The stock DT has trip points only on the vendor virtual zone, so `/opt/mu300/bin/thermal-guard` caps cpufreq
   above 85 C and powers off above 105 C on kernels without SoC trip points.
 
-Not yet on mainline: modem (sipc/sipa/modem loader), Wi-Fi/BT (Marlin3 over PCIe), GPU, audio, LEDs.
+- Watchdog: the UMP9620 PMIC watchdog that LK arms is taken over (`ump9620-pmic-wdt`), 60 s, pinged by the
+  core until procd/systemd opens it; a hard hang resets the board back to Android.
+- LEDs: UMP9620 RGB status LEDs (vendor `sc27xx-bltc`).
+- PCIe: vendor `pcie-sprd` ported to the 6.18 DWC host API. `num-vectors` from the DT is honoured, the
+  Marlin3 driver needs a contiguous block of 32 MSIs.
+- Wi-Fi/BT (SC2355 Marlin3): `modules/` holds the vendor `wcn_bsp`, `sprd_wlan_combo` (SC2355 PCIe only) and
+  `sprdbt_tty` ported to 6.18 as out-of-tree modules (`build-modules.sh`; `tools/port54.py` does the mechanical
+  5.4 API changes, `wcn_bsp/kinclude/mu300_compat.h` the rest). On OpenWrt the chip boots its firmware and the
+  5 GHz VHT80 AP beacons. The factory Wi-Fi MAC is read from `androidboot.wifimac` in `/chosen/bootargs`.
+  The WCN modules cannot be unloaded and reloaded (same as on 5.4).
+
+Not yet on mainline: modem (sipc/sipa/modem loader), GPU, audio; Bluetooth is built but untested.
