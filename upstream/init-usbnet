@@ -32,5 +32,14 @@ if [ -n "$udc" ]; then
     (while :; do getty -L 115200 ttyGS0 vt100 2>/dev/null || sleep 5; done) &
     log "usb0: $(ifconfig usb0 | head -2 | tr -s ' ' | tr '\n' ' ')"
 fi
-log "state saved; staying up (the PM watchdog powers off after ~290 s)"
+# eMMC: attach the Linux region read-only and look at it (no writes during bring-up)
+for n in $(seq 1 15); do [ -b /dev/mmcblk0 ] && break; sleep 1; done
+log "mmc: $(cat /sys/block/mmcblk0/device/name 2>/dev/null) size $(cat /sys/block/mmcblk0/size 2>/dev/null) parts $(ls /sys/block/mmcblk0 | grep -c mmcblk0p)"
+log "mmc timing: $(cat /sys/kernel/debug/mmc0/ios 2>/dev/null | tr -s ' ' | tr '\n' ';')"
+mkdir -p /disk
+if [ -b /dev/mmcblk0 ]; then
+    loop=$(losetup -f) && losetup -r -o 27762098176 "$loop" /dev/mmcblk0 && mount -t ext4 -o ro "$loop" /disk \
+        && log "linux disk mounted read-only: $(ls /disk | tr '\n' ' ')"
+fi
+log "up; PMIC watchdog disabled by the kernel"
 while :; do sleep 60; done

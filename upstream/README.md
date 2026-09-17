@@ -39,3 +39,19 @@ boot/flash-trial.sh boot-mainline.img      # slot b only, falls back to Android
 No mainline drivers yet for UMS9620 clocks, pinctrl, power domains, USB (DWC3 glue + PHY), eMMC clocking, PCIe (Wi-Fi/BT),
 or the modem/PM (SIPC) stack. Without `modem_control` the PM co-processor powers the board off after ~290 s.
 Next: USB gadget (console/network) and eMMC, which need clock/PHY drivers ported from the vendor 5.4 tree.
+
+## Status (2026-09-17): OpenWrt runs on 6.18.52
+
+The installed OpenWrt 25.12.5 boots on the mainline kernel through the normal `boot/init`
+(multi-OS switch_root): SSH, LuCI, `br-lan` over the USB 3.1 gadget, fw4/nftables, zram.
+
+Fixes needed on top of the port:
+
+- `sdhci-sprd`: UMS9620 has the r11p3 controller; the vendor driver programs DLL phase `0x2`
+  (mainline `0x3`). With `0x3` reads work in HS400ES but every write fails with data CRC errors.
+- `sdhci-sprd`: only the non-removable eMMC is probed (the SD slot is unpopulated and floods the log).
+- UMP9620 PMIC watchdog, armed by LK for 300 s, is disabled by `ump9620-pmic-wdt-off`.
+- Userspace config: cgroups/namespaces/seccomp, bridge, nftables, IPv6, zram.
+
+Not yet on mainline: modem (sipc/sipa/modem loader), Wi-Fi/BT (WCN over PCIe/SDIO), GPU, audio,
+thermal/cpufreq.
