@@ -278,8 +278,20 @@ touch /run/udhcpd.leases
 udhcpd /etc/udhcpd.conf
 telnetd -b 192.168.77.1 -p 23 -l /bin/sh
 mkdir -p /run/www
-echo "MU300 standalone Linux v7 (NCM+ACM): telnet/http 192.168.77.1; serial console ttyGS0; auto reboot to Android after 300s unless /run/stay exists" > /run/www/index.html
-httpd -p 192.168.77.1:80 -h /run/www
+echo "MU300 standalone Linux v9 (NCM+ACM): telnet/http 192.168.77.1; serial console ttyGS0; auto reboot to Android after 300s unless /run/stay exists" > /run/www/index.html
+# E23: the boot-time daemonized httpd came up BOTH in trial-7 and trial-8 as a socketless
+# 100%-CPU spinner (fd table = 0,1,2 only, no listen socket, poll() busy-looping on
+# POLLNVAL; utime+stime == process lifetime), while telnetd/udhcpd started fine and the
+# identical httpd cmdline run manually from a shell bound instantly. Root cause unknown
+# (daemonize-path race in the init environment); bypass it: run httpd with -f (never
+# daemonizes) inside a respawn loop, plus a 5s listener watchdog that restarts telnetd or
+# kills+respawns httpd if :23/:80 stop LISTENing (state 0A in /proc/net/tcp).
+( while :; do httpd -f -p 192.168.77.1:80 -h /run/www 2>/dev/null; sleep 1; done ) &
+( while :; do
+    sleep 5
+    awk '$4=="0A" && $2 ~ /:0017$/{f=1} END{exit !f}' /proc/net/tcp 2>/dev/null || telnetd -b 192.168.77.1 -p 23 -l /bin/sh
+    awk '$4=="0A" && $2 ~ /:0050$/{f=1} END{exit !f}' /proc/net/tcp 2>/dev/null || { killall httpd 2>/dev/null; log "stage=httpd-watchdog-respawn"; }
+  done ) &
 # E22 fallback: ACM serial console. Trial-6 proved Windows binds usbser (COM15) and even
 # sends SET_LINE_CODING — recovery access that depends on no net function or net driver.
 # BusyBox has no getty; loop a raw shell on the gadget port (reopen when host disconnects).
@@ -300,7 +312,7 @@ fi
 # packets reach usb0 at all", leases answer "did udhcpd offer anything".
 ( while :; do
     sleep 5
-    log "stage=usb0-stats $(awk '/usb0/{print "rx",$2,$3,"tx",$10,$11}' /proc/net/dev 2>/dev/null) leases=[$(tr '\n' ';' < /run/udhcpd.leases 2>/dev/null)] arp=[$(tail -n +2 /proc/net/arp 2>/dev/null | tr '\n' ';')]"
+    log "stage=usb0-stats $(awk '$1=="usb0:"{print "rx",$2,$3,"tx",$10,$11}' /proc/net/dev 2>/dev/null) leases=[$(tr '\n' ';' < /run/udhcpd.leases 2>/dev/null)] arp=[$(tail -n +2 /proc/net/arp 2>/dev/null | tr '\n' ';')]"
   done ) &
 log "stage=ready"
 
