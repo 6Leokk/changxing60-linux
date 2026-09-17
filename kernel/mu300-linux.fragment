@@ -135,3 +135,21 @@ CONFIG_ZTE_AW883XX_SMART_PA=m
 
 # --- give unused reserved-memory back to Linux (no display, no bootloader sysdump)
 CONFIG_OF_RESERVED_MEM_SKIP="logobuffer,sysdump-uboot"
+
+# --- nftables features firewall4 (OpenWrt) and common tools need: sets/maps, flow offload, redirect, quota
+CONFIG_NF_TABLES_SET=y
+CONFIG_NFT_OBJREF=y
+CONFIG_NFT_REDIR=y
+CONFIG_NFT_QUOTA=y
+CONFIG_NFT_NUMGEN=y
+CONFIG_NFT_HASH=y
+CONFIG_NFT_CONNLIMIT=y
+CONFIG_NFT_SOCKET=y
+CONFIG_NFT_TPROXY=y
+CONFIG_NF_FLOW_TABLE=y
+CONFIG_NF_FLOW_TABLE_INET=y
+CONFIG_NFT_FLOW_OFFLOAD=y
+CONFIG_NFT_FIB_NETDEV=y
+CONFIG_NFT_FWD_NETDEV=y
+CONFIG_NFT_BRIDGE_META=y
+CONFIG_NFT_BRIDGE_REJECT=y
