@@ -19,3 +19,13 @@ Packages: `libdrm-tests labwc foot waybar swaybg wlr-randr xwayland fonts-dejavu
 
 The adapter must use DisplayPort alternate mode (not DisplayLink). It occupies the only USB-C port, so power the
 device through the adapter's PD input and use the Wi-Fi hotspot for SSH.
+
+## Status (2026-09-17): no image, USB-PD receives nothing
+
+- The DRM side works (`/dev/dri/card0`, connector `DP-1`), but DisplayPort alternate mode needs a USB-PD contract
+  and the PMIC PD PHY never reports a received message or RX interrupt: not from a dock, not from a PD charger, not
+  even with `sc27xx_pd` loaded from the initramfs 2.3 s after kernel start (inside the source's Source_Capabilities
+  window). ZTE ships this node disabled and Android never uses PD on this product.
+- `sc27xx_pd` is patched to find the AON APB syscon (26 MHz sine driver for the PD PHY) and to suppress hard resets:
+  the device has no battery and a PD source drops VBUS on hard reset. Leave the services disabled.
+- `mu300-pd-log.service`: appends Type-C/PD/DP kernel messages per boot, for tests on a dock/charger.

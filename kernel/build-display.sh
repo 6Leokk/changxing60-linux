@@ -44,6 +44,39 @@ s = s.replace('static const struct tcpc_config sc27xx_pd_config = {',
  'static const struct tcpc_config sc27xx_pd_config = {', 1)
 if '#include <linux/property.h>' not in s:
     s = s.replace('#include <linux/module.h>\n', '#include <linux/module.h>\n#include <linux/property.h>\n', 1)
+s = s.replace("""	} else {
+		pd->aon_apb = NULL;
+	}""", """	} else {
+		/* MU300: the pd@e00 node has no sprd,syscon-aon-apb; the PD PHY needs the AON 26M sine driver enabled */
+		struct device_node *aon = of_find_node_by_path("/soc/syscon@64900000");
+
+		pd->aon_apb = aon ? syscon_node_to_regmap(aon) : NULL;
+		of_node_put(aon);
+		if (IS_ERR(pd->aon_apb))
+			pd->aon_apb = NULL;
+		dev_info(pd->dev, "MU300: aon apb %s\\n", pd->aon_apb ? "from /soc/syscon@64900000" : "missing");
+	}""", 1)
+s = s.replace("""static int sc27xx_pd_send_hardreset(struct sc27xx_pd *pd)
+{
+	int ret, state;
+""", """/*
+ * MU300: the device has no battery. A hard reset makes a PD power source (dock, charger) drop VBUS, which powers the
+ * device off. Until PD messaging is verified, only log hard resets (TCPM then falls back to Type-C current).
+ */
+static bool mu300_allow_hard_reset;
+module_param(mu300_allow_hard_reset, bool, 0644);
+
+static int sc27xx_pd_send_hardreset(struct sc27xx_pd *pd)
+{
+	int ret, state;
+
+	if (!mu300_allow_hard_reset) {
+		dev_warn(pd->dev, "MU300: hard reset suppressed (no battery)\\n");
+		return 0;
+	}
+""", 1)
+assert 'mu300_allow_hard_reset' in s
+assert 'syscon@64900000' in s
 assert 'mu300_connector_props' in s and 'fwnode_create_software_node' in s
 open(p, 'w').write(s)
 PY
