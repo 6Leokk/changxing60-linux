@@ -12,7 +12,10 @@ if ! [ -s /dev/__properties__/property_info ]; then
     mkdir -p /dev/__properties__
     mount --bind $A/dev-properties /dev/__properties__
 fi
-for u in /sys/class/block/mmcblk0p*/uevent; do
+# 7552N port (B8): scan ALL block uevents, not just mmcblk0p* (UFS = sda/sdaN); PARTNAME filter
+# skips disks/loops without partition names, so this stays correct on F50's eMMC too
+for u in /sys/class/block/*/uevent; do
+    [ -r "$u" ] || continue
     d=$(basename "$(dirname "$u")")
     n=$(sed -n 's/^PARTNAME=//p' "$u")
     ln -sfn /dev/$d /dev/block/$d

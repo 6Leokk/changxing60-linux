@@ -16,13 +16,17 @@ M=$T/mu300root
 say() { echo "[device] $*"; }
 
 # --- the region must not overlap any partition (checked again here, on the device itself)
+# 7552N (B4): UFS disk is /dev/block/sda (LBA=4096), but sysfs start/size are always 512B-based;
+# mksh 32-bit arithmetic stays safe: OFF_S+SIZE_S = 249913344 < 2^31.
 end=0
-for p in /sys/block/mmcblk0/mmcblk0p*; do
+for p in /sys/block/sda/sda*; do
+    [ -f "$p/start" ] || continue
     e=$(( $(cat $p/start) + $(cat $p/size) ))
     [ $e -gt $end ] && end=$e
 done
-disk=$(cat /sys/block/mmcblk0/size)
-[ "$OFF_S" -ge $end ] && [ $((OFF_S + SIZE_S)) -le $((disk - 34)) ] || { say "region overlaps partitions or the backup GPT"; exit 1; }
+disk=$(cat /sys/block/sda/size)
+# backup GPT on this disk = 5 LBAs of 4096B = 40 x 512B sectors (F50's -34 assumed 512B LBAs)
+[ "$OFF_S" -ge $end ] && [ $((OFF_S + SIZE_S)) -le $((disk - 40)) ] || { say "region overlaps partitions or the backup GPT (end=$end disk=$disk)"; exit 1; }
 
 attach() {
     for o in /sys/block/loop*/loop/offset; do
@@ -31,11 +35,11 @@ attach() {
     f=$(losetup -f 2>&1 | grep -o '/dev/block/loop[0-9]*' | head -1); n=${f##*loop}
     L=/dev/block/loop$n
     [ -b "$L" ] || mknod "$L" b $(cut -d: -f1 /sys/block/loop$n/dev) $(cut -d: -f2 /sys/block/loop$n/dev) 2>/dev/null || [ -b "$L" ]
-    losetup -o $OFF -S $SIZE "$L" /dev/block/mmcblk0
+    losetup -o $OFF -S $SIZE "$L" /dev/block/sda
     [ "$(cat /sys/block/loop$n/loop/offset)" = "$OFF" ] && [ "$(blockdev --getsize64 $L)" = "$SIZE" ] || { losetup -d $L; say "loop setup mismatch"; exit 1; }
 }
 
-sb() { dd if=/dev/block/mmcblk0 bs=512 skip=$OFF_S count=4 2>/dev/null | dd bs=1 skip=$1 count=$2 2>/dev/null; }
+sb() { dd if=/dev/block/sda bs=512 skip=$OFF_S count=4 2>/dev/null | dd bs=1 skip=$1 count=$2 2>/dev/null; }
 magic=$(sb 1080 2 | od -An -tx1 | tr -d ' \n')
 label=$(sb 1144 16 | tr -d '\000')
 if [ "$FORMAT" = 1 ]; then

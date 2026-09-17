@@ -28,28 +28,31 @@ adb get-state </dev/null >/dev/null 2>&1 || die "no adb device (boot Android, en
 [ "$(su_do 'id -u')" = 0 ] || die "su does not work on the device"
 model="$(su_do 'getprop ro.product.model') / $(su_do 'getprop ro.product.device')"
 echo "device: $model"
-case "$model" in *MU300*|*F50*|*mu300*) ;; *) ask go "This does not look like a ZTE F50/MU300. Continue anyway? (yes/no)" no; [ "$go" = yes ] || exit 1 ;; esac
+case "$model" in *MU300*|*F50*|*mu300*|*7552N*|*P720S20*) ;; *) ask go "This does not look like a ZTE F50/MU300/7552N. Continue anyway? (yes/no)" no; [ "$go" = yes ] || exit 1 ;; esac
 [ "$(su_do 'getprop ro.boot.slot_suffix')" = _a ] || die "Android must be running from slot a"
 
-# ---------------------------------------------------------------- free eMMC region
-say "Locating free eMMC space after the last partition"
-set -- $(su_do 'e=0; for p in /sys/block/mmcblk0/mmcblk0p*; do x=$(( $(cat $p/start) + $(cat $p/size) )); [ $x -gt $e ] && e=$x; done; echo $e $(cat /sys/block/mmcblk0/size)')
-last_end=$1; disk=$2
-start=$(( (last_end / 4096 + 1) * 4096 ))
-end=$(( ((disk - 34) / 4096 - 1) * 4096 ))
-OFF=$((start * 512)); SIZE=$(( (end - start) * 512 ))
-[ $SIZE -gt $((4 * 1024 * 1024 * 1024)) ] || die "less than 4 GiB of unpartitioned space ($((SIZE / 1048576)) MiB); nothing is changed"
+# ---------------------------------------------------------------- Linux region
+# 7552N port (B2): fixed geometry from design S3.2 instead of the mmcblk0 free-space scan
+# (UFS LBA=4096, no tail free space until the Phase-3 GPT shrink of userdata).
+# Region lives between the shrunk userdata (new end LBA 19007999) and the backup GPT.
+say "Linux region (7552N fixed geometry; override with MU300_OFF/MU300_SIZE)"
+OFF=${MU300_OFF:-77858865152}; SIZE=${MU300_SIZE:-50096766976}
 # an existing installation defines the region (it may have been created with a slightly different size)
 existing=no
-for cand in $OFF 27762098176; do
-    m=$(su_do "dd if=/dev/block/mmcblk0 bs=1 skip=$((cand + 1080)) count=2 2>/dev/null | od -An -tx1" | tr -d ' ')
-    l=$(su_do "dd if=/dev/block/mmcblk0 bs=1 skip=$((cand + 1144)) count=16 2>/dev/null" | tr -d '\000')
+for cand in $OFF; do
+    m=$(su_do "dd if=/dev/block/sda bs=1 skip=$((cand + 1080)) count=2 2>/dev/null | od -An -tx1" | tr -d ' ')
+    l=$(su_do "dd if=/dev/block/sda bs=1 skip=$((cand + 1144)) count=16 2>/dev/null" | tr -d '\000')
     if [ "$m" = 53ef ] && [ "$l" = mu300root ]; then
-        blocks=$(su_do "dd if=/dev/block/mmcblk0 bs=1 skip=$((cand + 1028)) count=4 2>/dev/null | od -An -tu4" | tr -d ' ')
+        blocks=$(su_do "dd if=/dev/block/sda bs=1 skip=$((cand + 1028)) count=4 2>/dev/null | od -An -tu4" | tr -d ' ')
         OFF=$cand; SIZE=$((blocks * 4096)); existing=yes; break
     fi
 done
-echo "last partition ends at sector $last_end, disk has $disk sectors"
+disk=$(su_do 'cat /sys/block/sda/size')
+[ "$SIZE" -ge $((4 * 1024 * 1024 * 1024)) ] || die "region smaller than 4 GiB ($((SIZE / 1048576)) MiB); nothing is changed"
+# 512B-sector arithmetic (sysfs is 512B-based even on LBA-4096 UFS): region must end
+# before the backup GPT (5 LBAs of 4096B = 40 sectors of 512B at the disk tail)
+[ $((OFF / 512 + SIZE / 512)) -le $((disk - 40)) ] || die "region overlaps the backup GPT"
+echo "disk sda: $disk x512B sectors ($((disk / 2048)) MiB)"
 echo "Linux region: offset $OFF, $((SIZE / 1048576)) MiB, existing mu300root filesystem: $existing"
 
 # ---------------------------------------------------------------- choices
@@ -82,12 +85,23 @@ printf 'Password for the "ubuntu" user (Ubuntu) and "root" (OpenWrt): '
 # ---------------------------------------------------------------- pull vendor data from the device
 mkdir -p "$WORK/dumps" "$WORK/firmware"
 say "Pulling device data into $WORK (stays on this computer)"
-adb exec-out "su -c 'cat /dev/block/by-name/boot_a'" </dev/null > "$WORK/dumps/boot_a.img"
-adb exec-out "su -c 'dd if=/dev/block/by-name/misc bs=4096 count=1 2>/dev/null'" </dev/null > "$WORK/dumps/misc-head.bin"
+# B3/A5: `adb exec-out` corrupts binary stdout through WSL interop -> device-side cp/dd + adb pull
+pull_bin() { # pull_bin "<device-side producer writing $T/mu300-pull.bin>" <host-out>
+    su_do "$1 && chmod 644 $T/mu300-pull.bin" >/dev/null
+    adb pull "$T/mu300-pull.bin" "$2" >/dev/null </dev/null || die "pull failed for $2"
+    su_do "rm -f $T/mu300-pull.bin" >/dev/null
+    sz=$(wc -c < "$2"); echo "  pulled $2 ($sz bytes)"
+}
+# 7552N: boot_a on this device is APatch(KPatch)-patched (E24) - the boot image template must be
+# the STOCK image. Pre-place rescue/dumps/boot_ori.img (sha256 cfe593a3...) as work/dumps/boot_ori.img.
+[ -s "$WORK/dumps/boot_ori.img" ] || die "missing $WORK/dumps/boot_ori.img (stock boot template; do NOT use the patched boot_a on this device)"
+[ -s "$WORK/dumps/misc-head.bin" ] || pull_bin "dd if=/dev/block/by-name/misc bs=4096 count=1 of=$T/mu300-pull.bin" "$WORK/dumps/misc-head.bin"
 [ -d "$WORK/android-subset" ] || sh "$TOP/android-vendor/extract-subset.sh" "$WORK/android-subset"
-for f in wcnmodem.bin gnssmodem.bin wifi_board_config.ini wifi_board_config_ab.ini bt_configure_pskey.ini bt_configure_rf.ini; do
+# 7552N firmware variants are _aa/.xpe (F50 used _ab); pre-seeded files (rescue/firmware/fw/) are kept
+for f in wcnmodem.bin gnssmodem.bin wifi_board_config.ini wifi_board_config_aa.ini wifi_board_config_xpe.ini wifi_board_config_ab.ini bt_configure_pskey.ini bt_configure_rf.ini; do
+    [ -s "$WORK/firmware/$f" ] && { echo "  firmware cached: $f"; continue; }
     for d in /odm/firmware /vendor/firmware /vendor/etc; do
-        if [ "$(su_do "[ -f $d/$f ] && echo y")" = y ]; then adb exec-out "su -c 'cat $d/$f'" </dev/null > "$WORK/firmware/$f"; break; fi
+        if [ "$(su_do "[ -f $d/$f ] && echo y")" = y ]; then pull_bin "cp $d/$f $T/mu300-pull.bin" "$WORK/firmware/$f"; break; fi
     done
 done
 if [ "$gpu" = yes ] && [ ! -d "$WORK/android-gpu-subset" ]; then
@@ -136,9 +150,12 @@ esac
 
 say "Building the boot image"
 sed "s/^ROOT_OFFSET=[0-9]*/ROOT_OFFSET=$OFF/" "$TOP/boot/init" > "$WORK/init"
-python3 "$TOP/boot/build-boot-image.py" --stock-boot "$WORK/dumps/boot_a.img" --misc-head "$WORK/dumps/misc-head.bin" \
+# B9: prefer the 7552N-generated ueventd perms (gen-ueventd-perms.py from this device's
+# vendor/etc/ueventd.rc, covers modem/pmsys/sctl_pm/trusty nodes) over the F50 static copy
+UEV="$TOP/android-vendor/ueventd-perms.sh"; [ -s "$WORK/ueventd-perms.sh" ] && UEV="$WORK/ueventd-perms.sh"
+python3 "$TOP/boot/build-boot-image.py" --stock-boot "$WORK/dumps/boot_ori.img" --misc-head "$WORK/dumps/misc-head.bin" \
   --kernel "$KOUT/Image" --modules "$WORK/out/modules" --init "$WORK/init" --busybox "$WORK/busybox" \
-  --logdw "$WORK/tools/logdw/logdw" --ueventd-perms "$TOP/android-vendor/ueventd-perms.sh" \
+  --logdw "$WORK/tools/logdw/logdw" --ueventd-perms "$UEV" \
   --android-subset "$WORK/android-subset" --out "$WORK/boot-linux-slotb.img" >/dev/null
 PWHASH=$(printf '%s' "$pw1" | docker run --rm -i mu300-ubuntu:26.04 openssl passwd -6 -stdin)
 

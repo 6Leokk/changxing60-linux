@@ -5,7 +5,7 @@
 # OpenWrt: od/timeout come from the static busybox in /opt/mu300/busybox-bin
 export PATH="$PATH:/opt/mu300/busybox-bin"
 BOOTB=$(readlink -f /dev/block/by-name/boot_b 2>/dev/null)
-[ -b "$BOOTB" ] || for u in /sys/class/block/mmcblk0p*/uevent; do grep -qx PARTNAME=boot_b "$u" && BOOTB=/dev/$(basename "$(dirname "$u")"); done
+[ -b "$BOOTB" ] || for u in /sys/class/block/*/uevent; do grep -qx PARTNAME=boot_b "$u" 2>/dev/null && BOOTB=/dev/$(basename "$(dirname "$u")"); done   # 7552N (B8): device-agnostic scan (UFS sdaN, eMMC mmcblk0pN)
 [ -b "$BOOTB" ] || exit 0
 end=$(( $(cut -d. -f1 /proc/uptime) + ${1:-300} ))
 while [ "$(cut -d. -f1 /proc/uptime)" -lt "$end" ]; do
