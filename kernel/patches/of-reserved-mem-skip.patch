@@ -23,8 +23,8 @@ as normal RAM. The 464 MiB modem and 24 MiB Trusty regions must stay.
  config OF_RESERVED_MEM
  	bool
  	depends on OF_EARLY_FLATTREE
---- a/drivers/of/fd
-+++ b/drivers/of/fd
+--- a/drivers/of/fdt.c
++++ b/drivers/of/fdt.c
 @@ -539,6 +539,33 @@
  	return 0;
  }

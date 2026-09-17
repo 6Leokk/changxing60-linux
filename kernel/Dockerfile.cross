@@ -1,0 +1,12 @@
+# x86_64 cross-build environment for the Unisoc 5.4 arm64 kernel (route A of the
+# 7552N port design; clang-12 matches the device's Android clang 12.0.5).
+# Same packages as kernel/Dockerfile plus the aarch64 GNU toolchain for CROSS_COMPILE.
+FROM ubuntu:20.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    clang-12 lld-12 llvm-12 build-essential bc bison flex libssl-dev libelf-dev \
+    gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu \
+    python3 python-is-python3 cpio git kmod ca-certificates rsync lz4 xz-utils file \
+ && rm -rf /var/lib/apt/lists/*
+ENV PATH=/usr/lib/llvm-12/bin:$PATH
+WORKDIR /src
