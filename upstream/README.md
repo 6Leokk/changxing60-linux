@@ -1,31 +1,41 @@
-# Mainline (LTS) kernel bring-up — experimental, not booting yet
+# Mainline (LTS) kernel on the MU300 — boots to userspace
 
-Goal: run a kernel.org LTS kernel (6.18.52) instead of the vendor 5.4 on the MU300.
+Mainline **Linux 6.18.52** boots on the ZTE F50 / MU300 (Unisoc UMS9620): all 8 CPUs (4×A55, 4×A76), GICv3, arch
+timer, PSCI 1.0, 1.5 GiB RAM, pstore/ramoops, initramfs `/init`, and reboot through the UMP9620 PMIC.
 
-## What is here
-* `Dockerfile`, `build.sh`, `mu300-mainline.config` — minimal arm64 build (allnoconfig + SoC, GIC, timer, Unisoc UART,
-  LZ4 initramfs, pstore/ramoops, forced command line).
-* `dts/ums9620-mu300.dts` — minimal device tree: 8 CPUs (4×A55, 4×A76), PSCI, GIC-v3, arch timer, full reserved-memory map,
-  ramoops, UART1. `sprd,sc-id = "ums9620 1000 1000"` lets LK select it.
-* `mkvendorboot.py` — replaces the DTB in `vendor_boot` (Android DT table, magic 0xd7b7ab1e) and keeps the AVB footer
-  layout; rebuilding with the original DTB reproduces the stock image byte for byte.
-* `wrap-image.py` — LK always copies the kernel to 0x80080000 (text_offset of old kernels); kernels since 5.8 have
-  text_offset 0 and need a 2 MiB boundary, so a stub branches 0x180000 forward to run the Image from 0x80200000.
-* `init-bringup` — initramfs probe that logs to the kernel log (pstore) and warm-reboots.
+Reference: Unisoc's UMS9620 DT series (LKML, 2023-12-15, "arm64: dts: sprd: Add support for Unisoc's UMS9620", not
+merged) describes the same GIC/UART/timer layout; this device is derived from their ums9620-2h10 reference board.
 
-## Status (2026-09-17)
-* Every slot-b attempt ended after ~320 s (PM co-processor power cut), with nothing in pstore — also with the stock DTB,
-  and also when the *vendor 5.4* Image was patched to call PSCI SYSTEM_RESET as its first instruction. A normal reboot
-  takes 25 s. So an early warm reset is not available (PSCI reset probably needs the PM firmware that `modem_control`
-  loads), every failure ends in a power cut that erases RAM, and the pstore channel only works once the kernel can keep
-  the device alive and reset it.
-* Upstream 6.18 has only generic Unisoc drivers (UART, SDHCI, SPI/ADI, GPIO, I2C, watchdog, some SC27xx PMIC blocks);
-  there is no UMS9620 clock/pinctrl/power-domain driver, no USB PHY/glue, no PCIe glue for the Wi-Fi/BT chip and no
-  modem/PM (SIPC) stack. Without the modem_control path the PM watchdog powers the device off after ~290 s.
+## How it boots
+* **Device tree:** the stock vendor DTB in `vendor_boot` is used unchanged. Mainline ignores the vendor-only nodes and
+  uses the standard ones (cpus, psci, GIC, timer, memory, reserved-memory, ramoops, ADI). A minimal custom DTB
+  (`dts/ums9620-mu300.dts`, installed with `mkvendorboot.py`) was *rejected*: after LK's dtbo merge and fixups the kernel
+  hung in `setup_machine_fdt`.
+* **Load address:** LK always copies the kernel to 0x80080000 (old text_offset); `wrap-image.py` prepends a branch stub
+  so the Image runs from 0x80200000 (2 MiB aligned).
+* **Reset:** PSCI SYSTEM_RESET never returns on this firmware. `patches/0001-spi-sprd-adi-add-UMS9620-restart.patch`
+  adds the UMS9620/UMP9620 variant to `spi-sprd-adi` (also matching the vendor compatible `sprd,qogirn6pro-adi`) and
+  resets through the PMIC software reset, registered above the PSCI handler.
+* **Logs:** with a working reset the console survives in ramoops and Android shows it as
+  `/sys/fs/pstore/console-ramoops-0` (`tools/collect-logs.sh`).
 
-## Next steps
-1. A debug channel: the UART (ttyS1, 0x20210000, 115200 8N1) on test pads, or bare-metal LED/PMIC register writes as
-   progress markers.
-2. Reset/keep-alive: drive the UMP9620 PMIC watchdog through the ADI SPI bus (register layout from the vendor
-   `sprd_pmic_wdt`/`sc27xx` sources).
-3. Only then: clocks/pinctrl for eMMC and USB, which would need new drivers.
+## Build and test
+```sh
+docker build -t mu300-mainline-build upstream/
+docker volume create mu300-mainline   # unpack linux-6.18.52 into /src of this volume
+docker run --rm -v mu300-mainline:/src -v "$PWD/upstream":/work mu300-mainline-build bash /work/build.sh
+python3 upstream/wrap-image.py upstream/out/Image upstream/out/Image.lk
+python3 boot/build-boot-image.py --kernel upstream/out/Image.lk --init upstream/init-bringup ... --out boot-mainline.img
+boot/flash-trial.sh boot-mainline.img      # slot b only, falls back to Android
+```
+
+## Debugging without a console
+* `stub/pmic-reset.c`: bare-metal PMIC reset used as the kernel entry — proved that LK reaches our code and that the
+  PMIC reset works (30 s cycle instead of the ~320 s PM power cut).
+* `debug/install-probe.py` (`MU300_PROBE_STAGE=N` for `build.sh`): resets at a chosen boot stage; the cycle time tells
+  whether the stage was reached. This located the custom-DTB hang in `setup_machine_fdt`.
+
+## Missing for a usable system
+No mainline drivers yet for UMS9620 clocks, pinctrl, power domains, USB (DWC3 glue + PHY), eMMC clocking, PCIe (Wi-Fi/BT),
+or the modem/PM (SIPC) stack. Without `modem_control` the PM co-processor powers the board off after ~290 s.
+Next: USB gadget (console/network) and eMMC, which need clock/PHY drivers ported from the vendor 5.4 tree.
