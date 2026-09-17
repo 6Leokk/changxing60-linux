@@ -5,5 +5,5 @@ set -e
 WSRC=${WSRC:-/src/ext-wlan_combo}
 cd "$WSRC" && for p in /work/patches/wlan_combo-*.patch; do patch -p1 --forward < "$p" || true; done
 cd /src/zte-u30air
-make O=/src/out-linux ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld -j"$(nproc)" M="$WSRC" modules
+make O=/src/out-linux ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld ${CROSS_COMPILE:+CROSS_COMPILE=$CROSS_COMPILE} -j"$(nproc)" M="$WSRC" modules
 llvm-strip --strip-debug -o /src/out-linux/sprd_wlan_combo.ko "$WSRC/sprd_wlan_combo.ko"
