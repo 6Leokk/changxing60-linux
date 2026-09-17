@@ -309,8 +309,13 @@ average. `top` shows about 98 % idle.
     LAN ifup.
   * The kernel had no nftables sets (`CONFIG_NF_TABLES_SET`), so fw4's ruleset (`ct state vmap {...}`) was rejected as a
     whole and there was no NAT; the fragment now enables sets, objref, flow offload, redirect, quota and friends.
-  * OpenWrt's `regulatory.db` is unsigned; this kernel wants the signed one (Debian's `wireless-regdb`). `iw reg reload`
-    fails with ENOENT early in boot and is retried, and the country is applied before netifd starts hostapd.
+  * OpenWrt's `regulatory.db` is unsigned; this kernel wants the signed one (Debian's `wireless-regdb`).
+  * cfg80211 requests `regulatory.db` at 1.6 s, before the rootfs exists; the direct load fails and the request sits in the
+    sysfs firmware fallback for 60 s (no userspace helper answers it, neither on OpenWrt nor with systemd-udevd), and
+    `iw reg reload` returns ENOENT meanwhile. `regdb-load` answers the pending requests through `/sys/class/firmware`,
+    then reloads; the country is applied before netifd starts hostapd.
+  * `wifi-scripts` generates an open "OpenWrt" network on first boot; `openwrt-wifi-config` replaces it once (marker
+    `/etc/mu300/wifi-configured`) with the imported SSID/WPA2 settings.
 * Verified after reboots: 5 GHz AP (channel 36), cellular WAN, a USB client's traffic leaves with the modem's public IP;
   memory use about 140 MiB.
 * The early recorder runs from preinit, so a failed OpenWrt boot leaves dmesg, `ps`, `logread` and the Android logcat in
