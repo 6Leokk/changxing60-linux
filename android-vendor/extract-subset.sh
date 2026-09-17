@@ -4,10 +4,18 @@
 # These files are proprietary (ZTE/Unisoc/Google) and are NOT part of this repository.
 set -eu
 OUT=${1:-android-subset}
+RCS=${2:-vendor-init-rcs}   # 7552n-port: side output dir for /vendor/etc/init/*.rc (gen-ueventd-perms.py input)
 TMP=$(mktemp -d)
-adb exec-out 'su -c "tar -chf - /apex/com.android.runtime /system/lib64 /vendor/bin/modem_control /vendor/bin/cp_diskserver /vendor/bin/refnotify /vendor/lib64/lib_crypto.so /vendor/bin/sh /vendor/bin/toybox_vendor /vendor/bin/getprop /vendor/lib64/libkernelbootcp.trusty.so /vendor/etc /dev/__properties__ 2>/dev/null"' </dev/null | tar -xf - -C "$TMP"
+# 7552n-port (A5): WSL interop corrupts binary stdout — never pipe `adb exec-out`.
+# tar to a device file, adb pull (verified binary-safe), extract host-side.
+DEV_TAR=/data/local/tmp/android-subset.tar
+adb shell "su -c 'rm -f $DEV_TAR; tar -chf $DEV_TAR /apex/com.android.runtime /system/lib64 /vendor/bin/modem_control /vendor/bin/cp_diskserver /vendor/bin/refnotify /vendor/lib64/lib_crypto.so /vendor/bin/sh /vendor/bin/toybox_vendor /vendor/bin/getprop /vendor/lib64/libkernelbootcp.trusty.so /vendor/etc /dev/__properties__ 2>/dev/null; chmod 0644 $DEV_TAR'"
+adb pull "$DEV_TAR" "$TMP/subset.tar" >/dev/null
+adb shell "su -c 'rm -f $DEV_TAR'"
+tar -xf "$TMP/subset.tar" -C "$TMP"
 rm -rf "$OUT" && mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd)
+mkdir -p "$RCS" && RCS=$(cd "$RCS" && pwd)   # absolutize before cd $TMP
 cd "$TMP"
 tar -cf - apex/com.android.runtime/bin/linker64 apex/com.android.runtime/lib64/bionic \
   system/lib64/libcutils.so system/lib64/libexpat.so system/lib64/liblog.so system/lib64/libhardware_legacy.so \
@@ -23,5 +31,6 @@ cd /
 mkdir -p "$OUT/system/bin" "$OUT/linkerconfig"
 ln -sfn /apex/com.android.runtime/bin/linker64 "$OUT/system/bin/linker64"
 : > "$OUT/linkerconfig/ld.config.txt"
+cp "$TMP"/vendor/etc/init/*.rc "$RCS"/ 2>/dev/null || true   # 7552n-port: rc bundle for gen-ueventd-perms.py
 rm -rf "$TMP"
-du -sh "$OUT"
+du -sh "$OUT" "$RCS"
