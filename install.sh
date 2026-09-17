@@ -113,11 +113,16 @@ say "Building helper binaries"
 mkdir -p "$WORK/out" "$WORK/tools/logdw" "$WORK/tools/bt-init" "$WORK/tools/gpu"
 rm -rf "$WORK/out/modules" && cp -R "$KOUT/modules" "$WORK/out/modules"
 cp "$KOUT/modules.builtin" "$KOUT/modules.builtin.modinfo" "$WORK/out/" 2>/dev/null || true
-docker build -q -t mu300-ubuntu:26.04 "$TOP/rootfs" >/dev/null
+# B10 (x86 host): upstream builds these on an arm64 Mac where "native" == arm64; on x86_64 we must
+# pin --platform for the rootfs image and use the cross toolchain for the helper binaries
+docker build --platform linux/arm64 -q -t mu300-ubuntu:26.04 "$TOP/rootfs" >/dev/null
 docker run --rm mu300-ubuntu:26.04 cat /bin/busybox > "$WORK/busybox"; chmod +x "$WORK/busybox"
-docker run --rm -v "$TOP/tools":/src:ro -v "$WORK/tools":/o mu300-kbuild sh -c '
-  gcc -O2 -static -o /o/logdw/logdw /src/logdw/logdw.c &&
-  gcc -O2 -static -o /o/bt-init/mu300-bt-init /src/bt-init/mu300-bt-init.c'
+docker run --rm -v "$TOP/tools":/src:ro -v "$WORK/tools":/o mu300-kbuild-cross sh -c '
+  aarch64-linux-gnu-gcc -O2 -static -o /o/logdw/logdw /src/logdw/logdw.c &&
+  aarch64-linux-gnu-gcc -O2 -static -o /o/bt-init/mu300-bt-init /src/bt-init/mu300-bt-init.c'
+for b in "$WORK/busybox" "$WORK/tools/logdw/logdw" "$WORK/tools/bt-init/mu300-bt-init"; do
+    file "$b" | grep -qi aarch64 || die "$b is not arm64: $(file -b "$b")"
+done
 if [ -d "$WORK/android-gpu-subset" ]; then
     L=$(mktemp -d "$WORK/cllibs.XXXX")
     cp "$WORK/android-gpu-subset/vendor/lib64/libOpenCL.so" "$WORK/android-subset/apex/com.android.runtime/lib64/bionic/libc.so" \
