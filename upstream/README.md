@@ -52,6 +52,12 @@ Fixes needed on top of the port:
 - `sdhci-sprd`: only the non-removable eMMC is probed (the SD slot is unpopulated and floods the log).
 - UMP9620 PMIC watchdog, armed by LK for 300 s, is disabled by `ump9620-pmic-wdt-off`.
 - Userspace config: cgroups/namespaces/seccomp, bridge, nftables, IPv6, zram.
+- Thermal: vendor `sprd_thermal_r5p0` (19 on-die zones) with calibration from the UMS9620 eFuse; the eFuse
+  provider is built read-only.
+- cpufreq: vendor `sprd_sip_svc` + `sprd-cpufreq-v2`; ATF does the DVFS, the kernel asks through SIP SMC calls
+  (3 policies: 4 little / 3 mid / 1 big, schedutil). PSCI cpuidle (WFI, core sleep, cluster power-down).
+  Idle temperature dropped from ~54 C to ~48 C.
+- The stock DT has trip points only on the vendor virtual zone, so `/opt/mu300/bin/thermal-guard` caps cpufreq
+  above 85 C and powers off above 105 C on kernels without SoC trip points.
 
-Not yet on mainline: modem (sipc/sipa/modem loader), Wi-Fi/BT (WCN over PCIe/SDIO), GPU, audio,
-thermal/cpufreq.
+Not yet on mainline: modem (sipc/sipa/modem loader), Wi-Fi/BT (Marlin3 over PCIe), GPU, audio, LEDs.

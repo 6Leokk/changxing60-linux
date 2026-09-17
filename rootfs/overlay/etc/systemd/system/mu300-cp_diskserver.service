@@ -1,4 +1,6 @@
 [Unit]
+ConditionPathExists=|/dev/modem
+ConditionPathExists=|/dev/pmsys
 Description=MU300 Android vendor daemon cp_diskserver
 After=mu300-vendor.service
 Requires=mu300-vendor.service
