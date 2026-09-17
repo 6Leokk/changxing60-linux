@@ -46,27 +46,34 @@ def cpio_record(name, data, mode, ino, rdev=(0, 0)):
 
 
 def bootloader_control(misc_head):
-    """Return (slot_a_block, slot_b_trial_block) derived from the live misc bootloader_control."""
+    """Return (slot_a_block, slot_b_trial_block) derived from the live misc bootloader_control.
+
+    7552n-port: derive from the live state instead of hardcoding F50 bytes (7552N live is
+    a=0xff/b=0x0f, F50 was a=0x9f/b=0x1e). The restore block is the live block verbatim;
+    the trial block lowers slot a's priority by one (tries/successful kept) and gives slot b
+    priority 15 with tries=2 — Unisoc LK decrements to 1 before booting b, and a boot that
+    never marks successful rolls back to slot a on the next reboot. On F50 live bytes this
+    reproduces the author's original 0x9e/0x2f trial block.
+    """
     bc = misc_head[MISC_BC_OFFSET:MISC_BC_OFFSET + 32]
     if bc[4:8] != b'BCAB':
         sys.exit('misc head has no bootloader_control magic at 0x800')
     if zlib.crc32(bc[:28]) != struct.unpack('<I', bc[28:])[0]:
         sys.exit('misc bootloader_control CRC mismatch')
+    if bc[0:2] != b'_a':
+        sys.exit(f'device must be on slot a, live suffix is {bc[0:4]!r}')
 
-    def with_slots(suffix, a, b):
-        x = bytearray(bc)
-        x[0:4] = suffix
-        x[12] = a
-        x[14] = b
-        x[28:32] = struct.pack('<I', zlib.crc32(bytes(x[:28])))
-        return bytes(x)
+    slot_a = bytes(bc)  # restore block: live verbatim
 
-    # slot_info byte: priority (4 bits) | tries_remaining (3 bits) | successful_boot (1 bit)
-    slot_a = with_slots(b'_a\0\0', 0x9f, 0x1e)          # a: prio 15, tries 1, successful
-    # Unisoc LK treats tries==1 && !successful as an already failed boot, so the one-shot
-    # trial needs tries=2 (LK decrements to 1; a failed boot then rolls back to slot a).
-    slot_b_trial = with_slots(b'_b\0\0', 0x9e, 0x2f)    # a: prio 14 successful, b: prio 15 tries 2
-    return slot_a, slot_b_trial
+    t = bytearray(bc)
+    t[0:4] = b'_b\0\0'
+    prio_a = bc[12] & 0x0f
+    if prio_a == 0:
+        sys.exit('slot a priority is already 0; cannot lower it for the trial block')
+    t[12] = (bc[12] & 0xf0) | (prio_a - 1)  # slot_info: prio bits 0-3, tries 4-6, successful 7
+    t[14] = 0x2f                            # b: prio 15, tries 2, not successful
+    t[28:32] = struct.pack('<I', zlib.crc32(bytes(t[:28])))
+    return slot_a, bytes(t)
 
 
 def main():

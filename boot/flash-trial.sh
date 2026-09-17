@@ -22,6 +22,6 @@ su_do 'dd if=/data/local/tmp/mu300-boot.img of=/dev/block/by-name/boot_b bs=4M &
 [ "$(su_do 'sha256sum /dev/block/by-name/boot_b' | cut -d' ' -f1)" = "$EXP" ] || { echo "boot_b verify failed; slot a is still active" >&2; exit 1; }
 su_do 'dd if=/data/local/tmp/mu300-bc-b.bin of=/dev/block/by-name/misc bs=1 seek=2048 conv=notrunc && sync'
 new=$(su_do 'dd if=/dev/block/by-name/misc bs=1 skip=2048 count=32 2>/dev/null | od -An -tx1 -v' | tr -d ' \n')
-[ "$new" = "$(xxd -p "$BC_B" | tr -d '\n')" ] || { echo "misc verify failed: $new" >&2; exit 1; }
+[ "$new" = "$(od -An -tx1 -v "$BC_B" | tr -d ' \n')" ] || { echo "misc verify failed: $new" >&2; exit 1; }  # 7552n-port: xxd not on Debian
 echo "slot b armed (one-shot). Rebooting."
 adb reboot

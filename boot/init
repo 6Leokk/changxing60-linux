@@ -98,9 +98,11 @@ mdev -s
 log "stage=modules-done loaded=$loaded failed=$failed"
 
 # Locate misc now; whether slot a is restored is decided once the rootfs is known.
+# 7552n-port: universal partition scan (UFS names partitions sdaN without the mmcblk 'p');
+# PARTNAME in uevent does the filtering, so scanning every block device is safe.
 misc=
 for n in $(seq 1 20); do
-    for u in /sys/class/block/mmcblk*p*/uevent; do
+    for u in /sys/class/block/*/uevent; do
         grep -qx PARTNAME=misc "$u" 2>/dev/null || continue
         misc=/dev/$(basename "$(dirname "$u")")
     done
@@ -119,10 +121,14 @@ write_misc_bc() {  # write_misc_bc FILE STAGE
 }
 restore_slot_a() { write_misc_bc /etc/misc-bc-slot-a.bin misc-restored; }
 
-for u in /sys/class/block/mmcblk*p*/uevent; do
+for u in /sys/class/block/*/uevent; do
     grep -qx PARTNAME=boot_b "$u" 2>/dev/null && bootb=/dev/$(basename "$(dirname "$u")")
 done
-log "stage=persist-target dev=${bootb:-none}"
+# whole-disk device that backs boot_b (sda on 7552N UFS, mmcblk0 on F50 eMMC)
+rootdisk=
+[ -n "$bootb" ] && rootdisk=$(basename "$(dirname "$(readlink -f "/sys/class/block/${bootb#/dev/}")")")
+[ -n "$rootdisk" ] || rootdisk=sda
+log "stage=persist-target dev=${bootb:-none} rootdisk=$rootdisk"
 persist
 (while :; do sleep 15; persist; done) &
 
@@ -165,7 +171,9 @@ persist
 # f_ecm reports the link state in its first CONNECT notification, and macOS' ECM driver does not
 # pick up a later "connected" notification (v10 left usb0 down until systemd ran -> host "inactive").
 ifconfig usb0 up
-ROOT_OFFSET=27762098176   # linux-boot/rootfs-region.env; outside every GPT partition
+ROOT_OFFSET=77858865152   # 7552N: mu300root region after the shrunk userdata (design S3.2);
+                          # before Phase 3 repartition this offset is inside f2fs userdata, the
+                          # ext4 magic check fails and init takes the rescue path (by design).
 mkdir -p /newroot
 # busybox mount only sets up a loop for regular files; for a block device the loop options would
 # be handed to ext4 (EINVAL), so attach the loop explicitly and verify its offset
@@ -182,7 +190,7 @@ pick_root() {
 }
 mkdir -p /disk
 rootloop=$(losetup -f 2>/run/rootmount.err)
-if [ -n "$rootloop" ] && losetup -o $ROOT_OFFSET "$rootloop" /dev/mmcblk0 2>>/run/rootmount.err \
+if [ -n "$rootloop" ] && losetup -o $ROOT_OFFSET "$rootloop" /dev/$rootdisk 2>>/run/rootmount.err \
    && [ "$(cat /sys/block/${rootloop#/dev/}/loop/offset)" = "$ROOT_OFFSET" ] \
    && [ "$(dd if="$rootloop" bs=1 skip=1080 count=2 2>/dev/null | od -An -tx1 | tr -d ' ')" = 53ef ] \
    && mount -t ext4 -o noatime "$rootloop" /disk 2>>/run/rootmount.err \
@@ -244,7 +252,7 @@ log "stage=ready"
 A=/android
 cp -a $A/dev/__properties__ /dev/__properties__
 mkdir -p /dev/block/by-name
-for u in /sys/class/block/mmcblk0p*/uevent; do
+for u in /sys/class/block/*/uevent; do
     d=$(basename "$(dirname "$u")")
     n=$(sed -n 's/^PARTNAME=//p' "$u")
     ln -sf /dev/$d /dev/block/$d
