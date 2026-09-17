@@ -138,19 +138,21 @@ log "stage=usb-configfs"
 mount -t configfs configfs /config
 g=/config/usb_gadget/linux
 mkdir -p "$g/strings/0x409" "$g/configs/c.1/strings/0x409"
-# 7552n-port (E20): ZTE stock kernel config had NO ECM/RNDIS/NCM gadget function, so
+# 7552n-port (E20/E22): ZTE stock kernel config had NO ECM/RNDIS/NCM gadget function, so
 # trial-4 bound an empty gadget (host enumerated it, no usb0 ever existed). This build
-# enables all three; pick the first one configfs actually exposes. rndis first: the
-# rescue host is Windows (rndismp6/usb8023* present, no usbncm.sys, never ECM);
-# ncm/ecm for Linux/macOS hosts. All create their netdev as usb0 (first bound).
+# enables all three; pick the first one configfs actually exposes. ncm first (E22): the
+# rescue host's Windows build 28000 has NO rndismp6.inf in DriverStore (post-24H2 RNDIS
+# removal — trial-6 proved MI_00 never got a function driver) but DOES have usbncm.inf
+# staged; Linux (cdc_ncm) and macOS bind NCM/ECM by class. rndis stays as fallback for
+# pre-24H2 Windows hosts. All create their netdev as usb0 (first bound).
 netfn=
-for cand in rndis ncm ecm; do
+for cand in ncm rndis ecm; do
     mkdir "$g/functions/$cand.usb0" 2>/dev/null && { netfn=$cand; break; }
 done
 echo 0x0525 > "$g/idVendor"
-echo 0xa4a2 > "$g/idProduct"   # was 0xa4a1 until trial-5: Windows caches "no OS descriptor"
-                                # per VID/PID/serial — trial-4/5 enumerated a4a1/MU300LINUX
-                                # without one, so the PID bump busts that cache (E21)
+echo 0xa4a3 > "$g/idProduct"   # PID must change whenever the descriptor set changes:
+                                # Windows caches descriptors+OS-desc probe per VID/PID/serial
+                                # (a4a1=trials 4/5 ACM+empty, a4a2=trial-6 RNDIS, a4a3=NCM)
 echo 0x0200 > "$g/bcdUSB"
 echo MU300LINUX > "$g/strings/0x409/serialnumber"
 echo Linux > "$g/strings/0x409/manufacturer"
@@ -165,10 +167,13 @@ fi
 # E21: Windows binds rndismp ONLY via the MS OS 1.0 extended compat ID "RNDIS" —
 # f_rndis' interfaces are comm/ACM/vendor-proto, class matching never fires, and
 # configfs leaves qw_sign empty (kzalloc). All os_desc attributes are copied into
-# cdev at UDC-store time, so this must precede the bind. Only rndis has the
-# os_desc/interface.<fn> dir (ncm/ecm are class-driven on Linux/macOS).
-if [ -d "$g/functions/$netfn.usb0/os_desc/interface.$netfn" ]; then
-    echo RNDIS > "$g/functions/$netfn.usb0/os_desc/interface.$netfn/compatible_id"
+# cdev at UDC-store time, so this must precede the bind.
+# E22 correction: f_ncm ALSO registers os_desc/interface.ncm (f_ncm.c:1436,1653), so
+# gate on netfn=rndis, not on dir existence — an "RNDIS" compat-ID on the NCM function
+# could steer Windows away from usbncm's class match. NCM needs no OS-desc at all:
+# Windows (usbncm.inf), Linux (cdc_ncm) and macOS all match by interface class.
+if [ "$netfn" = rndis ] && [ -d "$g/functions/rndis.usb0/os_desc/interface.rndis" ]; then
+    echo RNDIS > "$g/functions/rndis.usb0/os_desc/interface.rndis/compatible_id"
     echo MSFT100 > "$g/os_desc/qw_sign"
     echo 0x1 > "$g/os_desc/b_vendor_code"
     echo 1 > "$g/os_desc/use"
@@ -273,8 +278,21 @@ touch /run/udhcpd.leases
 udhcpd /etc/udhcpd.conf
 telnetd -b 192.168.77.1 -p 23 -l /bin/sh
 mkdir -p /run/www
-echo "MU300 standalone Linux v5: telnet 192.168.77.1; auto reboot to Android after 300s unless /run/stay exists" > /run/www/index.html
+echo "MU300 standalone Linux v7 (NCM+ACM): telnet/http 192.168.77.1; serial console ttyGS0; auto reboot to Android after 300s unless /run/stay exists" > /run/www/index.html
 httpd -p 192.168.77.1:80 -h /run/www
+# E22 fallback: ACM serial console. Trial-6 proved Windows binds usbser (COM15) and even
+# sends SET_LINE_CODING — recovery access that depends on no net function or net driver.
+# BusyBox has no getty; loop a raw shell on the gadget port (reopen when host disconnects).
+if [ -e /dev/ttyGS0 ]; then
+    ( stty raw -echo < /dev/ttyGS0 2>/dev/null
+      while :; do
+          echo "mu300-linux rescue console (type Enter)" > /dev/ttyGS0
+          /bin/sh -i < /dev/ttyGS0 > /dev/ttyGS0 2>&1
+      done ) &
+    log "stage=ttyGS0-console on"
+else
+    log "stage=ttyGS0-console missing"
+fi
 log "stage=ready"
 
 # Android vendor services in a chroot. modem_control reloads pm_sys through Trusty; only then
