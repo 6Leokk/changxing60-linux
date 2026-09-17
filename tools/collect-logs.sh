@@ -1,13 +1,18 @@
 #!/bin/sh
 # After a trial falls back to Android: collect LK log, pstore and the init log persisted in boot_b.
+# 7552n-port (A5): no exec-out — WSL interop corrupts binary stdout. Stage on device + adb pull.
 set -eu
 OUT=${1:-logs-$(date +%Y%m%d-%H%M%S)}
 mkdir -p "$OUT"
-adb shell "su -c 'getprop ro.boot.slot_suffix; ls -la /sys/fs/pstore'" | tee "$OUT/state.txt"
-for f in $(adb shell "su -c 'ls /sys/fs/pstore'" | tr -d '\r'); do adb exec-out "su -c 'cat /sys/fs/pstore/$f'" > "$OUT/$f"; done
-adb exec-out "su -c 'cat /dev/block/by-name/uboot_log'" > "$OUT/uboot_log.raw"
-strings -n 6 "$OUT/uboot_log.raw" > "$OUT/uboot_log.txt"
-# init writes stages + dmesg to boot_b at 48 MiB (8 MiB)
-adb exec-out "su -c 'dd if=/dev/block/by-name/boot_b bs=4096 skip=12288 count=2048 2>/dev/null'" | tr -d '\000' > "$OUT/linux-persist.txt"
-sed -n '/MU300-PERSIST-BEGIN/,/--- lsmod/p' "$OUT/linux-persist.txt" || true
+T=/data/local/tmp/mu300-logs
+adb shell "su -c 'getprop ro.boot.slot_suffix; ls -la /sys/fs/pstore'" | tr -d '\r' | tee "$OUT/state.txt"
+adb shell "su -c 'rm -rf $T; mkdir -p $T/pstore; cp /sys/fs/pstore/* $T/pstore/ 2>/dev/null || true; \
+  dd if=/dev/block/by-name/uboot_log of=$T/uboot_log.raw bs=1M 2>/dev/null; \
+  dd if=/dev/block/by-name/boot_b of=$T/linux-persist.raw bs=4096 skip=12288 count=2048 2>/dev/null; \
+  chmod -R a+r $T; ls -la $T $T/pstore'" | tr -d '\r'
+adb pull "$T/." "$OUT/" >/dev/null
+[ -f "$OUT/uboot_log.raw" ] && strings -n 6 "$OUT/uboot_log.raw" > "$OUT/uboot_log.txt"
+[ -f "$OUT/linux-persist.raw" ] && tr -d '\000' < "$OUT/linux-persist.raw" > "$OUT/linux-persist.txt"
+sed -n '/MU300-PERSIST-BEGIN/,/--- lsmod/p' "$OUT/linux-persist.txt" 2>/dev/null || true
+adb shell "su -c 'rm -rf $T'" >/dev/null 2>&1 || true
 echo "saved: $OUT"
