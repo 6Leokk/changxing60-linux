@@ -148,7 +148,9 @@ for cand in rndis ncm ecm; do
     mkdir "$g/functions/$cand.usb0" 2>/dev/null && { netfn=$cand; break; }
 done
 echo 0x0525 > "$g/idVendor"
-echo 0xa4a1 > "$g/idProduct"
+echo 0xa4a2 > "$g/idProduct"   # was 0xa4a1 until trial-5: Windows caches "no OS descriptor"
+                                # per VID/PID/serial — trial-4/5 enumerated a4a1/MU300LINUX
+                                # without one, so the PID bump busts that cache (E21)
 echo 0x0200 > "$g/bcdUSB"
 echo MU300LINUX > "$g/strings/0x409/serialnumber"
 echo Linux > "$g/strings/0x409/manufacturer"
@@ -159,6 +161,18 @@ if [ -n "$netfn" ]; then
     echo 02:50:00:00:77:01 > "$g/functions/$netfn.usb0/dev_addr"
     echo 02:50:00:00:77:02 > "$g/functions/$netfn.usb0/host_addr"
     ln -s "$g/functions/$netfn.usb0" "$g/configs/c.1/f1"
+fi
+# E21: Windows binds rndismp ONLY via the MS OS 1.0 extended compat ID "RNDIS" —
+# f_rndis' interfaces are comm/ACM/vendor-proto, class matching never fires, and
+# configfs leaves qw_sign empty (kzalloc). All os_desc attributes are copied into
+# cdev at UDC-store time, so this must precede the bind. Only rndis has the
+# os_desc/interface.<fn> dir (ncm/ecm are class-driven on Linux/macOS).
+if [ -d "$g/functions/$netfn.usb0/os_desc/interface.$netfn" ]; then
+    echo RNDIS > "$g/functions/$netfn.usb0/os_desc/interface.$netfn/compatible_id"
+    echo MSFT100 > "$g/os_desc/qw_sign"
+    echo 0x1 > "$g/os_desc/b_vendor_code"
+    echo 1 > "$g/os_desc/use"
+    log "stage=usb-osdesc on"
 fi
 log "stage=usb-netfn ${netfn:-none}"
 # USB serial console alongside ECM: recovery/debug access that does not depend on networking
