@@ -1,8 +1,12 @@
 #!/bin/sh
 # Compressed swap in RAM: about half of RAM as lz4-compressed zram, preferred over any other swap.
 set -e
-[ -e /sys/block/zram0 ] || modprobe zram num_devices=1
-if ! swapon --show=NAME --noheadings | grep -q zram0; then
+# OpenWrt's modprobe (ubox kmodloader) ignores module parameters, so ask for the module by name and
+# let it default to one device.
+[ -e /sys/block/zram0 ] || modprobe zram
+# busybox swapon has no --show, and re-running this script must not reset a zram that is already
+# swapping: /proc/swaps is the portable check.
+if ! grep -q "^/dev/zram0 " /proc/swaps; then
     size=$(awk '/MemTotal/ {printf "%d", $2 / 2}' /proc/meminfo)
     echo 1 > /sys/block/zram0/reset 2>/dev/null || true
     echo lz4 > /sys/block/zram0/comp_algorithm 2>/dev/null || true

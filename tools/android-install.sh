@@ -28,6 +28,20 @@ disk=$(cat /sys/block/sda/size)
 # backup GPT on this disk = 5 LBAs of 4096B = 40 x 512B sectors (F50's -34 assumed 512B LBAs)
 [ "$OFF_S" -ge $end ] && [ $((OFF_S + SIZE_S)) -le $((disk - 40)) ] || { say "region overlaps partitions or the backup GPT (end=$end disk=$disk)"; exit 1; }
 
+# Every write this script makes to the region goes through a loop device, and those writes are
+# issued by the loop kworker (u:r:kernel:s0), which the AOSP policy denies on /dev/block/sda
+# (ufs_device): mke2fs and the untar below would fail with EIO and nothing would land. Reads are
+# unaffected, which is why this is easy to miss. See the long comment in android-mount-mu300root.sh.
+# Restored by the EXIT trap (android-mount-mu300root.sh -u restores it too, whichever runs first).
+SELINUX_PREV=$T/.mu300-selinux.prev
+if [ "$(getenforce 2>/dev/null)" != Permissive ] && getenforce > "$SELINUX_PREV" 2>/dev/null; then
+    setenforce 0 2>/dev/null || rm -f "$SELINUX_PREV"
+fi
+restore_selinux() {
+    [ -f "$SELINUX_PREV" ] && { setenforce "$(cat "$SELINUX_PREV")" 2>/dev/null; rm -f "$SELINUX_PREV"; }
+    return 0
+}
+
 attach() {
     for o in /sys/block/loop*/loop/offset; do
         [ "$(cat $o 2>/dev/null)" = "$OFF" ] && { say "region already attached (${o%/loop/offset})"; exit 1; }
@@ -53,7 +67,7 @@ elif [ "$magic" != 53ef ] || [ "$label" != mu300root ]; then
 fi
 
 MU300_OFF=$OFF MU300_SIZE=$SIZE sh $T/android-mount-mu300root.sh $M
-trap 'sync; sh $T/android-mount-mu300root.sh -u $M >/dev/null 2>&1; true' EXIT
+trap 'sync; sh $T/android-mount-mu300root.sh -u $M >/dev/null 2>&1; restore_selinux' EXIT
 
 if [ "$WIPE_LEGACY" = 1 ] && { [ -x $M/lib/systemd/systemd ] || [ -L $M/lib ]; }; then
     say "removing the root-level Ubuntu"

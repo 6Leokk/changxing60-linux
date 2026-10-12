@@ -123,7 +123,11 @@ cp kernel/f50-stock-B09.config kernel/device.config
 docker run --rm -v mu300-kernel:/src -v "$PWD/kernel":/work mu300-kbuild bash /work/build-linux.sh
 ```
 `build-linux.sh` merges `mu300-linux.fragment` into the stock config, switches to ThinLTO and builds `Image` + modules
-into `/src/out-linux`. Copy `Image`, `modules.builtin*` and all `*.ko` (flattened, `llvm-strip --strip-debug`) to `out/`.
+into `/src/out-linux`. Copy `Image` and `modules.builtin*` to `out/`, then stage the modules with
+`sudo python3 tools/stage-modules.py`: it copies the transitive closure of the modules the rootfs scripts load
+(wifi-start, extra-modules, zram-start) plus `boot/module-order.txt`, strips the debug info, and fails if one of them is
+missing. Copying "all `*.ko`" by hand is how `wcn_bsp`, `zram` and the thermal drivers stayed out of the image for
+weeks -- the build had them, the rootfs silently did not.
 
 Wi-Fi driver: extract `kernel_modules/kernel5.4/wcn/wlan/wlan_combo` from the realme C51/C53 AndroidT kernel source into
 the volume as `/src/ext-wlan_combo`, then run `kernel/build-wlan.sh` (applies the `patches/wlan_combo-*.patch` files).

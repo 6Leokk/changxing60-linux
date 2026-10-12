@@ -78,6 +78,13 @@ if [ -e /in/busybox ]; then
     done
 fi
 mkdir -p $R/etc/mu300
+# The rootfs is assembled in a container, so /etc/resolv.conf is whatever Docker bind-mounted
+# there: "nameserver 10.255.255.254", Docker's own resolver. That address means nothing on the
+# device, and the failure hides well -- dnsmasq still answers LAN clients from its own upstreams
+# (/tmp/resolv.conf.d/resolv.conf.auto), so only lookups that originate ON the router break
+# (apk update, LuCI package installs, curl). OpenWrt keeps /etc/resolv.conf as a symlink that
+# netifd fills in.
+ln -sfn /tmp/resolv.conf $R/etc/resolv.conf
 # enable the services (rc.common "enable" needs ubus, which is not running in the build container)
 for s in mu300-vendor mu300-hw mu300-post; do
     n=$(sed -n "s/^START=//p" $R/etc/init.d/$s)

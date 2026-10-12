@@ -5,7 +5,7 @@ cd /src/zte-u30air
 OUT=/src/out-linux
 mkdir -p $OUT
 # 7552n-port: CROSS_COMPILE=aarch64-linux-gnu- enables the x86_64 cross build
-# (route A of docs/mu300-port-design.md); unset keeps the original arm64-native call.
+# (route A of docs/mu300/port-design.md); unset keeps the original arm64-native call.
 M="make O=$OUT ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld ${CROSS_COMPILE:+CROSS_COMPILE=$CROSS_COMPILE} -j${JOBS:-10}"
 cp /work/device.config $OUT/.config
 ./scripts/config --file $OUT/.config --enable THINLTO

@@ -30,8 +30,10 @@ HERE = Path(__file__).resolve().parent
 PAGE = 4096
 BOOT_CMDLINE = b'loglevel=5'
 MISC_BC_OFFSET = 0x800
-# persistent init log lives at 48 MiB inside boot_b (8 MiB); the image must end before it
-PERSIST_LOG_OFFSET = 48 << 20
+# persistent init log lives at 56 MiB inside boot_b (4 MiB); the image must end before it.
+# path C: kernel 30.5MB + openwrt tarball 14.7MB + ramdisk 7.5MB ≈ 52 MiB body, past the old
+# 48 MiB limit — shift the persist region 48→56 MiB (count 2048→1024) to make room.
+PERSIST_LOG_OFFSET = 56 << 20
 
 
 def cpio_record(name, data, mode, ino, rdev=(0, 0)):
@@ -88,6 +90,7 @@ def main():
     ap.add_argument('--logdw', required=True, type=Path, help='tools/logdw build (static arm64)')
     ap.add_argument('--ueventd-perms', required=True, type=Path)
     ap.add_argument('--android-subset', type=Path, help='directory produced by android-vendor/extract-subset.sh')
+    ap.add_argument('--openwrt-tarball', type=Path, help='OpenWrt rootfs tarball; path C ships it as /openwrt.tar.gz in the ramdisk (extract + switch_root)')
     ap.add_argument('--out', required=True, type=Path)
     a = ap.parse_args()
 
@@ -123,6 +126,9 @@ def main():
             else:
                 files[rel] = (f.read_bytes(), stat.S_IFREG | (0o755 if os.access(f, os.X_OK) else 0o644))
 
+    if a.openwrt_tarball:
+        files['openwrt.tar.gz'] = (a.openwrt_tarball.read_bytes(), stat.S_IFREG | 0o644)
+
     cpio = bytearray()
     ino = 1
     for d in sorted(dirs, key=lambda x: (x.count('/'), x)):
@@ -153,7 +159,7 @@ def main():
     avb_off, avb_size = struct.unpack_from('>QQ', base, len(base) - 44)
     body += base[avb_off:avb_off + avb_size]
     if len(body) > PERSIST_LOG_OFFSET:
-        sys.exit(f'image data ({len(body)} bytes) overlaps the persistent log area at 48 MiB')
+        sys.exit(f'image data ({len(body)} bytes) overlaps the persistent log area at 56 MiB')
     body += b'\0' * (len(base) - 64 - len(body))
     footer = bytearray(base[-64:])
     struct.pack_into('>QQQ', footer, 12, original_size, original_size, avb_size)
