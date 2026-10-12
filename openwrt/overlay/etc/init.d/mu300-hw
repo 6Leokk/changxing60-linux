@@ -16,6 +16,23 @@ boot() {
 		iw reg set "$country"
 		for n in $(seq 1 10); do iw reg get | grep -q "country $country:" && break; sleep 1; done
 	fi
+	# The WCN chip has no factory MAC on this device (LK passes no androidboot.wifimac= in the cmdline) and
+	# the driver ignores MAC writes, so wlan0 gets a fresh random 40:45:da:xx address every boot. OpenWrt
+	# derives the AP's BSSID from the phy MAC, which is all-zero here, leaving hostapd with
+	# bssid=00:00:00:00:00:00 and no beacon at all; pin the vif to the driver's actual address so hostapd
+	# and the firmware agree on the BSSID. This has to happen before netifd starts hostapd, i.e. here.
+	wifimac=$(cat /sys/class/net/wlan0/address 2>/dev/null)
+	if [ -n "$wifimac" ] && [ "$wifimac" != "00:00:00:00:00:00" ]; then
+		uci -q get wireless.ap0 >/dev/null && {
+			uci -q set wireless.ap0.macaddr="$wifimac"
+			uci -q commit wireless
+		}
+	fi
+	# Deliberately no `wifi down; wifi up` here. mu300-hw is S12 and netifd is S20, so there is no
+	# netifd to serve the ubus object yet and every `wifi` call answers "Command failed: Not found"
+	# (four such lines, one per call, used to land in /tmp/mu300-wifi-start.log) while the AP came up
+	# fine a moment later under netifd, with the country and the pinned MAC already in place. An AP
+	# that still ends up without a beacon is repaired by mu300-post's wififix, which runs after netifd.
 }
 
 start() {
