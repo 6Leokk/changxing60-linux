@@ -116,14 +116,18 @@ sim_reset() {
     at 'AT+CPIN?'
 }
 
-# The data call and the AT channel are one port: up() ends with AT+CGDATA="M-ETHER", which hands
-# /dev/stty_nr1 to the data path. Sending AT on it while the call is live wedges the CP's parser --
-# the port then answers nothing at all (a bare "AT" gets no reply, and no other process can revive
-# it) until the modem is rebooted. Measured 2026-10-13: with the old poll in place the call died
-# ~3 min into every boot (about six polls); with the poll silenced it stayed up.
-# So liveness is read from the interface, which costs no AT traffic, and the modem is touched only
-# once the call is really gone. That also holds for the Ubuntu layout: losing the call takes the
-# address off $IFACE, which is what we key on.
+# Liveness is read from the interface, never from the modem. The data call and the AT channel are one
+# port -- up() ends with AT+CGDATA="M-ETHER", which hands /dev/stty_nr1 to the data path -- so the old
+# `stty` + AT+CGACT? poll aimed command traffic at a port that was busy carrying data, and its
+# two-strikes branch answered a missed reply with `ifup wan`: a second attach on the port that was
+# already attached. That is the shape of the 2026-10-13 outage -- five stacked `mobile-data up`
+# processes, load 14, and an AT channel that answered nothing (not even a bare "AT") until the modem
+# was rebooted.
+# What is measured: with the poll gone the call stays up well past the old ~180 s mark, across
+# reboots, and a loop that replays the old poll cadence on a healthy call does not by itself kill it.
+# So the AT traffic is at best unnecessary; the attach storm is what takes the port down. The watch
+# never needs the modem anyway: losing the call takes the address off $IFACE, which is what we key on
+# (the Ubuntu layout behaves the same).
 link_up() {
     ip -4 addr show "$IFACE" 2>/dev/null | grep -q inet || return 1
     # "unknown" is a legitimate operstate for a device that never had a carrier report: only a
