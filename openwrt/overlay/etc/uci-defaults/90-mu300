@@ -2,7 +2,8 @@
 # First boot: LAN split into a USB management link and a Wi-Fi hotspot, cellular WAN through the
 # modem, hostname, USB console.
 uci -q batch <<UCI
-set system.@system[0].hostname='mu300'
+set system.@system[0].hostname='changxing60'
+set system.@system[0].description='Changxing 60 (ZTE 7552N) - OpenWrt'
 set system.@system[0].zonename='Europe/Istanbul'
 set system.@system[0].timezone='<+03>-3'
 set network.lan.ipaddr='192.168.77.1'

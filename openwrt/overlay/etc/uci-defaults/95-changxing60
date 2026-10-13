@@ -1,0 +1,19 @@
+#!/bin/sh
+# Branding: this build is the Changxing 60 (畅行60, ZTE 7552N / UMS9620) adaptation, and it should
+# say so wherever a human looks -- the LuCI status page, `ubus call system board`, the login realm
+# (uhttpd takes that from system.hostname, set in 90-mu300).
+#
+# Done here rather than in build-rootfs.sh on purpose: that script's payload is one single-quoted
+# string, so an apostrophe or a nested quote in a sed expression would end it early and stop the
+# whole script from parsing. Here the quoting is ordinary.
+#
+# DISTRIB_DESCRIPTION is rewritten from the file's own fields, so the version and revision stay
+# accurate whatever rootfs tarball this overlay is applied to.
+. /etc/openwrt_release
+case "$DISTRIB_DESCRIPTION" in
+*Changxing*) exit 0 ;;
+esac
+new="$DISTRIB_ID $DISTRIB_RELEASE $DISTRIB_REVISION (Changxing 60 / ZTE 7552N)"
+sed -i "s|^DISTRIB_DESCRIPTION=.*|DISTRIB_DESCRIPTION=\"$new\"|" /etc/openwrt_release
+sed -i 's|^127\.0\.0\.1[[:space:]]*localhost$|127.0.0.1 localhost changxing60|' /etc/hosts
+exit 0
