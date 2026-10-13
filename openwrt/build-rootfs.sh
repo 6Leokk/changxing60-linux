@@ -100,7 +100,7 @@ mkdir -p $R/etc/mu300
 # netifd fills in.
 ln -sfn /tmp/resolv.conf $R/etc/resolv.conf
 # enable the services (rc.common "enable" needs ubus, which is not running in the build container)
-for s in mu300-vendor mu300-hw mu300-post mu300-screen; do
+for s in mu300-vendor mu300-hw mu300-post mu300-screen mu300-ndp; do
     n=$(sed -n "s/^START=//p" $R/etc/init.d/$s)
     ln -sf ../init.d/$s $R/etc/rc.d/S$n$s
 done

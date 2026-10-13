@@ -33,6 +33,36 @@ apply() {
 	/etc/init.d/dnsmasq restart
 	/etc/init.d/odhcpd restart
 	/etc/init.d/firewall reload
+
+	# A reload does not restart an interface whose protocol options changed. Measured 2026-10-13:
+	# after network.wan.ipv6 appeared, the wan kept its original uptime and its IPv4-only state, and
+	# mu300cell.sh only runs its relay branch on setup -- so an install that was already up would sit
+	# there with the relay configured and nothing using it until the next reboot. A fresh install and
+	# a boot never need this (the interface is configured after this file lands), and the guard is the
+	# bearer's own state, so at most one re-attach happens per install. The wait is bounded: the
+	# attach takes up to about 95 s on this modem (registration after the teardown's context release).
+	if [ "$(uci -q get network.wan.ipv6)" = relay ] &&
+	   ! ip -6 addr show sipa_eth0 2>/dev/null | grep -q 'scope global'; then
+		echo "net-split: the bearer has no public IPv6 yet -- re-attaching it so the relay branch runs"
+		ifdown wan
+		sleep 2
+		ifup wan
+		for _ in $(seq 1 24); do
+			ip -6 addr show sipa_eth0 2>/dev/null | grep -q 'scope global' && break
+			sleep 5
+		done
+		if ip -6 addr show sipa_eth0 2>/dev/null | grep -q 'scope global'; then
+			echo "net-split: relay live, bearer $(ip -6 -o addr show dev sipa_eth0 scope global | awk '{print $4}' | head -1)"
+		else
+			echo "net-split: the bearer still has no public IPv6 -- check that the APN is IPv4/IPv6 and the signal is there"
+		fi
+	fi
+
+	# The prefix route to the hotspot exists only while this runs (see ndp-learn for the whole reason).
+	# restart picks up a changed option when the service is already up; when it is not, procd answers
+	# the stop half with "Not found", which is expected here and only noise on the operator's terminal.
+	/etc/init.d/mu300-ndp enable
+	/etc/init.d/mu300-ndp restart 2>/dev/null
 }
 
 # --- the hotspot gets its own bridge and its own address -------------------------------
@@ -76,11 +106,59 @@ uci -q delete firewall.@zone[0].network || true
 uci -q add_list firewall.@zone[0].network='lan'
 uci -q add_list firewall.@zone[0].network='wifi'
 
+# --- IPv6, split the same way --------------------------------------------------------
+# The carrier only ever gives this device one IPv6 address per bearer, and it hands the prefix out
+# by router advertisement rather than in +CGCONTRDP (that field carries the interface identifier
+# with the prefix zeroed -- measured here: address ::18dd:fcd3:369a:2978, prefix 0). So there is no
+# prefix to delegate and nothing to configure statically: the bearer takes the advertisement
+# (network.wan.ipv6 relay, see mu300cell.sh for the ordering that actually makes the carrier answer)
+# and odhcpd relays it to the hotspot, whose clients SLAAC their own addresses out of the carrier's
+# /64. Return traffic is rewritten to this device's own address by NAT66, because the carrier routes
+# the one address it assigned and would drop a reply addressed to a client.
+#
+# The management link is left out, exactly as it is for IPv4 and for the same measured reason: the
+# PC on the far end of the cable has its own uplink, and a router advertisement there is a second
+# default route competing with it. So br-lan advertises nothing (below) and the relay is wired to
+# br-wifi only.
+uci -q set network.wan.ipv6='relay'
+# odhcpd relay: 'wan' is the master -- the interface that owns the bearer, so it is where the
+# carrier's RS/RA and DHCPv6 are picked up -- and the hotspot relays them to its clients both ways.
+# No separate wan6 interface is involved; there is nothing for one to do.
+uci -q delete dhcp.wan || true
+uci -q set dhcp.wan=dhcp
+uci -q set dhcp.wan.interface='wan'
+uci -q set dhcp.wan.master='1'
+uci -q set dhcp.wan.ra='relay'
+uci -q set dhcp.wan.dhcpv6='relay'
+uci -q set dhcp.wifi.ra='relay'
+uci -q set dhcp.wifi.dhcpv6='relay'
+# odhcpd's NDP relay is off, deliberately (upstream's security review of the same port). With
+# ndproxy_routing on -- its default -- every neighbour entry on the LAN becomes a /128 route to that
+# LAN, and any host creates such an entry for any address with one spoofed neighbour solicitation,
+# off-prefix included: a route hijack. NAT66 rewrites every client source to this device's own
+# address, so the carrier never needs to resolve a client address. Any value someone set is removed.
+# Every delete is guarded: `uci delete` on an option that is not there exits 1, and with `set -e`
+# above a bare one aborts the whole script -- which is exactly what happened the first time this ran
+# (the script died on the first iteration of this loop, so the NAT66 and the commits below never
+# executed and the entire run sat in uci's staging file, one reboot away from being lost).
+for o in dhcp.lan.ndp dhcp.wan.ndp dhcp.wifi.ndp \
+         dhcp.lan.ndproxy_routing dhcp.wan.ndproxy_routing dhcp.wifi.ndproxy_routing; do
+	uci -q delete $o || true
+done
+# NAT66 egress. On the wan zone, so an install whose zone has another name still gets it when the
+# zone is found -- and so nothing is written where there is no wan zone to write to. (`uci show`
+# prints the anonymous section as `firewall.@zone[1]`, which is what the substitution captures.)
+zone=$(uci -q show firewall | sed -n "s/^\(firewall\.@zone\[[0-9]*\]\)\.name='wan'$/\1/p")
+if [ -n "$zone" ]; then
+	uci -q set $zone.masq6='1'
+fi
+
 uci commit network
 uci commit wireless
 uci commit dhcp
 uci commit firewall
 
 echo "net-split: usb0=$LAN_IP/24 (address only), br-wifi=$WIFI_IP/24 (gateway+dns)"
+echo "net-split: IPv6 relayed to br-wifi only (NAT66 on the wan zone); br-lan stays without IPv6"
 want "$1" && { apply; echo "net-split: applied"; }
 exit 0

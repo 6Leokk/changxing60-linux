@@ -363,6 +363,163 @@ average. `top` shows about 98 % idle.
 * A first-generation install (Ubuntu directly in the filesystem root) is replaced by `/ubuntu`; `init` still boots the
   old layout if no `/ubuntu` exists.
 
+## IPv6
+
+### 31. Nothing solicits, so nothing arrives (the bearer, China Mobile, 5.4.254)
+* Symptom: the bearer has an IPv4 address and no IPv6 at all, on a SIM whose APN is dual-stack.
+* The PDP context is **not** the problem. `AT+CGDCONT?` already reports `IPV4V6` (the configured APN is
+  empty, so the network default `cmnet` applies) and `AT+CGCONTRDP=1` does carry IPv6 fields -- but its
+  address field holds the interface identifier with the prefix zeroed (`::18dd:fcd3:369a:2978`), which is
+  why reading the prefix out of AT looks like "this carrier delegates nothing". The prefix exists; it is
+  only ever in a router advertisement.
+* The carrier sends no unsolicited advertisement. It answers a router solicitation -- and on a plain
+  kernel nothing sends one, because `net.ipv6.conf.all.forwarding=1` (needed for the hotspot) makes each
+  interface's `accept_ra` default to 0, and this bearer is configured by nothing: it is a raw-IP link
+  (`sipa_eth0`, arptype 519), so netifd has no IPv6 protocol handler on it.
+* Which step actually emits the solicitation, measured with a capture on the bearer (all three tried on
+  the same live bearer):
+
+  | step | solicitations sent | advertisement |
+  |---|---|---|
+  | `accept_ra` 0 -> 2 alone | 0 | none |
+  | `disable_ipv6` 1 -> 0, `accept_ra` already 2 | 2 | back in 57 ms |
+  | addrconf restart, **then** `accept_ra` 0 -> 2 | 0 | none |
+
+  The third row is the trap: the address-configuration restart schedules the solicitation, and writing
+  `accept_ra` afterwards cancels it -- silence for another 30 s, which is easy to misread as "this SIM
+  has no IPv6". So the order is `accept_ra` first, restart second, nothing after.
+* Fix: `proto mu300cell` (`openwrt/overlay/lib/netifd/proto/mu300cell.sh`, option `ipv6 'relay'`). The
+  address and the RA default route are then installed by the kernel's own SLAAC -- nothing is reported
+  to netifd, and odhcpd reads the advertisement off the wire rather than out of netifd's records.
+* Lifetimes are infinite (address `valid_lft forever`, router lifetime ~18 h), so an address, once
+  learnt, is never renewed or expired. That is why the setup **flushes** the bearer's IPv6 on every dial:
+  after a renumber the old prefix would otherwise stay configured for the life of the boot. Verified by
+  forcing a teardown/setup: the advertisement returned on its own, with a different prefix.
+
+### 32. Sharing that prefix with the hotspot: relay, NAT66, and one /64 route
+Three separate things have to be true, and each fails invisibly on its own:
+
+* **Relay.** odhcpd needs `dhcp.wan` as `master` (the interface that owns the bearer, so the carrier's
+  RS/RA are picked up there) and the hotspot as `ra 'relay'` / `dhcpv6 'relay'`. The hotspot then gets an
+  advertisement built by odhcpd, measured on the wire:
+
+  ```
+  fe80::.. > ff02::1: ICMP6, router advertisement
+    hop limit 0, Flags [other stateful], pref medium, router lifetime 65535s
+    prefix info option: 2409:8947:39b:557::/64, Flags [auto], valid time infinity, pref. time infinity
+  ```
+
+  So clients SLAAC their own public addresses out of the carrier's /64 and route via the hotspot's
+  link-local. Two details worth knowing: the flags are odhcpd's own (the `ra_flags` list in the config
+  is inert in relay mode -- here `other stateful` without `managed`, i.e. addresses by SLAAC), and the
+  advertisement carries **no RDNSS**, so a client gets no IPv6 resolver from it. That is not a defect
+  in practice -- a dual-stack client resolves over its IPv4 resolver, and AAAA over IPv4 is ordinary --
+  but it means IPv6 is not deployable to a client that has no other resolver.
+* **NAT66.** The carrier routes the single address it assigned and would drop a reply addressed to a
+  client, so the wan zone needs `masq6` (`net-split` sets it). Proven on the wire rather than inferred:
+  with a client on the hotspot, every echo request on the bearer leaves with the **bearer's** address as
+  source, never the client's, and the replies come back to the bearer.
+* **A route to the LAN.** None exists by default: `mu300cell` flushes the bearer's IPv6 routes on setup,
+  so a lookup for a client address falls through to the default route and the reply leaves via the modem
+  towards the carrier gateway, where it disappears. `ndp-learn` installs the bearer's /64 on the hotspot
+  bridge at metric 128 -- below the RA's own route for the same /64 on the bearer (metric 256) -- and
+  follows a renumber. NDP then resolves each client on demand, with no race for addresses that never
+  appeared in the neighbour table. Upstream's extra `/128` pins per neighbour entry are deliberately
+  left out: any host creates such an entry with one spoofed advertisement, and it would pin an unrelated
+  address (another client's, the router's own, an internet host's) to the LAN -- a route hijack.
+* The first solicitation from a brand-new client is answered only after it retransmits ~4 s later
+  (measured 65 ms after the retransmit); the interface is registered with odhcpd a moment after it comes
+  up. Every client retransmits, so this costs nothing, but a single-shot probe would call the relay dead.
+* A netifd **reload does not restart an interface whose protocol options changed** (measured: after
+  adding `network.wan.ipv6` the wan kept its original uptime and its IPv4-only state), and the relay
+  branch runs only on setup. A boot or a fresh install is fine -- the interface is configured after the
+  config lands -- but an install that is already up needs one re-attach, which is what `net-split --apply`
+  now does (guarded by the bearer having no public address, so it fires at most once per install).
+* The IPv6 split follows the IPv4 one: the USB management link (`br-lan`) gets no router advertisement
+  and no DHCPv6, because a second default route on the PC's management link outranks its real uplink
+  (see `### 21` and `net-split`). Only the hotspot relays.
+* **Not verified: IPv6 over the Wi-Fi radio.** The client used above is a veth in a network namespace on
+  the bridge -- a real forwarded client, but not one crossing the WiFi driver. Upstream records IPv6
+  TCP/UDP from Wi-Fi clients failing on 5.4 where it works on 6.18, with this port's
+  `wlan_combo-rx-software-checksum.patch` (unconditional `CHECKSUM_NONE`) as the only difference in that
+  path. Until a real Wi-Fi client is tested, that remains open.
+* **The device cannot test this itself, and that is a hardware property**: `iw phy` reports
+  `#{ managed, AP } <= 1` -- one managed-or-AP interface, so an `AP + STA` self-loop (join your own
+  hotspot and bounce packets through the radio) is not possible on Marlin3 with this driver. A second
+  physical client is the only way to cross the radio. Worth knowing before planning any air-interface
+  test: there is no self-contained variant.
+* The upstream RX-hang fix (`6519748`, "Wi-Fi RX no longer hangs the device under load") does **not**
+  apply here, and it is worth knowing why rather than backporting it blind: the vendor's
+  `mm_check_mh_buffer()` refreshes an RX buffer with `dma_sync_single_for_device()`, which on arm64
+  *invalidated* FROM_DEVICE buffers up to 5.19 and *cleans* them from then on. On 6.18 that left the CPU
+  reading a stale cache line, so every check failed and the machine hung under load; on 5.4 the call
+  still invalidates, i.e. it does what the loop wants. The 5.4-side companion (`294deb8`, which added the
+  software-checksum patch) is already in this branch. Fixing 6.18 meant a different call, not a different
+  intent.
+
+### 33. The veth-on-the-bridge test client panicked the kernel (and where the evidence lived)
+The teardown half of the test in `### 32`, not its traffic, killed the machine. The boot came back with
+`bootcause="Reboot into ap watchdog"`, which is what a panic looks like from the outside (sprd's hardware
+watchdog resets the SoC), so the first thing worth knowing is where the real story is kept:
+
+**`/sys/fs/pstore/console-ramoops-0` survives the panic.** On a Unisoc boot the kernel is built with
+ramoops (`ramoops: using 0x40000@0xfff80000`), and pstore keeps the *previous* boot's console -- read it
+on the boot after a death and you get the Oops verbatim, timestamps and call trace included. The port's
+own `early-recorder` (`/opt/mu300/bin/early-recorder`) writes to a region inside `boot_b` every 5 s for
+the first 300 s, which is the right tool for a *power cut*, but it stops long before a crash hours later
+and this boot's writes overwrite it byte for byte -- so for a panic, **pstore first**:
+
+```sh
+for f in /sys/fs/pstore/*ramoops*; do echo "== $f"; cat "$f"; done
+```
+
+What it said, in the dead boot's last 30 ms:
+
+```
+[ 1336.712180] Unable to handle kernel paging request at virtual address e399ba28ab68c7c5
+[ 1336.720979] Internal error: Oops: 96000004 [#1] PREEMPT SMP
+[ 1336.768197] Workqueue: events_unbound call_usermodehelper_exec_work
+[ 1336.781174] pc : kmem_cache_alloc_trace+0xc4/0x398
+[ 1336.116387] Call trace:
+              kmem_cache_alloc_trace+0xc4/0x398
+              __get_vm_area_node.llvm...  -> __vmalloc_node_range -> scs_alloc -> scs_prepare
+              dup_task_struct -> copy_process -> _do_fork -> kernel_thread
+              call_usermodehelper_exec_work -> process_one_work -> worker_thread -> kthread
+[ 1338.278671] Kernel panic - not syncing: Fatal exception
+[ 1338.329889] Unable to handle kernel paging request at virtual address dead000000000100   # LIST_POISON
+```
+
+So the fault is not in the packet path at all: it is in **`fork()`** -- a corrupt pointer is taken while
+allocating the Shadow Call Stack for a new task -- on `kworker/u16:3` running a usermode helper, i.e. a
+netdev uevent turned into a `/sbin/hotplug-call`. Two things make the neighbourhood obvious:
+
+* Every `sipa_dummy: dev ... evt ...` line in that boot (8 of them, and *only* these) belongs to the
+  test's veth peer `v6cp`, all inside the same window, and the set includes `evt 1` / `evt 14`
+  (`NETDEV_UP` / `NETDEV_PRE_UP`) -- the signature of a namespace being torn down and its devices
+  re-registered into init_net, plus `device v6cp entered promiscuous mode` and `dev br-wifi evt 12/9/8`
+  as the bridge re-evaluated its port.
+* Nothing else was cooperating at that moment: the same boot had logged no `sipa_dummy` line at all
+  before it, and this is the only new netdev in it.
+
+The precise ordering cannot be nailed down from a ring buffer shared by eight CPUs (the first fault is
+stamped 12 ms *before* the v6cp lines, which another CPU printed concurrently), so the honest statement
+is: **the panic happened during the run whose netdev churn is the only unusual event in that boot, and
+has not happened in any boot without it.** The suspect, if someone wants to chase it, is the vendor
+`sipa`/`sipa_dummy` netdev-notifier path running against a device it does not own (`v6cp` is a plain
+veth), corrupting the slab for whoever allocates next.
+
+Practical rules that come out of this:
+
+* **Do not put test clients on the bridge on this device.** A real phone joining the hotspot does not add
+  or remove a bridge port; the AP served client traffic for days without this. The tool is bench
+  equipment with a hazard, and `tools/net-v6-client-test.sh` now opens with that warning. It is not the
+  verification to reach for first -- a real Wi-Fi client is both the safer and the more meaningful test.
+* The panic, if it comes, comes within seconds of the run. Leave the phone alone afterwards rather than
+  retesting immediately.
+* `bootcause="Reboot into ap watchdog"` in `/proc/cmdline` means *the watchdog reset it*, not *the
+  watchdog timed out* -- a panic looks identical from there. Read pstore before blaming the modem, SIPA,
+  or anything the log happened to be printing at the time.
+
 ## Audio
 
 ### 24. No internal audio hardware
