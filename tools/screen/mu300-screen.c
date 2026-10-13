@@ -771,7 +771,7 @@ static void render(void)
 
 	/* --- header --- */
 	fill_rect(0, 0, fb_w, 20 * sc, FB_PANEL);
-	draw_text(8, 4 * sc, sc, FB_ACCENT, portrait ? "MU300" : "MU300 / changxing60");
+	draw_text(8, 4 * sc, sc, FB_ACCENT, "changxing60");
 	snprintf(line, sizeof line, "OpenWrt 25.12.5");
 	draw_text(fb_w - 8 - text_w(sc, line), 4 * sc, sc, FB_DIM, line);
 
@@ -983,7 +983,7 @@ static void handle_key(__u16 code, __s32 value)
 /* ---------- offline frame dump (--dump FILE, used to check the layout without a panel) ---------- */
 static void mock_data(void)
 {
-	snprintf(ssid, sizeof ssid, "MU300-D0FD");
+	snprintf(ssid, sizeof ssid, "changxing60");
 	snprintf(psk, sizeof psk, "example-not-a-real-key");   /* nothing here is real: --dump is a preview */
 	snprintf(wifi_addr, sizeof wifi_addr, "40:45:da:12:d0:fd");
 	snprintf(wifi_ch, sizeof wifi_ch, "6");
