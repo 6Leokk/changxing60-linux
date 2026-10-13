@@ -19,13 +19,17 @@
 # 2026-10-13, the "charge only at 0.5 A" bug: the same probe sizes the input current
 # limit from its USB detection, which on this rootfs reports type=Unknown and lands on
 # REG0x00 = 0x09 (IINLIM 1.0 A) -- or 0.04 (500 mA) on an SDP misdetection. The IC
-# itself allows ICHG = 2.04 A (probe writes REG0x02 = 0xa2) and the pack profile's own
+# itself allows ICHG = 2.04 A (that 0xa2 is the chip's POR default; the driver never
+# programs ICHG) and the pack profile's own
 # max is 960 mA, so neither is the binding limit: the input limit is. Measured: IINLIM
 # 1.0 A -> ~0.8 A into the cell, 0.5 A -> 0.19 A. Pinned: REG0x00 = 0x0b (IINLIM 100 +
 # 11*100 = 1.2 A) -> ~0.95 A into the cell, and REG0x02 = 0x90 (keeps BOOST_LIM[7] =
 # 1.2 A, caps ICHG[5:0] at 16*60 = 960 mA, the pack profile's
 # constant_charge_current_max_ua) so the charge current is bounded by the battery spec
-# on any source, not by the flakiest link in the chain.
+# on any source, not by the flakiest link in the chain. The 1.2 A input is well inside
+# the vendor's own design (DT charge-dcp-current 2.0 A, charge-fchg-current 3.0 A) and
+# VINDPM sits at 4.5 V (REG0x06 = 0x66): a source that cannot hold the draw lets VBUS
+# sag below that and the IC throttles its own input.
 #
 # Nothing re-programs these afterwards. This build sets CONFIG_VENDOR_SQC_CHARGER=y,
 # which makes bq2560x_charger_usb_set_property() return 0 before it reaches any
@@ -50,6 +54,26 @@
 # minute. The proper fix is a line or two in the kernel (sanity-check current_max_ua
 # in bq2560x_charger_hw_init, pin IINLIM from the DT), but that needs the module
 # rebuilt and redeployed, so it is not this script's job.
+#
+# 2026-10-13 (v3), the charge-voltage ceiling and the top-off cap:
+#
+# REG0x04 VREG[7:3] (base 3856 mV + n*32 mV). The vendor driver's own
+# set_termina_vol(4340 mV) for this pack rounds up to code 16 -> REG0x04 = 0x80
+# (4368 mV); that is what stock Android on this hardware charged to, and what the
+# probe writes. 2026-10-13 the live register was found at 0x90 instead -- code 18 =
+# 4432 mV, 92 mV over the 4.34 V profile, i.e. a real overcharge head. The author of
+# that write could not be traced (the dmesg ring had rotated past probe time) but it
+# is a one-shot: overwriting it and watching for 70 s showed nothing re-applies it.
+# Pin it back to the vendor's own 0x80; the pin also re-asserts after any future
+# mystery write, within one crontab minute.
+#
+# /opt/mu300/charge-cap (optional, per-mille, e.g. 990 = 99%) caps the top of charge
+# for battery longevity: at/above it REG0x01 CHG_CONFIG is cleared (0x9a -> 0x8a),
+# at/below cap-40 permille it is set back. With VBUS present and CHG_CONFIG=0 the
+# board still runs entirely off VBUS -- the bq2560x is a power-path charger, the
+# battery only floats (measured current_now ~= 0 while plugged) -- so the cap does
+# not unpower anything, it only stops the cell sitting/cycling at the very top.
+# Delete the file to remove the cap entirely.
 R=/sys/class/power_supply/bq2560x_charger/device/registers
 
 # S99 runs long before the vendor modules are all in; wait for the node to appear.
@@ -86,4 +110,40 @@ val=$(reg 02)
 if [ "$val" != "0x90" ]; then
 	echo "charge-fix: charge current REG0x02 $val -> 0x90 (ICHG -> 960 mA)"
 	echo "0 0x02 0x90" > "$R"
+fi
+
+# Charge-voltage ceiling: the vendor's own value for this pack.
+val=$(reg 04)
+if [ "$val" != "0x80" ]; then
+	echo "charge-fix: charge voltage REG0x04 $val -> 0x80 (VREG -> 4368 mV)"
+	echo "0 0x04 0x80" > "$R"
+fi
+
+# Optional top-off cap. 0x9a = probe value with charging on; 0x8a = same with
+# CHG_CONFIG cleared. soc is the FGU's per-mille capacity.
+cap=$(cat /opt/mu300/charge-cap 2>/dev/null)
+case "$cap" in
+""|*[!0-9]*) cap="" ;;
+esac
+val=$(reg 01)
+if [ -z "$cap" ]; then
+	# No cap configured: make sure a previously capped state is undone.
+	if [ "$val" = "0x8a" ]; then
+		echo "charge-fix: no charge-cap, charge on (REG0x01 -> 0x9a)"
+		echo "0 0x01 0x9a" > "$R"
+	fi
+else
+	soc=$(cat /sys/class/power_supply/sc27xx-fgu/capacity 2>/dev/null)
+	case "$soc" in
+	""|*[!0-9]*) soc="" ;;
+	esac
+	if [ -n "$soc" ]; then
+		if [ "$soc" -ge "$cap" ] && [ "$val" != "0x8a" ]; then
+			echo "charge-fix: soc ${soc} >= cap $cap -> charge off (REG0x01 $val -> 0x8a)"
+			echo "0 0x01 0x8a" > "$R"
+		elif [ "$soc" -le $((cap - 40)) ] && [ "$val" != "0x9a" ]; then
+			echo "charge-fix: soc ${soc} <= $((cap - 40)) -> charge on (REG0x01 $val -> 0x9a)"
+			echo "0 0x01 0x9a" > "$R"
+		fi
+	fi
 fi
