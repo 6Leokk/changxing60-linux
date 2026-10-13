@@ -46,9 +46,15 @@ static void on_signal(int sig) { (void)sig; stop_flag = 1; }
 
 /* ---------- framebuffer ---------- */
 static int drm_fd = -1;
-static u32 *fb = NULL;
-static int fb_w = 0, fb_h = 0, fb_pitch = 0, fb_handle = 0, fb_id = 0;
-static size_t fb_size = 0;
+static u32 *fb = NULL;             /* the buffer render() paints into -- never the one on screen */
+static u32 *fb_buf[2] = { NULL, NULL };
+static u32 fb_id_buf[2] = { 0, 0 };
+static u32 crtc_saved = 0;
+static int scan_buf = 0;           /* which fb_buf[] the CRTC is scanning out */
+static int flip_mode = 1;          /* page flip; cleared for good if the driver refuses one */
+static int present_enabled = 1;    /* off for --once/--shot: they read the buffer back, not the panel */
+static int fb_w = 0, fb_h = 0, fb_pitch = 0;
+static size_t fb_size = 0;         /* one frame, in bytes */
 static double px_scale = 1.0;      /* text scale: 854x480 uses 2, larger panels 3 */
 /* The label gutter, in characters. 11 fits "Resources" plus a gap on a landscape line; the
  * portrait panel only has 30 columns, so drm_init narrows it to 9 and the values move to their
@@ -213,46 +219,56 @@ static int drm_init(void)
 	if (fb_h > fb_w + fb_w / 5)
 		LABEL_COLS = 10;                /* portrait: 30 columns, so a narrower gutter */
 
-	struct drm_mode_create_dumb cd;
-	memset(&cd, 0, sizeof cd);
-	cd.width = fb_w;
-	cd.height = fb_h;
-	cd.bpp = 32;
-	if (ioctl(drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, &cd) < 0) {
-		fprintf(stderr, "mu300-screen: CREATE_DUMB: %s\n", strerror(errno));
-		return -1;
-	}
-	fb_handle = cd.handle;
-	fb_pitch = cd.pitch;
+	/* Two dumb buffers. One bound to the CRTC is what the panel scans out, so painting a frame
+	 * directly into it is what made the screen flash: render() starts with a full-screen fill and
+	 * the rows only come back over the following milliseconds. With two buffers the frame is drawn
+	 * off-screen and handed over in one step (page flip, or a copy if the driver refuses one). */
+	for (int i = 0; i < 2; i++) {
+		struct drm_mode_create_dumb cd;
+		memset(&cd, 0, sizeof cd);
+		cd.width = fb_w;
+		cd.height = fb_h;
+		cd.bpp = 32;
+		if (ioctl(drm_fd, DRM_IOCTL_MODE_CREATE_DUMB, &cd) < 0) {
+			fprintf(stderr, "mu300-screen: CREATE_DUMB: %s\n", strerror(errno));
+			return -1;
+		}
+		fb_pitch = cd.pitch;
+		fb_size = (size_t)fb_pitch * fb_h;
 
-	struct drm_mode_fb_cmd fc;
-	memset(&fc, 0, sizeof fc);
-	fc.width = fb_w;
-	fc.height = fb_h;
-	fc.pitch = fb_pitch;
-	fc.bpp = 32;
-	fc.depth = 24;
-	fc.handle = fb_handle;
-	if (ioctl(drm_fd, DRM_IOCTL_MODE_ADDFB, &fc) < 0) {
-		fprintf(stderr, "mu300-screen: ADDFB: %s\n", strerror(errno));
-		return -1;
-	}
-	fb_id = fc.fb_id;
+		struct drm_mode_fb_cmd fc;
+		memset(&fc, 0, sizeof fc);
+		fc.width = fb_w;
+		fc.height = fb_h;
+		fc.pitch = fb_pitch;
+		fc.bpp = 32;
+		fc.depth = 24;
+		fc.handle = cd.handle;
+		if (ioctl(drm_fd, DRM_IOCTL_MODE_ADDFB, &fc) < 0) {
+			fprintf(stderr, "mu300-screen: ADDFB: %s\n", strerror(errno));
+			return -1;
+		}
+		fb_id_buf[i] = fc.fb_id;
 
-	struct drm_mode_map_dumb md;
-	memset(&md, 0, sizeof md);
-	md.handle = fb_handle;
-	if (ioctl(drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &md) < 0) {
-		fprintf(stderr, "mu300-screen: MAP_DUMB: %s\n", strerror(errno));
-		return -1;
+		struct drm_mode_map_dumb md;
+		memset(&md, 0, sizeof md);
+		md.handle = cd.handle;
+		if (ioctl(drm_fd, DRM_IOCTL_MODE_MAP_DUMB, &md) < 0) {
+			fprintf(stderr, "mu300-screen: MAP_DUMB: %s\n", strerror(errno));
+			return -1;
+		}
+		void *m = mmap(NULL, cd.size, PROT_READ | PROT_WRITE, MAP_SHARED, drm_fd, md.offset);
+		if (m == MAP_FAILED) { fprintf(stderr, "mu300-screen: mmap: %s\n", strerror(errno)); return -1; }
+		fb_buf[i] = m;
+		/* dumb buffer contents are undefined until written; a frame is about to be drawn into
+		 * buffer 1, so buffer 0 needs a defined colour for the moment before the first flip */
+		for (size_t k = 0; k < fb_size / 4; k++) fb_buf[i][k] = FB_BG;
 	}
-	fb = mmap(NULL, cd.size, PROT_READ | PROT_WRITE, MAP_SHARED, drm_fd, md.offset);
-	if (fb == MAP_FAILED) { fb = NULL; fprintf(stderr, "mu300-screen: mmap: %s\n", strerror(errno)); return -1; }
 
 	struct drm_mode_crtc cr;
 	memset(&cr, 0, sizeof cr);
 	cr.crtc_id = crtc_id;
-	cr.fb_id = fb_id;
+	cr.fb_id = fb_id_buf[0];                     /* scan out 0, draw into 1 */
 	cr.set_connectors_ptr = (u64)(uintptr_t)&con_id;
 	cr.count_connectors = 1;
 	cr.mode = mode;
@@ -261,8 +277,62 @@ static int drm_init(void)
 		fprintf(stderr, "mu300-screen: SETCRTC: %s\n", strerror(errno));
 		return -1;
 	}
-	fprintf(stderr, "mu300-screen: mode set, %dx%d, pitch %d, scale %g\n", fb_w, fb_h, fb_pitch, px_scale);
+	crtc_saved = crtc_id;
+	scan_buf = 0;
+	fb = fb_buf[1];
+	fprintf(stderr, "mu300-screen: mode set, %dx%d, pitch %d, scale %g, double buffered\n",
+		fb_w, fb_h, fb_pitch, px_scale);
 	return 0;
+}
+
+/* ---------- presenting a finished frame ----------
+ * The invariant everywhere below: fb == fb_buf[scan_buf ^ 1], i.e. the draw target is always the
+ * buffer the CRTC is *not* showing.
+ *
+ * Page flip is the good path: the kernel swaps the scanout to the finished buffer at the next
+ * vblank and queues a DRM_EVENT_FLIP_COMPLETE, which is read back on the same fd. A driver that
+ * will not take a page flip (or never completes one) drops to a plain copy of the finished frame
+ * into the scanned buffer -- one 1.6 MiB memcpy instead of the old draw-into-view, which shrinks
+ * the visible partial frame from "the whole repaint" to a single fast blit. */
+static int flip_wait(int ms)
+{
+	fd_set rfds;
+	struct timeval tv;
+	FD_ZERO(&rfds);
+	FD_SET(drm_fd, &rfds);
+	tv.tv_sec = ms / 1000;
+	tv.tv_usec = (ms % 1000) * 1000;
+	if (select(drm_fd + 1, &rfds, NULL, NULL, &tv) <= 0) return -1;
+
+	char buf[256];
+	ssize_t n = read(drm_fd, buf, sizeof buf);
+	for (ssize_t off = 0; off + (ssize_t)sizeof(struct drm_event) <= n; ) {
+		struct drm_event *e = (struct drm_event *)(buf + off);
+		if (e->type == DRM_EVENT_FLIP_COMPLETE) return 0;
+		if (e->length < sizeof(struct drm_event)) break;
+		off += e->length;
+	}
+	return -1;
+}
+
+static void present(void)
+{
+	if (drm_fd < 0 || !present_enabled) return;
+	if (flip_mode) {
+		struct drm_mode_crtc_page_flip pf;
+		memset(&pf, 0, sizeof pf);
+		pf.crtc_id = crtc_saved;
+		pf.fb_id = fb_id_buf[scan_buf ^ 1];
+		pf.flags = DRM_MODE_PAGE_FLIP_EVENT;
+		if (ioctl(drm_fd, DRM_IOCTL_MODE_PAGE_FLIP, &pf) == 0 && flip_wait(500) == 0) {
+			scan_buf ^= 1;
+			fb = fb_buf[scan_buf ^ 1];
+			return;
+		}
+		flip_mode = 0;
+		fprintf(stderr, "mu300-screen: page flip unavailable, switching to buffer copy\n");
+	}
+	memcpy(fb_buf[scan_buf], fb_buf[scan_buf ^ 1], fb_size);
 }
 
 /* ---------- backlight ---------- */
@@ -441,21 +511,33 @@ static void read_system(void)
 		}
 		closedir(d);
 	}
+	/* Three nodes carry battery data and only two of them matter:
+	 *   battery/capacity        92    charger-manager, already percent
+	 *   sc27xx-fgu/capacity     885   the real fuel gauge, in per-mille (88.5%)
+	 *   bq2560x_charger/status  Full  input side only, no capacity
+	 * The old `c >= 0 && c <= 100` test threw the gauge away, so the page depended entirely on the
+	 * charger-manager node; whenever that one was not ready the row fell through to "no fuel gauge"
+	 * on a device whose fuel gauge was answering fine. Accept both scales. No early break: one node
+	 * may know the capacity and another the status. */
 	const char *ps[] = { "battery", "sc27xx-fgu", "bq2560x_charger" };
 	batt_cap = -1; batt_status[0] = '-'; batt_status[1] = 0; batt_volt = 0;
 	for (unsigned i = 0; i < sizeof ps / sizeof ps[0]; i++) {
 		char p[160];
 		snprintf(p, sizeof p, "/sys/class/power_supply/%.30s/capacity", ps[i]);
 		long long c = read_file_ll(p);
-		if (c >= 0 && c <= 100) { batt_cap = (int)c; }
+		if (c > 100 && c <= 1000) c = (c + 5) / 10;          /* per-mille gauge -> percent */
+		if (c >= 0 && c <= 100 && batt_cap < 0) batt_cap = (int)c;
 		snprintf(p, sizeof p, "/sys/class/power_supply/%.30s/status", ps[i]);
-		if (read_file_str(p, b, sizeof b) == 0 && strcmp(b, "Unknown") != 0 && batt_status[0] == '-')
+		if (read_file_str(p, b, sizeof b) == 0 &&
+		    (strcmp(b, "Charging") == 0 || strcmp(b, "Discharging") == 0 ||
+		     strcmp(b, "Full") == 0 || strcmp(b, "Not charging") == 0) &&
+		    (batt_status[0] == '-' || strcmp(batt_status, "Unknown") == 0))
 			snprintf(batt_status, sizeof batt_status, "%.15s", b);
 		snprintf(p, sizeof p, "/sys/class/power_supply/%.30s/voltage_now", ps[i]);
 		long long v = read_file_ll(p);
-		if (v > 0) batt_volt = (int)(v / 1000);
-		if (batt_cap >= 0 && batt_status[0] != '-') break;
+		if (v > 0 && batt_volt == 0) batt_volt = (int)(v / 1000);
 	}
+	if (batt_status[0] == '-') snprintf(batt_status, sizeof batt_status, "Unknown");
 }
 
 static void read_wan(void)
@@ -464,6 +546,19 @@ static void read_wan(void)
 	snprintf(p, sizeof p, "/sys/class/net/%.15s/operstate", wan_if);
 	if (read_file_str(p, b, sizeof b) == 0) snprintf(wan_state, sizeof wan_state, "%.11s", b);
 	else snprintf(wan_state, sizeof wan_state, "absent");
+	/* operstate is not enough to call the WAN healthy: a wedged data call keeps it "up" forever
+	 * (2026-10-13: green "sipa_eth0 up" for the whole boot while the interface carried no packets
+	 * and every client behind it had no internet). The watchdog's measured verdict wins when it is
+	 * fresh -- stale verdicts from an earlier boot must not stick to a call that now works. */
+	if (read_file_str("/tmp/mu300-wan-health", b, sizeof b) == 0) {
+		char verdict[8] = "";
+		long long at = 0;
+		if (sscanf(b, "%7s %lld", verdict, &at) == 2 && strcmp(verdict, "dead") == 0) {
+			long long up = read_file_ll("/proc/uptime");
+			if (up > 0 && at > 0 && up - at < 900)
+				snprintf(wan_state, sizeof wan_state, "no net");
+		}
+	}
 	wan_ip[0] = '-'; wan_ip[1] = 0;
 	snprintf(p, sizeof p, "ip -4 -o addr show dev %s 2>/dev/null", wan_if);
 	if (run_cmd(p, b, sizeof b)) {
@@ -550,6 +645,45 @@ static void draw_qr(int x0, int y0, int scale, const char *text)
 		for (int x = 0; x < n; x++)
 			if (m[y * n + x])
 				fill_rect(x0 + q + x * scale, y0 + q + y * scale, scale, scale, 0x00000000u);
+}
+
+/* ---------- battery ----------
+ * The page is this device's only battery indicator, so the row has to survive a fuel gauge that
+ * answers on a different scale: sc27xx-fgu reports per-mille (885 = 88.5%) while the
+ * charger-manager node reports percent. read_system() normalises both; these two keep the row from
+ * ever rendering as a bare "no fuel gauge" when a real number is available. */
+static void battery_line(char *out, size_t n)
+{
+	const char *st = batt_status;
+	if (strcmp(st, "Charging") == 0) st = "CHG";
+	else if (strcmp(st, "Discharging") == 0) st = "DIS";
+	else if (strcmp(st, "Full") == 0) st = "FULL";
+	else if (strcmp(st, "Not charging") == 0) st = "IDLE";
+	if (batt_cap < 0)
+		snprintf(out, n, batt_volt > 0 ? "%d.%02dV" : "unavailable",
+			 batt_volt / 1000, (batt_volt % 1000) / 10);
+	else if (batt_volt > 0)
+		snprintf(out, n, "%d%%  %s  %d.%02dV", batt_cap, st, batt_volt / 1000, (batt_volt % 1000) / 10);
+	else
+		snprintf(out, n, "%d%%  %s", batt_cap, st);
+}
+
+/* A level bar beside the text, so the row reads as a battery and not as another log line. Skipped
+ * when the (possibly truncated) value already reaches where the bar would go. */
+static void draw_batt_bar(int y, int sc, int limit, int pct, const char *text)
+{
+	int x0 = 8 + LABEL_COLS * 8 * sc;
+	int cols = (limit - x0) / (8 * sc);
+	int vlen = (int)strlen(text);
+	if (cols >= 0 && vlen > cols) vlen = cols;
+	int w = 14 * sc, h = 9 * sc;
+	int x = limit - w - 2 * sc;
+	if (cols < 0 || x < x0 + vlen * 8 * sc + 4 * sc) return;
+	u32 col = pct < 0 ? FB_DIM : (pct <= 15 ? FB_BAD : (pct <= 30 ? FB_WARN : FB_OK));
+	fill_rect(x, y + 6 * sc, w, h, FB_DIM);                     /* shell */
+	fill_rect(x + 2, y + 6 * sc + 2, w - 4, h - 4, FB_BG);
+	if (pct > 0) fill_rect(x + 2, y + 6 * sc + 2, (w - 4) * pct / 100, h - 4, col);
+	fill_rect(x + w, y + 6 * sc + h / 3, 3, h / 3, FB_DIM);     /* terminal nub */
 }
 
 static void render(void)
@@ -656,13 +790,10 @@ static void render(void)
 		status_line(y, "", line, FB_DIM, limit);
 		y += row_h + gap;
 
-		if (batt_cap >= 0) {
-			snprintf(line, sizeof line, "%d%%  %s  %d.%02dV", batt_cap, batt_status,
-				 batt_volt / 1000, (batt_volt % 1000) / 10);
-			status_line(y, "Battery", line, batt_cap > 30 ? FB_OK : FB_BAD, limit);
-		} else {
-			status_line(y, "Battery", "no fuel gauge", FB_DIM, limit);
-		}
+		battery_line(line, sizeof line);
+		u32 bcol = batt_cap < 0 ? FB_DIM : (batt_cap <= 15 ? FB_BAD : (batt_cap <= 30 ? FB_WARN : FB_OK));
+		status_line(y, "Battery", line, bcol, limit);
+		draw_batt_bar(y, sc, limit, batt_cap, line);
 	} else {
 		snprintf(line, sizeof line, "%s %s  %s/%s", wan_if, wan_state, wan_ip, wan_mask);
 		status_line(y, "WAN", line, wan_ok, limit);
@@ -695,13 +826,10 @@ static void render(void)
 		status_line(y, "Resources", line, FB_TEXT, limit);
 		y += row_h;
 
-		if (batt_cap >= 0) {
-			snprintf(line, sizeof line, "%d%%  %s  %d.%02dV", batt_cap, batt_status,
-				 batt_volt / 1000, (batt_volt % 1000) / 10);
-			status_line(y, "Battery", line, batt_cap > 30 ? FB_OK : FB_BAD, limit);
-		} else {
-			status_line(y, "Battery", "no fuel gauge", FB_DIM, limit);
-		}
+		battery_line(line, sizeof line);
+		u32 bcol = batt_cap < 0 ? FB_DIM : (batt_cap <= 15 ? FB_BAD : (batt_cap <= 30 ? FB_WARN : FB_OK));
+		status_line(y, "Battery", line, bcol, limit);
+		draw_batt_bar(y, sc, limit, batt_cap, line);
 	}
 
 	/* --- footer: URL left, key hints right ---
@@ -712,6 +840,10 @@ static void render(void)
 	draw_text(8, fb_h - 16 * sc, sc, FB_TEXT, line);
 	snprintf(line, sizeof line, "power=on/off vol=dim");
 	draw_text(fb_w - 8 - text_w(sc, line), hint_y, sc, FB_DIM, line);
+
+	/* The frame is complete in the off-screen buffer; hand it to the panel in one step. No-op
+	 * for --dump (no DRM) and for --shot (the caller reads the buffer back right after). */
+	present();
 }
 
 /* ---------- input ---------- */
@@ -821,16 +953,24 @@ int main(int argc, char **argv)
 
 	if (argc > 2 && strcmp(argv[1], "--dump") == 0) {
 		/* No DRM, no panel: build a frame in ordinary memory from a representative sample of
-		 * data so the layout can be eyeballed (and checked in CI) on any machine. */
-		fb_w = 854; fb_h = 480; fb_pitch = fb_w * 4;
+		 * data so the layout can be eyeballed (and checked in CI) on any machine.
+		 * `--dump FILE portrait` selects the panel's own orientation: the two branches below lay
+		 * out differently, and the wrong one is otherwise only ever seen on the real device. */
+		int want_portrait = (argc > 3 && strcmp(argv[3], "portrait") == 0);
+		fb_w = want_portrait ? 480 : 854;
+		fb_h = want_portrait ? 854 : 480;
+		fb_pitch = fb_w * 4;
 		fb_size = (size_t)fb_pitch * fb_h;
 		px_scale = 2;
+		if (fb_h > fb_w + fb_w / 5) LABEL_COLS = 10;   /* same rule as drm_init */
 		fb = calloc(1, fb_size);
 		if (!fb) return 1;
 		mock_data();
 		render();
 		return dump_ppm(argv[2]) == 0 ? 0 : 1;
 	}
+
+	if (once || shot) present_enabled = 0;   /* both dump the drawn buffer, not the panel */
 
 	if (drm_init() < 0) return 1;
 	if (backlight_find() == 0) backlight_apply();

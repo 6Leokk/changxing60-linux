@@ -35,6 +35,31 @@ at() {  # at CMD [timeout] -> response lines up to the final result code
 # The modem needs the vendor modem loader/SIPC drivers (5.4 kernel); a kernel without them (mainline) has no modem.
 modem_stack() { [ -e /dev/modem ] || [ -e /dev/pmsys ] || [ -c "$DEV" ]; }
 
+# Only one attach may own the AT port at a time.
+# netifd retries a failed setup every ~20 s (proto_setup_failed), but an attach can sit in the 60x2 s
+# registration wait below for over two minutes, so every retry forks another `mobile-data up` onto
+# the same port and they all fight over the same AT responses. That is how the 2026-10-13 storm was
+# built -- five stacked attaches, an AT channel that answered nothing, and a modem that only came
+# back on a reboot. The second caller now fails fast instead: netifd will retry, and by then the
+# first attach has either finished or released the lock.
+ATTACH_LOCK=/var/run/mu300-attach.lock
+
+up_locked() {
+    if ! mkdir "$ATTACH_LOCK" 2>/dev/null; then
+        local p
+        p=$(cat "$ATTACH_LOCK/pid" 2>/dev/null) || p=   # set -e: a missing pid file is not fatal
+        if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then
+            echo "another attach (pid $p) already owns $DEV" >&2
+            exit 4
+        fi
+        rm -rf "$ATTACH_LOCK"                       # owner died without cleaning up
+        mkdir "$ATTACH_LOCK" 2>/dev/null || { echo "attach lock busy" >&2; exit 4; }
+    fi
+    echo $$ > "$ATTACH_LOCK/pid"
+    trap 'rm -rf "$ATTACH_LOCK"' EXIT INT TERM
+    up "$@"
+}
+
 up() {
     modem_stack || { echo "no modem stack in this kernel ($(uname -r))" >&2; exit 3; }
     rm -f /run/mu300-mobile-data-down
@@ -69,7 +94,13 @@ up() {
         return 0
     fi
     ip link set "$IFACE" up
-    # the sipa driver hands up wrong hardware checksums ("hw csum failure" warnings): verify them in software
+    # The sipa driver hands up wrong hardware checksums ("hw csum failure" warnings), so the
+    # checksum has to be verified in software. Caveat worth knowing before trusting this line:
+    # the OpenWrt rootfs has no ethtool at all (not even a busybox applet), so on this device the
+    # call below has never actually done anything. It is kept for layouts that do have it; the
+    # netifd path (proto mu300cell) does not reach here and carries the same no-op for parity.
+    # Whether the 2026-10-13 outage was this or a wedged PDP context is unresolved -- the packets
+    # were not leaving the interface at all, which a bad checksum would not explain.
     ethtool -K "$IFACE" rx off 2>/dev/null || true
     ip addr flush dev "$IFACE"
     ip addr add "$ip4/$prefix" dev "$IFACE"
@@ -135,11 +166,45 @@ link_up() {
     [ "$(cat /sys/class/net/$IFACE/operstate 2>/dev/null)" != down ]
 }
 
+# link_up() is only half of "the call is alive", and the weaker half. A wedged data call keeps its
+# address, keeps operstate up and keeps reporting a healthy netdev: on 2026-10-13 the status page
+# showed sipa_eth0 up in green for the whole 4.7 h boot while the interface moved zero packets in
+# either direction and every downstream client sat at "connected, no internet". Nothing reconnected
+# it, because the only thing being tested was the address -- which was never wrong.
+# Hence a probe of the far side. ICMP because this carrier answers it and because it does not touch
+# the AT port, which is the rule that matters here (see the note above link_up). Several targets,
+# so one unreachable address cannot be mistaken for a dead call.
+wan_probes() {
+    local l
+    l=$(sed -n 's/^nameserver //p' /tmp/resolv.conf.d/resolv.conf.auto 2>/dev/null | head -2)
+    echo "$l 223.5.5.5 119.29.29.29"
+}
+
+probe_ok() {
+    local t
+    for t in ${WAN_PROBES:-223.5.5.5}; do
+        ping -c 1 -W 3 -I "$IFACE" "$t" >/dev/null 2>&1 && return 0
+    done
+    return 1
+}
+
+# Published for the status page, which otherwise has nothing to go on but operstate -- the very
+# signal that lied above. "<ok|dead> <uptime-seconds>".
+set_health() {
+    local up
+    read -r up _ < /proc/uptime 2>/dev/null || up=0
+    printf '%s %s\n' "$1" "${up%.*}" > /tmp/.mu300-wan-health &&
+        mv /tmp/.mu300-wan-health /tmp/mu300-wan-health
+}
+
 # The modem firmware occasionally resets itself (modem_control reloads it); it comes back with the radio off and
-# no PDP context, which Android's RIL repairs silently. Check the call every 30 s and reconnect when it is gone.
+# no PDP context, which Android's RIL repairs silently. Check the call every 30 s and repair it when it is
+# gone -- where "gone" now means either the address is gone (link_up) or the call has stopped carrying
+# traffic while keeping the address (probe_ok).
 watch() {
-    local fails=0
+    local fails=0 ticks=0 unreach=0 last_try=0 now backoff=0 rx_now tx_now rx_last=0 tx_last=0
     modem_stack || { echo "no modem stack in this kernel ($(uname -r)), not watching" >&2; exit 0; }
+    WAN_PROBES=$(wan_probes)
     while :; do
         sleep "${MU300_WATCH_INTERVAL:-30}"
         [ -e /run/mu300-mobile-data-down ] && continue
@@ -154,21 +219,68 @@ watch() {
         fi
         if link_up; then
             fails=0
-            continue
+            # Traffic since the last tick is proof the call works, and it is free -- no probe, no
+            # radio wakeup. This is also what keeps a busy link safe from a false "dead" verdict.
+            rx_now=0; tx_now=0
+            read -r rx_now _ < "/sys/class/net/$IFACE/statistics/rx_packets" 2>/dev/null || true
+            read -r tx_now _ < "/sys/class/net/$IFACE/statistics/tx_packets" 2>/dev/null || true
+            if [ "${rx_now:-0}" -gt "${rx_last:-0}" ] || [ "${tx_now:-0}" -gt "${tx_last:-0}" ]; then
+                rx_last=$rx_now; tx_last=$tx_now
+                unreach=0; backoff=0
+                set_health ok
+                continue
+            fi
+            rx_last=$rx_now; tx_last=$tx_now
+            # Idle, so ask the far side. Every third tick (~90 s): often enough to catch a wedged
+            # call quickly, rare enough not to keep waking the radio for no reason.
+            ticks=$((ticks + 1))
+            [ $((ticks % 3)) -eq 0 ] || continue
+            if probe_ok; then
+                unreach=0; backoff=0
+                set_health ok
+                continue
+            fi
+            set_health dead
+            unreach=$((unreach + 1))
+            # A probe can be lost on a healthy call; three in a row cannot.
+            [ "$unreach" -lt 3 ] && continue
+            unreach=0
+            echo "mobile data wedged (address present but ${WAN_PROBES%% *} unreachable)" >&2
+        else
+            # Reachable only with the call already down, so the attach below cannot collide with a live
+            # data session; the one stty is kept for the reset path (it is a no-op when already raw).
+            stty -F "$DEV" raw -echo 2>/dev/null || true
+            fails=$((fails + 1))
+            [ "$fails" -lt 2 ] && continue
+            echo "mobile data lost (modem reset or detached), reconnecting" >&2
         fi
-        # Reachable only with the call already down, so the attach below cannot collide with a live
-        # data session; the one stty is kept for the reset path (it is a no-op when already raw).
-        stty -F "$DEV" raw -echo 2>/dev/null || true
-        fails=$((fails + 1))
-        [ "$fails" -lt 2 ] && continue
-        echo "mobile data lost (modem reset or detached), reconnecting" >&2
+        # At most one repair per 10 minutes. The outage this replaces was built from retrying an
+        # attach on a port that was already attached; a tight loop here would rebuild exactly that.
+        read -r now _ < /proc/uptime 2>/dev/null || now=0
+        now=${now%.*}
+        [ $((now - last_try)) -lt 600 ] && continue
+        last_try=$now
         [ -w /sys/class/leds/sc27xx:blue/brightness ] && echo 0 > /sys/class/leds/sc27xx:blue/brightness
         if [ "${MU300_NETIFD:-0}" = 1 ]; then
-            ifup "${MU300_WAN:-wan}"   # OpenWrt: let netifd run the mu300cell protocol again
+            # `ifup` alone is a no-op while netifd still believes the interface is up -- which is
+            # precisely the wedged case, so take it down first and let the protocol run again.
+            ifdown "${MU300_WAN:-wan}"
+            sleep 2
+            ifup "${MU300_WAN:-wan}"
         else
             ( up ) || echo "reconnect failed, retrying" >&2
         fi
         fails=0
+        ticks=0
+        backoff=$((backoff + 1))
+        if [ "$backoff" -ge 3 ]; then
+            # Re-attaching has not helped three times running, so the trouble is deeper than the
+            # PDP context: put the radio through the full off/on + PIN wait, which is what Android's
+            # RIL does and the only thing short of a reboot known to clear a stuck AT port here.
+            backoff=0
+            echo "re-attach did not restore the data path 3 times, resetting the radio" >&2
+            sim_reset >&2 || true
+        fi
     done
 }
 
@@ -184,7 +296,7 @@ status() {
 }
 
 case "${1:-status}" in
-    up) up "${2:-}" ;;
+    up) up_locked "${2:-}" ;;
     down) down ;;
     status) status ;;
     sim-reset) sim_reset ;;

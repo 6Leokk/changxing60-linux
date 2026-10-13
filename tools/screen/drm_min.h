@@ -65,6 +65,28 @@ struct drm_mode_crtc {
 	struct drm_mode_modeinfo mode;
 };
 
+struct drm_mode_crtc_page_flip {
+	u32 crtc_id, fb_id, flags, reserved;
+	u64 user_data;
+};
+
+/* Events come back through read() on the DRM fd as {type, length} + payload; the flip event's
+ * payload is drm_event_vblank. Needed for the double buffering in mu300-screen.c. */
+struct drm_event {
+	u32 type, length;
+};
+
+#define DRM_EVENT_VBLANK        0x01
+#define DRM_EVENT_FLIP_COMPLETE 0x02
+
+struct drm_event_vblank {
+	struct drm_event base;
+	u64 user_data;
+	u32 tv_sec, tv_usec, sequence, crtc_id;
+};
+
+#define DRM_MODE_PAGE_FLIP_EVENT 0x01
+
 #define DRM_IOCTL_BASE 'd'
 #define DRM_IOWR(nr, type) _IOWR(DRM_IOCTL_BASE, nr, type)
 #define DRM_IOW(nr, type) _IOW(DRM_IOCTL_BASE, nr, type)
@@ -77,6 +99,7 @@ struct drm_mode_crtc {
 #define DRM_IOCTL_MODE_GETCONNECTOR DRM_IOWR(0xA7, struct drm_mode_get_connector)
 #define DRM_IOCTL_MODE_ADDFB        DRM_IOWR(0xAE, struct drm_mode_fb_cmd)
 #define DRM_IOCTL_MODE_RMFB         DRM_IOWR(0xAF, unsigned int)
+#define DRM_IOCTL_MODE_PAGE_FLIP    DRM_IOWR(0xB0, struct drm_mode_crtc_page_flip)
 #define DRM_IOCTL_MODE_CREATE_DUMB  DRM_IOWR(0xB2, struct drm_mode_create_dumb)
 #define DRM_IOCTL_MODE_MAP_DUMB     DRM_IOWR(0xB3, struct drm_mode_map_dumb)
 #define DRM_IOCTL_MODE_DESTROY_DUMB DRM_IOWR(0xB4, struct drm_mode_create_dumb)

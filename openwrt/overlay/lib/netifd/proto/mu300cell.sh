@@ -41,6 +41,11 @@ proto_mu300cell_setup() {
 	dns2=$(echo "$out" | sed -n 's/^DNS2=//p')
 
 	ip link set "$ifname" up
+	# Parity with the standalone path in mobile-data, which turns RX checksum offloading off
+	# because the sipa driver reports checksums the stack cannot trust. Note that this rootfs has
+	# no ethtool (see mobile-data), so both places are inert here -- recorded rather than removed so
+	# the workaround is not silently forgotten.
+	ethtool -K "$ifname" rx off 2>/dev/null || true
 	proto_init_update "$ifname" 1
 	proto_add_ipv4_address "$ip" "${prefix:-32}"
 	proto_add_ipv4_route "0.0.0.0" 0
