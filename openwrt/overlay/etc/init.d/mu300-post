@@ -33,6 +33,15 @@ start_service() {
 	procd_set_param command /bin/sh -c "sleep 35; exec /opt/mu300/bin/wifi-fix"
 	procd_set_param env PATH="$PATH"
 	procd_close_instance
+	# wifi-fix repairs the AP once, at startup. This keeps repairing it: an AP that goes off air
+	# later (a firmware assert that powered the radio off under mu300-hw's reset policy, a failed
+	# CMD_START_AP) looks perfectly healthy from the host, so something has to test it the way a
+	# client would and put it back. Restarts wifi rather than rebooting -- see hotspot-watch.
+	procd_open_instance hotspotwatch
+	procd_set_param command /opt/mu300/bin/hotspot-watch
+	procd_set_param env PATH="$PATH"
+	procd_set_param respawn 3600 30 0
+	procd_close_instance
 	procd_open_instance bootok
 	procd_set_param command /bin/sh -c "sleep 30; exec /opt/mu300/bin/mu300-next-boot --rearm"
 	procd_set_param env PATH="$PATH"

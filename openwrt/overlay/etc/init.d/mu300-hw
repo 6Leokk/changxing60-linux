@@ -13,6 +13,22 @@ boot() {
 	/opt/mu300/bin/wifi-start >/tmp/mu300-wifi-start.log 2>&1
 	# sprd_wlan_combo is loaded by wifi-start; re-assert in case its probe raised the level again.
 	/opt/mu300/bin/quiet-console
+	# What the WCN framework should do when the firmware asserts. The build default is "dump"
+	# (read out the firmware's memory and stop: is_reset = WCN_ASSERT_ONLY_DUMP, sysfs.h:15, set
+	# from the FLAG_WCN_USER-less branch at sysfs.c:1064), which leaves the chip wedged with
+	# cp_asserted = 1 until a reboot -- the radio stays up as far as hostapd is concerned and no
+	# client gets a packet. "reset" instead powers the radio off on an assert and lets the WLAN
+	# driver's own reset_work (iface.c:150 -> sc2355_reset_self, tx.c:1820) clear the wedge;
+	# hotspot-watch then re-opens the interface, which re-downloads the firmware. This is a
+	# kernel-memory atomic, so it is re-applied every boot, after the wcn misc device exists.
+	R=/sys/devices/virtual/misc/wcn/devices/reset_dump
+	i=0
+	while [ $i -lt 30 ]; do
+		[ -w "$R" ] && break
+		sleep 1
+		i=$((i + 1))
+	done
+	[ -w "$R" ] && echo reset > "$R"
 	# cfg80211 looked for regulatory.db before the rootfs was mounted; load it now so hostapd sees the country rules
 	/opt/mu300/bin/regdb-load >>/tmp/mu300-wifi-start.log 2>&1
 	/opt/mu300/bin/openwrt-wifi-config >>/tmp/mu300-wifi-start.log 2>&1
