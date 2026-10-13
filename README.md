@@ -34,6 +34,7 @@ Wi-Fi on the ZTE F50 5G mobile hotspot (hardware MU300, Unisoc T760 / UMS9620). 
 | Default boot to Linux with automatic fallback | ✅ `mu300-next-boot linux\|android`; a Linux boot that never completes rolls back to Android |
 | RAM | ✅ 1473 MiB usable (464 MiB is the modem firmware's, unavoidable); unused logo/sysdump reservations freed, zram swap |
 | OpenWrt 25.12 (selectable next to Ubuntu, `mu300-os`) | ✅ procd boot, modem, cellular WAN (`proto mu300cell`, APN in LuCI), firewall4 NAT, 5 GHz Wi-Fi (UCI/LuCI), USB LAN, SSH; ~140 MiB RAM used |
+| Internal MIPI panel (BOE, 480×854 portrait) | ✅ `sprd-drm.ko` built as an external module (DPU0 + DSI; it is *not* missing from the tree — the F50 config just leaves `CONFIG_DRM_SPRD` off), plus a self-drawn status page with a LuCI QR (`tools/screen/`). The power key toggles the backlight. **Touch is deliberately not loaded.** |
 | Internal audio | ✗ no speaker/mic path; the AW883xx amplifier does not answer on I2C. The AGDSP can be booted with firmware from another device (Android community modules), Linux port pending |
 | Bluetooth (SC2355) | ✅ BlueZ `hci0` powered, scanning works: `sprdbt_tty` (PCIe H4) + `mu300-bt-init` vendor PSKey/RF upload + link-policy kernel patch |
 | GPU (Mali-G57) | ✅ OpenCL 3.0 (headless): `mali_kbase` r40p0 built from source + Android's Mali userspace in the vendor chroot (`android-gpu-run`) |

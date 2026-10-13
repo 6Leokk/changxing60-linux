@@ -88,8 +88,13 @@ average. `top` shows about 98 % idle.
 * The ZTE U30 Air kernel (`github.com/Enceka/android_kernel_zte_ums9620_mifi_u30air`, "downloaded from ZTE
   opensource") is exactly 5.4.254, covers 137 of the 150 F50 vendor modules and all but one derived config
   symbol of the F50 stock config.
-* Missing from that tree: camera/display/GPU/touch modules (not used on this device) and the Wi-Fi driver
-  `sprd_wlan_combo`, which is taken from the realme C51/C53 AndroidT kernel_modules drop.
+* Missing from that tree: camera/GPU modules and the Wi-Fi driver `sprd_wlan_combo`, which is taken from
+  the realme C51/C53 AndroidT kernel_modules drop.
+  **Correction (2026-10-13):** display and touch drivers are *not* missing. The ZTE tree carries
+  `drivers/gpu/drm/sprd` in full — the config simply leaves `CONFIG_DRM_SPRD` off (the F50 has no panel),
+  so `sprd-drm.ko` was never built, not absent. Touch is on SPI (`axs15205`), and `spi-sprd.ko` /
+  `zte_tpd.ko` are in the tree too. See `docs/mu300/screen-plan.md` (in the parent repo).
+  Only `sprd,vpu-pd` is genuinely absent from the ZTE tree and comes from elsewhere.
 * An older Unisoc 5.4.147 tree lacks the whole qogirn6pro USB stack and is not usable.
 
 ### 8. Build notes
@@ -265,7 +270,10 @@ average. `top` shows about 98 % idle.
   (`cp-modem@88000000`, needed for 4G/5G), 24 MiB for Trusty (`tos-mem`), 8 MiB SIPC shared memory, 3 MiB DDR training
   data and a few small areas; the kernel image (~35 MiB) and the page tables for 2 GiB (~32 MiB) make up the rest.
   `cma_share` (48 MiB) is still usable for movable pages.
-* Not needed on Linux: `logobuffer` (9 MiB, there is no display) and `sysdump-uboot` (16 MiB, bootloader crash dumps).
+* Not needed on Linux: `logobuffer` (9 MiB) and `sysdump-uboot` (16 MiB, bootloader crash dumps). `logobuffer`
+  was skipped on the belief that there is no display — that belief was wrong (2026-10-13: the internal MIPI panel
+  is fully described in the live DT and now driven by our own `sprd-drm.ko`), but the reservation is still not
+  needed, because OpenWrt drives the panel through DRM instead of the Android logo buffer.
   `kernel/patches/of-reserved-mem-skip.patch` adds `CONFIG_OF_RESERVED_MEM_SKIP` (the boot image command line is not
   passed on by LK, so a cmdline option alone would not work); MemTotal grew from 1447 to 1473 MiB.
 * `mu300-zram.service` adds lz4 zram swap of half the RAM (swappiness 100).
@@ -283,7 +291,8 @@ average. `top` shows about 98 % idle.
   `libc.so`/`libdl.so`/`libOpenCL.so`) and a small `_start` that calls `__libc_init` (`tools/gpu/`), so no NDK is needed.
   `android-gpu-run /system/bin/cltest`: "OpenCL 3.0 v1.r40p0-01eac0", device "Mali-G57 r0p1", 4M-element kernel
   verified correct.
-* There is no display, so GLES/Vulkan are only usable off-screen. The driver adds about 45 MiB of memory use.
+* GLES/Vulkan are only usable off-screen, since there is no GPU compositor wired to the panel. The driver adds
+  about 45 MiB of memory use. (The panel itself does exist and is driven — see the display correction above.)
 
 ## OpenWrt
 

@@ -1,6 +1,12 @@
 #!/bin/bash
 # Build the Unisoc display stack for USB-C DisplayPort (DPU1 + DPTX) and the PMIC USB-PD driver as external
-# modules against out-linux (5.4). The F50/MU300 ships without display, so ZTE's config leaves them out.
+# modules against out-linux (5.4). ZTE's config leaves CONFIG_DRM_SPRD off -- the F50, whose config this tree
+# derives from, has no panel at all.
+#
+# NOTE (2026-10-13): that config choice does NOT mean the MU300 has no display. The 7552N has an internal
+# MIPI panel on the DPU0 + DSI path, and it is driven today by a *separate* external-module build,
+# kernel/build-internal-display.sh. This script is the other path -- DPU1 + DPTX, i.e. DisplayPort over
+# USB-C -- which this device does not use. Do not conflate the two.
 # Run inside mu300-kbuild with the mu300-kernel volume on /src.
 set -e
 K=/src/zte-u30air

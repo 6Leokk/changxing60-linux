@@ -1,0 +1,31 @@
+#!/bin/bash
+# Build the static device binaries (aarch64 musl-ish: we link statically so the rootfs's musl
+# version does not matter, and so a rootfs rebuild never strands the binaries):
+#
+#   mu300-screen  the status page on the internal panel, and the power key as a screen switch
+#   keyinject     synthetic key presses via uinput, so the key path can be tested without a finger
+#
+# The device rootfs has no libdrm and no fbdev, so everything is raw syscalls. Run from anywhere;
+# output lands in out/.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+out="${1:-$here/out}"
+mkdir -p "$out"
+
+CC_IMG=mu300-kbuild-cross
+CFLAGS="-O2 -Wall -Wextra -static -s"
+
+if command -v aarch64-linux-gnu-gcc >/dev/null 2>&1; then
+    CC="aarch64-linux-gnu-gcc"
+    "$CC" $CFLAGS -I"$here" -o "$out/mu300-screen" "$here/mu300-screen.c" "$here/qr.c"
+    "$CC" $CFLAGS -o "$out/keyinject" "$here/keyinject.c"
+else
+    # the cross toolchain lives in the build image; same tree, bind-mounted read-only
+    docker run --rm -v "$here":/src:ro -v "$out":/out "$CC_IMG" sh -euc "
+        aarch64-linux-gnu-gcc $CFLAGS -I/src -o /out/mu300-screen /src/mu300-screen.c /src/qr.c
+        aarch64-linux-gnu-gcc $CFLAGS -o /out/keyinject /src/keyinject.c
+    "
+fi
+
+file "$out/mu300-screen" "$out/keyinject"
+echo "built: $out/mu300-screen $out/keyinject"

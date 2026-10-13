@@ -1,0 +1,54 @@
+--- a/sprd_drm.c
++++ b/sprd_drm.c
+@@ -407,6 +407,31 @@
+ 	return dev->of_node == data;
+ }
+ 
++/*
++ * The device tree describes the whole display subsystem, including output paths this kernel is
++ * not built with. component_master_add_with_match() waits for every component it matches, and a
++ * component whose driver is not compiled in can never be added -- so matching one hangs the
++ * master forever and the panel never comes up, with nothing in the log to explain it.
++ *
++ * On this board dpu1@31880000 is status=okay although the display module is built with
++ * CONFIG_DRM_SPRD_DPU0 + CONFIG_DRM_SPRD_DSI only (mu300-linux/kernel/build-internal-display.sh),
++ * and it is reachable both as a display-subsystem port parent and, on other boards, through the
++ * DP transmitter that the dpu1 port points at. Drop both here the same way the driver
++ * registration table below is #ifdef d out, so the match reflects what this build provides.
++ */
++static bool sprd_drm_component_built(struct device_node *np)
++{
++#if !IS_ENABLED(CONFIG_DRM_SPRD_DPU1)
++	if (of_device_is_compatible(np, "sprd,qogirn6pro-dpu1"))
++		return false;
++#endif
++#if !IS_ENABLED(CONFIG_DRM_SPRD_DP)
++	if (of_device_is_compatible(np, "sprd,dptx"))
++		return false;
++#endif
++	return true;
++}
++
+ static int sprd_drm_component_probe(struct device *dev,
+ 			const struct component_master_ops *m_ops)
+ {
+@@ -426,7 +451,8 @@
+ 		if (!port)
+ 			break;
+ 
+-		if (!of_device_is_available(port->parent)) {
++		if (!of_device_is_available(port->parent) ||
++		    !sprd_drm_component_built(port->parent)) {
+ 			of_node_put(port);
+ 			continue;
+ 		}
+@@ -460,7 +486,8 @@
+ 
+ 		for_each_child_of_node(port, ep) {
+ 			remote = of_graph_get_remote_port_parent(ep);
+-			if (!remote || !of_device_is_available(remote)) {
++			if (!remote || !of_device_is_available(remote) ||
++			    !sprd_drm_component_built(remote)) {
+ 				of_node_put(remote);
+ 				continue;
+ 			} else if (!of_device_is_available(remote->parent)) {

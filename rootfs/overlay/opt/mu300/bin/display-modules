@@ -1,0 +1,49 @@
+#!/bin/sh
+# Bring up the internal panel: load the external display modules in dependency order.
+#
+# None of these are in the boot module set. The F50 config this kernel is built from has no display
+# at all (CONFIG_DRM_SPRD is off), so sprd-drm and the genpd provider for "sprd,vpu-pd" are built
+# separately -- see mu300-linux/kernel/build-internal-display.sh -- and live in /lib/modules/<rel>/
+# alongside the boot set. Loading them here rather than in the initramfs keeps a failure from
+# blocking boot: worst case there is no picture, and the network stays up.
+#
+# Touch is deliberately NOT here. spi-sprd and zte_tpd stay unloaded so the touchscreen cannot
+# interfere with the panel bring-up; enabling it is a separate, explicitly confirmed change.
+KREL=$(uname -r)
+MODDIR=/lib/modules/$KREL
+
+loaded() { grep -q "^$(echo "$1" | tr - _) " /proc/modules 2>/dev/null; }
+
+# unisoc-iommu first: the DPU and the DSI hosts sit behind iommu@31001800 and friends, and the DRM
+# probe fails on the iommus phandle without it.
+# zte_lcdbl_vsp_vsn next: it powers the panel bias rails (ti65132b VSP/VSN) that the panel needs
+# before its init sequence runs.
+# sprd-vpu-pd before sprd-drm: the DPU/DSI power-domains point at vpu_pd_top; without the provider
+# they defer forever.
+# pwm-sprd before sprd-drm: the DT backlight node points "pwms" at 64030000.pwm, so the DRM
+# backlight driver cannot finish probing until the PWM controller has a driver. Without it the
+# DPU and panel sit in deferred probe forever behind "backlight is not ready".
+# trusty-ipc before sprd-drm: the DRM module contains disp_trusty.o, which links against the TIPC
+# channel API, so the symbol has to exist by the time sprd-drm is insmod'ed. Its own dependency,
+# trusty, is already up from the boot module set.
+for m in unisoc-iommu zte_lcdbl_vsp_vsn sprd-vpu-pd pwm-sprd trusty-ipc sprd-drm; do
+    if [ ! -f "$MODDIR/$m.ko" ]; then
+        echo "MISSING $m.ko in $MODDIR"
+        continue
+    fi
+    if loaded "$m"; then
+        echo "already loaded $m"
+        continue
+    fi
+    if insmod "$MODDIR/$m.ko" 2>/tmp/mu300-$m.err; then
+        echo "loaded $m"
+    else
+        echo "FAILED $m: $(cat /tmp/mu300-$m.err)"
+    fi
+done
+
+if [ -e /dev/dri/card0 ]; then
+    echo "OK /dev/dri/card0 present"
+else
+    echo "NO /dev/dri/card0"
+fi

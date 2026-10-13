@@ -37,7 +37,12 @@ docker run --rm --platform linux/arm64 \
   $(opt firmware firmware) $(opt android-subset android-subset) $(opt android-gpu-subset android-gpu-subset) \
   $(opt tools/logdw/logdw logdw) $(opt tools/bt-init/mu300-bt-init bt-init) $(opt tools/gpu/cltest cltest) \
   $(opt busybox busybox) $(opt upstream/out/modules mainline-modules) -v "$TOP/openwrt":/out -v "$REGDB":/in/regdb:ro \
+  $(opt out/display display) $(opt tools/screen/out screen-tools) \
   -e KREL=$KREL -e OUT="$(basename "$OUT")" mu300-openwrt-base:$VER /bin/sh -eu -c '
+# NOTE: everything down to the closing quote is ONE single-quoted string. An apostrophe anywhere
+# inside -- even in a comment, where the shell would otherwise ignore it -- ends that string early
+# and the outer script stops parsing. That is not hypothetical: exactly that happened to a comment
+# here, and the committed script could not run at all until it was reworded.
 mkdir -p /var/lock /var/run /tmp
 apk update >/dev/null
 apk add wpad-basic-mbedtls wifi-scripts iwinfo wireless-regdb iw bash ip-full coreutils-stty >/dev/null
@@ -65,6 +70,15 @@ if [ -d /in/android-subset ]; then
     mv $R/opt/mu300/android/dev/__properties__ $R/opt/mu300/android/dev-properties && rmdir $R/opt/mu300/android/dev
 fi
 [ -d /in/android-gpu-subset ] && cp -a /in/android-gpu-subset/. $R/opt/mu300/android/
+# Internal-panel display stack: six external modules built by kernel/build-internal-display.sh
+# (sprd-drm, sprd-vpu-pd, pwm-sprd, unisoc-iommu, zte_lcdbl_vsp_vsn, trusty-ipc) that are NOT part
+# of the 109-module boot set, plus the status-page binary. They load at S95 from
+# /opt/mu300/bin/display-modules, not at boot, so a broken panel cannot stop the device booting.
+[ -d /in/display ] && cp /in/display/*.ko $M/
+[ -e /in/display ] && echo "display modules: $(ls /in/display/*.ko | wc -l)"
+[ -d /in/screen-tools ] && for b in mu300-screen keyinject; do
+    [ -e /in/screen-tools/$b ] && { cp /in/screen-tools/$b $R/usr/bin/$b; chmod 755 $R/usr/bin/$b; }
+done
 [ -e /in/cltest ] && { mkdir -p $R/opt/mu300/android/system/bin; cp /in/cltest $R/opt/mu300/android/system/bin/cltest; chmod 755 $R/opt/mu300/android/system/bin/cltest; }
 [ -e /in/logdw ] && { cp /in/logdw $R/opt/mu300/bin/logdw; chmod 755 $R/opt/mu300/bin/logdw; }
 [ -e /in/bt-init ] && { cp /in/bt-init $R/opt/mu300/bin/mu300-bt-init; chmod 755 $R/opt/mu300/bin/mu300-bt-init; }
@@ -79,14 +93,14 @@ if [ -e /in/busybox ]; then
 fi
 mkdir -p $R/etc/mu300
 # The rootfs is assembled in a container, so /etc/resolv.conf is whatever Docker bind-mounted
-# there: "nameserver 10.255.255.254", Docker's own resolver. That address means nothing on the
+# there: "nameserver 10.255.255.254", the Docker resolver. That address means nothing on the
 # device, and the failure hides well -- dnsmasq still answers LAN clients from its own upstreams
 # (/tmp/resolv.conf.d/resolv.conf.auto), so only lookups that originate ON the router break
 # (apk update, LuCI package installs, curl). OpenWrt keeps /etc/resolv.conf as a symlink that
 # netifd fills in.
 ln -sfn /tmp/resolv.conf $R/etc/resolv.conf
 # enable the services (rc.common "enable" needs ubus, which is not running in the build container)
-for s in mu300-vendor mu300-hw mu300-post; do
+for s in mu300-vendor mu300-hw mu300-post mu300-screen; do
     n=$(sed -n "s/^START=//p" $R/etc/init.d/$s)
     ln -sf ../init.d/$s $R/etc/rc.d/S$n$s
 done
