@@ -197,12 +197,82 @@ set_health() {
         mv /tmp/.mu300-wan-health /tmp/mu300-wan-health
 }
 
+# ---------------------------------------------------------------------------
+# Last resort: reboot the phone.
+#
+# Everything above assumes the modem still answers. When it stops answering, none of it can work, and
+# on 2026-10-13 that is exactly what happened: sipa_eth0 went down at 1066 s uptime, `mobile-data up`
+# then blocked in select() on /dev/stty_nr1 and printed nothing at all, and it stayed that way through
+# killing the stuck attach, removing the lock and attaching from scratch -- the new pids blocked in
+# select too. `ifup` cannot help, and neither can `sim_reset`, whose AT commands go to the very port
+# that is dead. The WCN side is innocent: `echo AT > /sys/devices/virtual/misc/wcn/devices/atcmd`
+# still returned 0 all the way through (that is hotspot-watch's probe, not this one). Only a reboot
+# brought the AT channel back, and it did so immediately.
+#
+# So when the call has been unusable for MU300_WAN_REBOOT_AFTER seconds (default 300), repairs have
+# been running that whole time without helping, and the modem does not answer a bare "AT", reboot
+# once. The marker lives in /var/run, which is tmpfs (/var -> tmp on this rootfs), so it is per boot
+# by construction: one reboot may be worth it, a reboot loop is not.
+REBOOT_MARK=/var/run/mu300-wan-rebooted
+
+# 0 = the modem answered, 1 = silence, 2 = not asked (and then do not reboot).
+at_state() {
+    # Never write to the port while $IFACE still has an address. The data call and the AT channel are
+    # one port -- up() ends with AT+CGDATA="M-ETHER" -- so a probe there could push three bytes into a
+    # live packet stream. With no address there is no call left to corrupt; at worst the bytes are
+    # read as a reply by an attach that is already stuck, and the reboot this feeds discards it
+    # anyway. The restriction costs nothing, because the repair above takes the address down before
+    # it re-attaches: a wedged call reaches this state through its own repair.
+    link_up && return 2
+    [ -c "$DEV" ] || return 2
+    local line
+    exec 3<>"$DEV" || return 2
+    while IFS= read -r -t 0.2 line <&3; do :; done
+    printf 'AT\r' >&3
+    local st=1
+    for _ in 1 2 3 4 5; do
+        if IFS= read -r -t 1 line <&3; then st=0; break; fi
+    done
+    exec 3>&-
+    return $st
+}
+
+# Uptime at which the call first looked unusable, kept across ticks; 0 while it looks usable.
+bad_clock() {
+    local now
+    [ "${1:-0}" -ne 0 ] && { echo "$1"; return 0; }
+    read -r now _ < /proc/uptime 2>/dev/null || now=0
+    echo "${now%.*}"
+}
+
+maybe_reboot() {  # $1 = bad_clock value, $2 = uptime of the repair that is (or was) in flight
+    local now age st=0
+    [ "${1:-0}" -ne 0 ] || return 0     # the call looks usable: nothing to escalate
+    [ "${2:-0}" -ne 0 ] || return 0     # no repair has run yet: repair before rebooting
+    read -r now _ < /proc/uptime 2>/dev/null || return 0
+    now=${now%.*}
+    age=$((now - $1))
+    [ "$age" -ge "${MU300_WAN_REBOOT_AFTER:-300}" ] || return 0
+    # A repair started less than a minute ago may still be attaching. (netifd's own in-flight attach
+    # arrives here as $2 = the time that attach began, so this does not mute the wedged-pending case.)
+    [ $((now - $2)) -ge 60 ] || return 0
+    [ -e "$REBOOT_MARK" ] && return 0   # once per boot
+    at_state || st=$?
+    [ "$st" -eq 1 ] || return 0         # it answered (0), or it must not be asked (2)
+    echo "call unusable for ${age}s, repairs not helping and no answer to AT: rebooting" >&2
+    touch "$REBOOT_MARK"
+    sync
+    sleep 1
+    # MU300_REBOOT_CMD is a test seam: it lets the decision be exercised without restarting the box.
+    ${MU300_REBOOT_CMD:-reboot}
+}
+
 # The modem firmware occasionally resets itself (modem_control reloads it); it comes back with the radio off and
 # no PDP context, which Android's RIL repairs silently. Check the call every 30 s and repair it when it is
 # gone -- where "gone" now means either the address is gone (link_up) or the call has stopped carrying
 # traffic while keeping the address (probe_ok).
 watch() {
-    local fails=0 ticks=0 unreach=0 last_try=0 now backoff=0 rx_now tx_now rx_last=0 tx_last=0
+    local fails=0 ticks=0 unreach=0 last_try=0 now backoff=0 rx_now tx_now rx_last=0 tx_last=0 bad_since=0
     modem_stack || { echo "no modem stack in this kernel ($(uname -r)), not watching" >&2; exit 0; }
     WAN_PROBES=$(wan_probes)
     while :; do
@@ -215,6 +285,11 @@ watch() {
             # retry, each failure spawning another attach, until the port is a queue of dead
             # processes. Wait for netifd to settle before touching the modem.
             fails=0
+            # But an attach that never settles is the 2026-10-13 outage's own shape (pending for 20
+            # minutes with the port dead), so it still counts as "a repair is in flight" for the
+            # last resort -- hence $2 = bad_since, the time this wait began.
+            bad_since=$(bad_clock "$bad_since")
+            maybe_reboot "$bad_since" "$bad_since"
             continue
         fi
         if link_up; then
@@ -226,7 +301,7 @@ watch() {
             read -r tx_now _ < "/sys/class/net/$IFACE/statistics/tx_packets" 2>/dev/null || true
             if [ "${rx_now:-0}" -gt "${rx_last:-0}" ] || [ "${tx_now:-0}" -gt "${tx_last:-0}" ]; then
                 rx_last=$rx_now; tx_last=$tx_now
-                unreach=0; backoff=0
+                unreach=0; backoff=0; bad_since=0
                 set_health ok
                 continue
             fi
@@ -236,14 +311,18 @@ watch() {
             ticks=$((ticks + 1))
             [ $((ticks % 3)) -eq 0 ] || continue
             if probe_ok; then
-                unreach=0; backoff=0
+                unreach=0; backoff=0; bad_since=0
                 set_health ok
                 continue
             fi
             set_health dead
+            bad_since=$(bad_clock "$bad_since")
             unreach=$((unreach + 1))
             # A probe can be lost on a healthy call; three in a row cannot.
-            [ "$unreach" -lt 3 ] && continue
+            if [ "$unreach" -lt 3 ]; then
+                maybe_reboot "$bad_since" "$last_try"
+                continue
+            fi
             unreach=0
             echo "mobile data wedged (address present but ${WAN_PROBES%% *} unreachable)" >&2
         else
@@ -251,14 +330,24 @@ watch() {
             # data session; the one stty is kept for the reset path (it is a no-op when already raw).
             stty -F "$DEV" raw -echo 2>/dev/null || true
             fails=$((fails + 1))
-            [ "$fails" -lt 2 ] && continue
+            bad_since=$(bad_clock "$bad_since")
+            if [ "$fails" -lt 2 ]; then
+                maybe_reboot "$bad_since" "$last_try"
+                continue
+            fi
             echo "mobile data lost (modem reset or detached), reconnecting" >&2
         fi
         # At most one repair per 10 minutes. The outage this replaces was built from retrying an
         # attach on a port that was already attached; a tight loop here would rebuild exactly that.
         read -r now _ < /proc/uptime 2>/dev/null || now=0
         now=${now%.*}
-        [ $((now - last_try)) -lt 600 ] && continue
+        if [ $((now - last_try)) -lt 600 ]; then
+            # Rate-limited, so this tick is a chance to ask the last resort. $2 = bad_since when no
+            # repair has run yet would read as "a repair began when the call went bad", which is not
+            # true -- pass last_try, which is 0 until one really has.
+            maybe_reboot "$bad_since" "$last_try"
+            continue
+        fi
         last_try=$now
         [ -w /sys/class/leds/sc27xx:blue/brightness ] && echo 0 > /sys/class/leds/sc27xx:blue/brightness
         if [ "${MU300_NETIFD:-0}" = 1 ]; then
