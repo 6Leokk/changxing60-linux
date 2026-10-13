@@ -2,15 +2,17 @@
 # Stop the bq2560x from terminating the charge at ~94% and never resuming, and pin
 # the charge rate so the cell actually gets its ~1 A.
 #
-# The charger IC's end-of-charge threshold is programmed once, at probe, from the
-# battery profile's *maximum charge current* rather than from a termination current
-# (sqc_bq2560x.c:769-771 and :805-807):
-#
-#     current_max_ua = bat_info.constant_charge_current_max_ua / 1000;   /* 960 */
-#     bq2560x_charger_set_termina_cur(info, current_max_ua);
-#
-# and set_termina_cur() clamps anything >= 960 to REG0x03[3:0] = 0xF, i.e. ITERM =
-# 960 mA. On this pack that is ~0.33C, so the IC declares "charge done" (REG0x08
+# The charger IC's end-of-charge threshold (ITERM) sits at REG0x03 = 0x2f after probe
+# (IPRECHG 0x2 = 180 mA, ITERM 0xF = 960 mA -- the max code). The DT's battery node
+# (ums9620-2h10_feimao-overlay.dts, which has no base dts) does NOT define
+# constant-charge-current-max-microamp, so bat_info.constant_charge_current_max_ua is
+# its default -EINVAL (-22; sprd_battery_info.c:778, field is `int`). The probe does
+# `current_max_ua = -22 / 1000 = 0` (sqc_bq2560x.c:769) and set_termina_cur(0) would
+# write ITERM code 0 (60 mA; the `cur <= 60` branch at :588). So the 0x2f is NOT
+# "the profile's 960 written as ITERM and clamped to max" (there is no 960 to write);
+# it is most likely the chip's POR default surviving the probe write (same pattern as
+# the intermittent REG0x04 = 0x90 below). The effect is the same either way: ITERM =
+# 960 mA (~0.33C on this 2950 mAh pack), so the IC declares "charge done" (REG0x08
 # CHRG_STAT = 3) as soon as the taper current falls below 960 mA -- which happens the
 # moment the cell passes ~94%. The IC's own auto-recharge then restarts the cycle and
 # re-terminates within seconds, so the pack sits at 94% indefinitely with a
@@ -20,13 +22,14 @@
 # limit from its USB detection, which on this rootfs reports type=Unknown and lands on
 # REG0x00 = 0x09 (IINLIM 1.0 A) -- or 0.04 (500 mA) on an SDP misdetection. The IC
 # itself allows ICHG = 2.04 A (that 0xa2 is the chip's POR default; the driver never
-# programs ICHG) and the pack profile's own
-# max is 960 mA, so neither is the binding limit: the input limit is. Measured: IINLIM
-# 1.0 A -> ~0.8 A into the cell, 0.5 A -> 0.19 A. Pinned: REG0x00 = 0x0b (IINLIM 100 +
-# 11*100 = 1.2 A) -> ~0.95 A into the cell, and REG0x02 = 0x90 (keeps BOOST_LIM[7] =
-# 1.2 A, caps ICHG[5:0] at 16*60 = 960 mA, the pack profile's
-# constant_charge_current_max_ua) so the charge current is bounded by the battery spec
-# on any source, not by the flakiest link in the chain. The 1.2 A input is well inside
+# programs ICHG), so neither is the binding limit: the input limit is.
+# Measured: IINLIM 1.0 A -> ~0.8 A into the cell, 0.5 A -> 0.19 A. Pinned: REG0x00 =
+# 0x0b (IINLIM 100 + 11*100 = 1.2 A) -> ~0.95 A into the cell, and REG0x02 = 0x90
+# (keeps BOOST_LIM[7] = 1.2 A, caps ICHG[5:0] at 16*60 = 960 mA -- a conservative
+# ceiling, NOT a battery spec: the DT has no constant-charge-current-max-microamp
+# (see docs/mu300/power.md §10). In practice this pin rarely bites: on the PC port
+# the cell is input-limited to ~0.8 A (ibat 747-822 mA < 960), so ICHG is not the
+# binding limit. The 1.2 A input is well inside
 # the vendor's own design (DT charge-dcp-current 2.0 A, charge-fchg-current 3.0 A) and
 # VINDPM sits at 4.5 V (REG0x06 = 0x66): a source that cannot hold the draw lets VBUS
 # sag below that and the IC throttles its own input.
@@ -105,7 +108,7 @@ if [ "$val" != "0x0b" ]; then
 	echo "0 0x00 0x0b" > "$R"
 fi
 
-# Fast-charge current: cap at the pack profile's 960 mA.
+# Fast-charge current: a conservative 960 mA ceiling (not a spec; see header + power.md §10).
 val=$(reg 02)
 if [ "$val" != "0x90" ]; then
 	echo "charge-fix: charge current REG0x02 $val -> 0x90 (ICHG -> 960 mA)"
