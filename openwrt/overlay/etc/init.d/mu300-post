@@ -18,9 +18,12 @@ start_service() {
 	procd_set_param command /opt/mu300/bin/thermal-guard
 	procd_set_param env PATH="$PATH"
 	procd_close_instance
-	# The bq2560x leaves its end-of-charge threshold at 960 mA (the probe-time value is
-	# the pack's max charge current, not a termination current), so the cell stops
-	# charging at ~94% and stays there. Waiting for the i2c node is the script's job.
+	# The bq2560x probe programs the end-of-charge threshold from the pack's *max charge
+	# current* (charge stops at ~94%) and sizes the input current limit from USB detection
+	# (0.19-0.8 A into the cell depending on the boot), so the cell never charged at its
+	# ~1 A. charge-fix re-pins ITERM 180 mA / input limit 1.2 A / ICHG 960 mA on the chip
+	# over i2c; a crontab entry re-runs it every minute against USB replugs. Waiting for
+	# the i2c node is the script's job.
 	procd_open_instance chargefix
 	procd_set_param command /opt/mu300/bin/charge-fix
 	procd_set_param env PATH="$PATH"

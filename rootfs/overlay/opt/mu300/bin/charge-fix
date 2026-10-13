@@ -1,5 +1,6 @@
 #!/bin/sh
-# Stop the bq2560x from terminating the charge at ~94% and never resuming.
+# Stop the bq2560x from terminating the charge at ~94% and never resuming, and pin
+# the charge rate so the cell actually gets its ~1 A.
 #
 # The charger IC's end-of-charge threshold is programmed once, at probe, from the
 # battery profile's *maximum charge current* rather than from a termination current
@@ -15,13 +16,24 @@
 # re-terminates within seconds, so the pack sits at 94% indefinitely with a
 # net-negative current while plugged in: status=Full, ibat -3..-25 mA, capacity flat.
 #
-# Nothing re-programs it afterwards. This build sets CONFIG_VENDOR_SQC_CHARGER=y, which
-# makes bq2560x_charger_usb_set_property() return 0 before it reaches any register code
-# (sqc_bq2560x.c:1835-1837) -- that is why writing constant_charge_current or
-# input_current_limit on the power_supply returns rc=0 and changes nothing -- and the
-# component that would normally re-tune ITERM, the SQC userspace daemon on
-# /dev/sqc_chg_node, does not exist in this rootfs. So the probe-time value is the last
-# word, and it is wrong.
+# 2026-10-13, the "charge only at 0.5 A" bug: the same probe sizes the input current
+# limit from its USB detection, which on this rootfs reports type=Unknown and lands on
+# REG0x00 = 0x09 (IINLIM 1.0 A) -- or 0.04 (500 mA) on an SDP misdetection. The IC
+# itself allows ICHG = 2.04 A (probe writes REG0x02 = 0xa2) and the pack profile's own
+# max is 960 mA, so neither is the binding limit: the input limit is. Measured: IINLIM
+# 1.0 A -> ~0.8 A into the cell, 0.5 A -> 0.19 A. Pinned: REG0x00 = 0x0b (IINLIM 100 +
+# 11*100 = 1.2 A) -> ~0.95 A into the cell, and REG0x02 = 0x90 (keeps BOOST_LIM[7] =
+# 1.2 A, caps ICHG[5:0] at 16*60 = 960 mA, the pack profile's
+# constant_charge_current_max_ua) so the charge current is bounded by the battery spec
+# on any source, not by the flakiest link in the chain.
+#
+# Nothing re-programs these afterwards. This build sets CONFIG_VENDOR_SQC_CHARGER=y,
+# which makes bq2560x_charger_usb_set_property() return 0 before it reaches any
+# register code (sqc_bq2560x.c:1835-1837) -- that is why writing
+# constant_charge_current or input_current_limit on the power_supply returns rc=0 and
+# changes nothing -- and the component that would normally re-tune them, the SQC
+# userspace daemon on /dev/sqc_chg_node, does not exist in this rootfs. So the
+# probe-time values are the last word, and they are wrong.
 #
 # The i2c client attribute bypasses all of that and bq2560x_write()s straight to the
 # chip (sqc_bq2560x.c:3140-3166):
@@ -33,9 +45,10 @@
 # end-of-charge threshold -- so the cell is actually allowed to climb the CV curve to
 # VREG instead of stopping a third of the way up it.
 #
-# This is a runtime write, so it has to be re-applied every boot; the driver only ever
-# writes ITERM again if it re-probes. The proper fix is one line in the kernel
-# (sanity-check current_max_ua in bq2560x_charger_hw_init), but that needs the module
+# These are runtime writes (probe reprograms them at every boot, a USB replug re-runs
+# detection), so they are re-applied here at every boot and by a crontab entry every
+# minute. The proper fix is a line or two in the kernel (sanity-check current_max_ua
+# in bq2560x_charger_hw_init, pin IINLIM from the DT), but that needs the module
 # rebuilt and redeployed, so it is not this script's job.
 R=/sys/class/power_supply/bq2560x_charger/device/registers
 
@@ -48,10 +61,29 @@ while [ $i -lt 60 ]; do
 done
 [ -w "$R" ] || exit 0
 
-# Leave a value alone if it is already sane (idempotent), and do not touch anything
-# unexpected: only the exact probe-time 0x2f is rewritten.
-val=$(awk '/Reg\[03\]/{print $3}' "$R" 2>/dev/null)
+reg() { awk -v r="Reg[$1]" '$1 == r { print $3 }' "$R" 2>/dev/null; }
+
+# Every fix below is idempotent -- a value that is already right is left alone -- so
+# this script is safe to re-run from cron every minute.
+
+# End-of-charge threshold: do not touch anything unexpected; only the exact probe-time
+# 0x2f is rewritten.
+val=$(reg 03)
 if [ "$val" = "0x2f" ]; then
 	echo "charge-fix: ITERM 960mA -> 180mA (REG0x03 $val -> 0x22)"
 	echo "0 0x03 0x22" > "$R"
+fi
+
+# Input current limit: pin at 1.2 A whatever USB detection picked.
+val=$(reg 00)
+if [ "$val" != "0x0b" ]; then
+	echo "charge-fix: input limit REG0x00 $val -> 0x0b (IINLIM -> 1200 mA)"
+	echo "0 0x00 0x0b" > "$R"
+fi
+
+# Fast-charge current: cap at the pack profile's 960 mA.
+val=$(reg 02)
+if [ "$val" != "0x90" ]; then
+	echo "charge-fix: charge current REG0x02 $val -> 0x90 (ICHG -> 960 mA)"
+	echo "0 0x02 0x90" > "$R"
 fi
