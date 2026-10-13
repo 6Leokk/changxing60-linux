@@ -124,6 +124,20 @@ static int run_cmd(const char *cmd, char *out, size_t n)
 	return out[0] != 0;
 }
 
+/* Same, but the whole output rather than just its first line. ubus pretty-prints its JSON one
+ * field per line, so a single fgets would hand back nothing but "{" from any of its calls. */
+static int run_cmd_all(const char *cmd, char *out, size_t n)
+{
+	FILE *p = popen(cmd, "r");
+	size_t len = 0;
+	out[0] = 0;
+	if (!p) return 0;
+	while (len + 1 < n && fgets(out + len, (int)(n - len), p))
+		len += strlen(out + len);
+	pclose(p);
+	return len != 0;
+}
+
 /* ---------- DRM ---------- */
 static int drm_open_card(void)
 {
@@ -572,8 +586,17 @@ static void read_wan(void)
 			}
 		}
 	}
-	/* LAN address: first global IPv4 that is not the WAN one */
-	if (run_cmd("ip -4 -o addr show 2>/dev/null", b, sizeof b)) {
+	/* LAN address for the URL on the panel. Ask br-lan first, and only fall back to the old
+	 * "first IPv4 that is not the WAN one" scan if it has none. The panel is read from both
+	 * sides and the two no longer share a subnet: a machine on the USB cable can only reach
+	 * 192.168.77.1, while a client on the hotspot reaches that one too (both networks sit in
+	 * the same firewall zone, so the device routes between them). Picking whichever address
+	 * `ip addr` happens to print first would eventually put a URL on the panel that half its
+	 * readers cannot open -- it only looked right because br-lan sorts first today. */
+	int have = run_cmd("ip -4 -o addr show dev br-lan 2>/dev/null", b, sizeof b);
+	if (!have)
+		have = run_cmd("ip -4 -o addr show 2>/dev/null", b, sizeof b);
+	if (have) {
 		char cidr[40];
 		char *q = b;
 		while ((q = strstr(q, "inet "))) {
@@ -592,21 +615,29 @@ static void read_wan(void)
 
 static void read_wifi(void)
 {
-	char b[2048];
+	char b[4096];   /* one client record with its capability and rate tables runs ~500 bytes */
 	wifi_clients = 0;
 	sta_n = 0;
-	if (run_cmd("iw dev wlan0 station dump 2>/dev/null", b, sizeof b)) {
+	/* Ask hostapd, not iw. On this driver `iw dev wlan0 station dump` is always empty -- it was
+	 * measured on 2026-10-13 with a client associated, authorized and passing traffic, which is
+	 * why the page used to say "no clients" while a phone was on the AP. hostapd keeps its own
+	 * association state and does report it: `ubus call hostapd.wlan0 get_clients` lists the
+	 * station with "assoc": true. Count MAC-looking keys once each, and require the assoc flag so
+	 * a half-open association is not counted as a client. */
+	if (run_cmd_all("ubus call hostapd.wlan0 get_clients 2>/dev/null", b, sizeof b)) {
 		char *q = b;
-		while ((q = strstr(q, "Station "))) {
-			wifi_clients++;
-			if (sta_n < 16) {
-				struct wifi_sta *s = &sta[sta_n++];
-				snprintf(s->mac, sizeof s->mac, "%.17s", q + 8);
-				s->signal = 0;
-				char *sig = strstr(q, "signal:");
-				if (sig) s->signal = atoi(sig + 7);
+		while ((q = strstr(q, "\": {"))) {
+			char *key = q;
+			while (key > b && key[-1] != '"') key--;
+			if (q - key == 17 && key[2] == ':' && strstr(q, "\"assoc\": true")) {
+				wifi_clients++;
+				if (sta_n < 16) {
+					struct wifi_sta *s = &sta[sta_n++];
+					snprintf(s->mac, sizeof s->mac, "%.17s", key);
+					s->signal = 0;   /* the driver reports none; see above */
+				}
 			}
-			q += 8;
+			q += 4;
 		}
 	}
 	if (run_cmd("iw dev wlan0 info 2>/dev/null | sed -n 's/.*channel \\([0-9]*\\).*/\\1/p'", b, sizeof b))
@@ -630,15 +661,53 @@ static void status_line(int y, const char *label, const char *value, u32 vcolor,
 	draw_text(x0, y, sc, vcolor, v);
 }
 
-/* Quiet zone of 2 modules, then the symbol, alternating colours so the grid stays readable. */
-static void draw_qr(int x0, int y0, int scale, const char *text)
+/* ---------- QR: a WiFi join code ----------
+ * This used to be the LuCI URL. A URL read off a screen only opens a browser, and the URL is
+ * printed in the footer anyway, whereas joining the network is the one thing nobody wants to type
+ * on a phone. So the symbol is the de-facto standard that both the Android and iOS camera apps
+ * parse without any app installed:
+ *
+ *     WIFI:T:WPA;S:<ssid>;P:<psk>;;              (T:nopass and no P when the AP is open)
+ *
+ * That is ~40 bytes for this box's SSID/key pair. qr.c encodes versions 1-5 at level L only, and 40
+ * bytes needs version 3 (53-byte capacity) rather than the 25-module version 2 the URL fitted in,
+ * so the caller measures the size from the encoder's answer instead of assuming one.
+ */
+static void qr_escape(const char *in, char *out, size_t n)
 {
-	unsigned char m[41 * 41];
-	int n = qr_encode(text, m);
-	if (n < 0) {
-		draw_text(x0, y0 + 40 * scale / 2, scale, FB_WARN, "qr: url too long");
-		return;
+	size_t o = 0;
+	/* The scheme reserves backslash, semicolon, comma and colon, and quotes the value. An
+	 * unescaped ';' in an SSID would truncate the payload into a code that scans perfectly and
+	 * joins nothing, which is the worst possible failure here. Our own SSID/key need none of this,
+	 * but they come from uci, so escape anyway. */
+	for (; *in && o + 2 < n; in++) {
+		if (strchr("\\;,:\"", *in))
+			out[o++] = '\\';
+		out[o++] = *in;
 	}
+	out[o] = '\0';
+}
+
+/* Encodes the join code into m (needs 41*41 bytes); returns the module count, or -1 if even the
+ * open-network form is past what versions 1-5 hold (a 63-char SSID plus a 63-char key is). */
+static int qr_encode_wifi(unsigned char *m)
+{
+	char essid[160], ekey[160], payload[384];
+
+	qr_escape(ssid, essid, sizeof essid);
+	if (psk[0] && strcmp(psk, "-") != 0) {
+		qr_escape(psk, ekey, sizeof ekey);
+		snprintf(payload, sizeof payload, "WIFI:T:WPA;S:%s;P:%s;;", essid, ekey);
+	} else {
+		snprintf(payload, sizeof payload, "WIFI:T:nopass;S:%s;;", essid);
+	}
+	return qr_encode(payload, m);
+}
+
+/* Quiet zone of 2 modules, then the symbol, on a white plate so the grid stays readable on a dark
+ * page. The plate is drawn from the white background outwards, so the caller must leave the margin. */
+static void draw_qr(int x0, int y0, int scale, const unsigned char *m, int n)
+{
 	int q = 2 * scale;
 	fill_rect(x0, y0, n * scale + 2 * q, n * scale + 2 * q, 0x00ffffffu);
 	for (int y = 0; y < n; y++)
@@ -711,8 +780,14 @@ static void render(void)
 	 * get the full width. Landscape: it takes the bottom-right corner and the rows stop short
 	 * of its column. */
 	snprintf(url, sizeof url, "http://%s/", lan_ip);
+	unsigned char qrm[41 * 41];
+	int qr_n = qr_encode_wifi(qrm);
+	if (qr_n < 0) {
+		/* SSID plus key past what versions 1-5 hold. The URL always fits (version 2), so fall back
+		 * to it rather than drawing nothing; the footer spells the URL out either way. */
+		qr_n = qr_encode(url, qrm);
+	}
 	int qr_scale = portrait ? 6 : (fb_w >= 1200 ? 6 : 5);
-	int qr_n = 25;                                   /* version 2 covers a 20-char URL */
 	int qr_px = qr_n * qr_scale + 4 * qr_scale;
 	/* The glyph cell is 16 rows tall (the font is 8x16), so the hint row needs 16*sc, not 8*sc: at
 	 * fb_h - 26*sc its lower 12 px reached into the 40-px footer bar and printed through the URL
@@ -721,7 +796,10 @@ static void render(void)
 	int hint_y = portrait ? fb_h - 38 * sc : fb_h - 16 * sc;
 	int qr_x = portrait ? (fb_w - qr_px) / 2 : fb_w - 8 - qr_px;
 	int qr_y = portrait ? hint_y - 12 * sc - qr_px : fb_h - 20 * sc - 8 - qr_px;
-	draw_qr(qr_x, qr_y, qr_scale, url);
+	if (qr_n > 0)
+		draw_qr(qr_x, qr_y, qr_scale, qrm, qr_n);
+	else
+		draw_text(qr_x, qr_y, qr_scale, FB_WARN, "qr: ssid+key too long");
 	int limit = portrait ? fb_w - 8 : qr_x - 16;
 
 	/* --- rows --- */
@@ -766,9 +844,14 @@ static void render(void)
 		snprintf(line, sizeof line, "%s", wifi_addr);
 		status_line(y, "", line, FB_TEXT, limit);
 		y += row_h;
-		if (sta_n > 0)
+		/* dBm only when there is a reading: this driver reports signal 0 (hostapd relays it as
+		 * 0 too), and "0 dBm" would read as a real, terrible measurement */
+		if (sta_n > 0 && sta[0].signal < 0)
 			snprintf(line, sizeof line, "%d client%s  %d dBm", wifi_clients,
 				 wifi_clients == 1 ? "" : "s", sta[0].signal);
+		else if (sta_n > 0)
+			snprintf(line, sizeof line, "%d client%s", wifi_clients,
+				 wifi_clients == 1 ? "" : "s");
 		else
 			snprintf(line, sizeof line, "no clients");
 		status_line(y, "", line, sta_n > 0 ? FB_TEXT : FB_DIM, limit);
@@ -811,7 +894,10 @@ static void render(void)
 		status_line(y, "", line, FB_DIM, limit);
 		y += row_h;
 		for (int i = 0; i < sta_n && i < 2; i++) {
-			snprintf(line, sizeof line, "%.17s  %d dBm", sta[i].mac, sta[i].signal);
+			if (sta[i].signal < 0)
+				snprintf(line, sizeof line, "%.17s  %d dBm", sta[i].mac, sta[i].signal);
+			else
+				snprintf(line, sizeof line, "%.17s", sta[i].mac);
 			status_line(y, i == 0 ? "clients" : "", line, FB_TEXT, limit);
 			y += row_h;
 		}
@@ -1025,7 +1111,23 @@ int main(int argc, char **argv)
 		read_system();
 		read_wan();
 		read_counters();
-		if (tz % 2 == 0) read_wifi();                   /* iw is the expensive one */
+		if (tz % 2 == 0) {
+			char was_ssid[sizeof ssid], was_psk[sizeof psk];
+			snprintf(was_ssid, sizeof was_ssid, "%s", ssid);
+			snprintf(was_psk, sizeof was_psk, "%s", psk);
+			read_wifi();                            /* iw is the expensive one */
+			/* Re-read the AP credentials on the same slow tick. The QR is a join code, so it
+			 * is only useful while it still matches what hostapd is serving -- and the key can
+			 * change under us: LuCI's own Wireless page writes /etc/config/wireless and reloads
+			 * hostapd without ever restarting this program. Two file reads. */
+			read_wifi_config();
+			/* Say so when the code on the panel has just become wrong (it is repainted below,
+			 * on this same tick). The key itself stays out of the log -- the SSID is enough to
+			 * see that the change was noticed, and this log is world-readable in syslog. */
+			if (strcmp(was_ssid, ssid) != 0 || strcmp(was_psk, psk) != 0)
+				fprintf(stderr, "mu300-screen: AP credentials changed (ssid \"%s\"); "
+					"redrawing join code\n", ssid);
+		}
 		render();
 	}
 	fprintf(stderr, "mu300-screen: exiting\n");

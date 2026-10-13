@@ -1,0 +1,86 @@
+#!/bin/sh
+# Split the LAN in two: a management link for the USB host, and the hotspot for Wi-Fi clients.
+#
+# Why this exists. Both used to share br-lan / 192.168.77.0/24, so the single dnsmasq scope
+# advertised this device as *router and DNS* to every client -- including the PC on the far end of
+# the USB cable. That PC is not a guest on this hotspot; it has its own uplink, and a second
+# default route on a management link is simply wrong. On Windows it is not even harmless: measured
+# 2026-10-13, the UsbNcm adapter's default route (via 192.168.77.1, interface metric 25) outranked
+# the machine's real Wi-Fi uplink (metric 30), so every public destination the local proxy did not
+# claim was being routed into this phone's cellular modem. Nothing showed it: the cable kept
+# working, the AP kept working, and the PC's traffic quietly changed path.
+#
+#   usb0     192.168.77.1/24   management -- address only, no router, no DNS
+#   br-wifi  192.168.8.1/24    hotspot    -- gateway + DNS = 192.168.8.1, as before
+#
+# 192.168.77.1 is deliberately unchanged: every tool in this repo, the rescue console and the
+# documented `ssh root@192.168.77.1` depend on it. Clients on the hotspot can still reach it -- both
+# networks sit in the same firewall zone, so intra-zone forwarding carries the hop.
+#
+# Idempotent; safe to re-run. Writes uci only -- nothing is applied until the caller reloads
+# (net-split --apply does it in the right order).
+set -e
+
+LAN_IP=192.168.77.1
+WIFI_IP=192.168.8.1
+
+want() { [ "$1" = "--apply" ]; }
+apply() {
+	/etc/init.d/network reload
+	sleep 2
+	wifi reload
+	sleep 3
+	/etc/init.d/dnsmasq restart
+	/etc/init.d/odhcpd restart
+	/etc/init.d/firewall reload
+}
+
+# --- the hotspot gets its own bridge and its own address -------------------------------
+uci -q set network.brwifi=device
+uci -q set network.brwifi.name='br-wifi'
+uci -q set network.brwifi.type='bridge'
+uci -q set network.wifi=interface
+uci -q set network.wifi.device='br-wifi'
+uci -q set network.wifi.proto='static'
+uci -q set network.wifi.ipaddr="$WIFI_IP"
+uci -q set network.wifi.netmask='255.255.255.0'
+uci -q set network.wifi.ip6assign='60'     # parity: Wi-Fi clients kept their IPv6 addresses
+uci -q set wireless.ap0.network='wifi'     # the AP leaves the management bridge
+
+# --- the management link hands out an address and nothing else -------------------------
+# An option listed with no value is how dnsmasq is told to send it empty: the client gets no
+# router and no DNS from this side, and falls back to whatever it already had.
+uci -q delete dhcp.lan.dhcp_option || true
+uci -q add_list dhcp.lan.dhcp_option='3'
+uci -q add_list dhcp.lan.dhcp_option='6'
+uci -q set dhcp.lan.dhcpv6='disabled'      # and no IPv6 router either -- the RA carried one
+uci -q set dhcp.lan.ra='disabled'
+
+# --- the hotspot keeps a normal scope --------------------------------------------------
+uci -q delete dhcp.wifi || true
+uci -q set dhcp.wifi=dhcp
+uci -q set dhcp.wifi.interface='wifi'
+uci -q set dhcp.wifi.start='100'
+uci -q set dhcp.wifi.limit='150'
+uci -q set dhcp.wifi.leasetime='12h'
+uci -q set dhcp.wifi.dhcpv4='server'
+uci -q set dhcp.wifi.dhcpv6='server'
+uci -q set dhcp.wifi.ra='server'
+uci -q set dhcp.wifi.ra_slaac='1'
+uci -q delete dhcp.wifi.ra_flags || true
+uci -q add_list dhcp.wifi.ra_flags='managed-config'
+uci -q add_list dhcp.wifi.ra_flags='other-config'
+
+# --- one zone, so hotspot clients can still reach the management address ---------------
+uci -q delete firewall.@zone[0].network || true
+uci -q add_list firewall.@zone[0].network='lan'
+uci -q add_list firewall.@zone[0].network='wifi'
+
+uci commit network
+uci commit wireless
+uci commit dhcp
+uci commit firewall
+
+echo "net-split: usb0=$LAN_IP/24 (address only), br-wifi=$WIFI_IP/24 (gateway+dns)"
+want "$1" && { apply; echo "net-split: applied"; }
+exit 0

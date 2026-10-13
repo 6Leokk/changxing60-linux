@@ -28,7 +28,7 @@ delete wireless.default_$radio
 delete wireless.$radio.disabled
 set wireless.ap0=wifi-iface
 set wireless.ap0.device='$radio'
-set wireless.ap0.network='lan'
+set wireless.ap0.network='wifi'
 set wireless.ap0.mode='ap'
 set wireless.ap0.ifname='wlan0'
 set wireless.ap0.ssid='$SSID'

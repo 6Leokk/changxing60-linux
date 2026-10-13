@@ -28,7 +28,7 @@ Wi-Fi on the ZTE F50 5G mobile hotspot (hardware MU300, Unisoc T760 / UMS9620). 
 | Wi-Fi (SC2355 / Marlin3) | ✅ station scan and access-point mode (`hostapd` AP-ENABLED) |
 | Mobile data (5G NSA/LTE) | ✅ AT commands + `sipa_eth0`, about 75 Mbit/s down / 10 Mbit/s up measured |
 | Internet sharing to USB (NAT) | ✅ host behind `usb0` reaches the internet through the modem; a watchdog reconnects after modem resets |
-| Wi-Fi hotspot out of the box | ✅ hostapd on `wlan0` bridged with USB into one LAN (192.168.77.0/24); SSID/password imported from Android or generated; `BAND=5` (802.11ac, 80 MHz, channels 36-48/149-165) or `BAND=2.4`; one band at a time |
+| Wi-Fi hotspot out of the box | ✅ hostapd on `wlan0` on its own `br-wifi`/192.168.8.0/24, while the USB gadget keeps `br-lan`/192.168.77.0/24 as a management link (address only, no router/DNS); SSID/password imported from Android or generated; `BAND=5` (802.11ac, 80 MHz, channels 36-48/149-165) or `BAND=2.4`; one band at a time |
 | Modem NV persistence (`cp_diskserver`), `refnotify` | ✅ Android daemons in the chroot |
 | Thermal throttling, status LEDs, SIM tray, DVFS drivers | ✅ `mu300-extra-modules` (blue LED = mobile data up) |
 | Default boot to Linux with automatic fallback | ✅ `mu300-next-boot linux\|android`; a Linux boot that never completes rolls back to Android |
@@ -50,7 +50,8 @@ LK (slot b, tries=2) ─► custom 5.4 kernel + vendor_boot DTB
          ├─ losetup -o 27762098176 /dev/mmcblk0 → ext4 "mu300root" (free space after userdata)
          └─ switch_root → systemd
                ├─ mu300-vendor   : Android modem_control in a chroot (disarms PM watchdog, boots modem)
-               ├─ mu300-lan      : br-lan (usb0 + wlan0) 192.168.77.1 + dnsmasq DHCP/DNS
+               ├─ mu300-lan      : br-lan (usb0) 192.168.77.1 + dnsmasq DHCP (no router/DNS)
+               ├─ mu300-wifi     : br-wifi (wlan0) 192.168.8.1 + dnsmasq DHCP/DNS
                ├─ mu300-wifi     : pcie-sprd, wcn_bsp, sprd_wlan_combo
                ├─ mu300-mobile-data : AT on /dev/stty_nr1, sipa_eth0, nftables NAT
                ├─ mu300-bluetooth : sprdbt_tty, mu300-bt-init (PSKey/RF), btattach → bluetoothd

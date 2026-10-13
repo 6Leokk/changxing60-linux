@@ -1,5 +1,6 @@
 #!/bin/sh
-# First boot: one LAN for USB and Wi-Fi (192.168.77.1/24), cellular WAN through the modem, hostname, USB console.
+# First boot: LAN split into a USB management link and a Wi-Fi hotspot, cellular WAN through the
+# modem, hostname, USB console.
 uci -q batch <<UCI
 set system.@system[0].hostname='mu300'
 set system.@system[0].zonename='Europe/Istanbul'
@@ -19,5 +20,10 @@ if [ -n "$dev" ]; then
 fi
 uci commit system
 uci commit network
+# br-lan is now the USB management link only; the hotspot moves to br-wifi/192.168.8.0/24 so the
+# device stops handing the PC on the other end of the cable a default route and a DNS server.
+# net-split holds the whole change (and the reason for it) and is idempotent, so an install made
+# before the split can be brought up to date by running it there too.
+/opt/mu300/bin/net-split
 grep -q '^ttyGS0:' /etc/inittab || echo 'ttyGS0::askfirst:/usr/libexec/login.sh' >> /etc/inittab
 exit 0

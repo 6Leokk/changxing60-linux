@@ -223,7 +223,9 @@ average. `top` shows about 98 % idle.
 ## LAN, Wi-Fi bands and regulatory
 
 ### 21. One LAN for USB and Wi-Fi
-* `br-lan` (192.168.77.1/24) bridges `usb0` and `wlan0`; one dnsmasq serves both.
+* `br-lan` (192.168.77.1/24, `usb0`) is the USB management link; `br-wifi` (192.168.8.1/24, `wlan0`)
+  is the hotspot. Split 2026-10-13 so the device stops advertising itself as router/DNS to the PC
+  on the other end of the cable -- see `opt/mu300/bin/net-split`.
 * cfg80211 refuses to bridge `wlan0` ("Device does not allow enslaving to a bridge") because `IFF_DONT_BRIDGE` stays set:
   the SC2355 driver marks the interface as AP but returns an error from `change_virtual_intf` when tearing down the
   previous firmware mode fails, so cfg80211 skips clearing the flag. `kernel/patches/wlan_combo-allow-bridging-ap.patch`.
