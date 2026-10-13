@@ -1,0 +1,34 @@
+#!/bin/sh
+# Keep the console quiet enough that the SC2355 Wi-Fi firmware keeps answering.
+#
+# The driver says this out loud, in sc2355/cmdevt.c:727-732:
+#     console_loglevel > 4 will cause cmd resp timeout easily,
+#     so adjust timeout to 5 seconds when loglevel > 4.
+# and when it does give up it records what it saw (sc2355/cmdevt.c:752):
+#     ctx_id 1 [CMD_TX_DATA]rsp timeout, printk=7
+# That is what a wedged radio looks like here: the host sends CMD_TX_DATA, the response
+# arrives but is not processed inside the window, the host declares a timeout, and
+# sc2355_assert_cmd() tears the firmware down (fw assert:[CMD] CMD_TX_DATA,
+# [REASON] CMD_RSP_TIMEOUT_ERROR). From then on hif->cp_asserted is 1 and every command
+# returns -EIO -- wlan0 stays UP, hostapd still reports the client authorized, and the
+# client gets nothing. Only a reboot clears it (rmmod sprd_wlan_combo hangs the kernel).
+#
+# The driver is chatty at KERN_INFO on the receive path -- one line per flow-control
+# event that arrives before the vif exists, one per group LUT lookup, one per command
+# sent and one per response received, several per caught ARP. A boot here writes a few
+# thousand of them, and a 115200-baud ttyS1 takes ~7 ms per line, so the console runs
+# saturates and the receive work is starved. The vendor never runs that way:
+# CONFIG_CONSOLE_LOGLEVEL_DEFAULT=1 in this build and `loglevel=1` in the LK cmdline.
+# Something in this bring-up still leaves console_loglevel at 7, so set it explicitly
+# (from mu300-hw before the WLAN modules load, and again from mu300-post) instead of
+# trusting the boot default.
+#
+# 4 is the value the driver itself calls "not a problem": it keeps EMERG/ALERT/CRIT/ERR
+# on the serial console for live debugging, and drops pr_info (6) and the driver's
+# per-response pr_warn (4). It also keeps the normal 3 s command timeout rather than
+# the 5 s console-compensation one.
+#
+# Nothing is lost for debugging: console_loglevel only gates what reaches the console
+# drivers. The ring buffer still records everything, so dmesg and logd see the whole
+# boot log either way (verified: 10000+ lines in dmesg with console_loglevel at 1).
+echo 4 4 1 4 > /proc/sys/kernel/printk

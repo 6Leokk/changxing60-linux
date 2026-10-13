@@ -1,0 +1,57 @@
+#!/bin/sh
+# Stop the bq2560x from terminating the charge at ~94% and never resuming.
+#
+# The charger IC's end-of-charge threshold is programmed once, at probe, from the
+# battery profile's *maximum charge current* rather than from a termination current
+# (sqc_bq2560x.c:769-771 and :805-807):
+#
+#     current_max_ua = bat_info.constant_charge_current_max_ua / 1000;   /* 960 */
+#     bq2560x_charger_set_termina_cur(info, current_max_ua);
+#
+# and set_termina_cur() clamps anything >= 960 to REG0x03[3:0] = 0xF, i.e. ITERM =
+# 960 mA. On this pack that is ~0.33C, so the IC declares "charge done" (REG0x08
+# CHRG_STAT = 3) as soon as the taper current falls below 960 mA -- which happens the
+# moment the cell passes ~94%. The IC's own auto-recharge then restarts the cycle and
+# re-terminates within seconds, so the pack sits at 94% indefinitely with a
+# net-negative current while plugged in: status=Full, ibat -3..-25 mA, capacity flat.
+#
+# Nothing re-programs it afterwards. This build sets CONFIG_VENDOR_SQC_CHARGER=y, which
+# makes bq2560x_charger_usb_set_property() return 0 before it reaches any register code
+# (sqc_bq2560x.c:1835-1837) -- that is why writing constant_charge_current or
+# input_current_limit on the power_supply returns rc=0 and changes nothing -- and the
+# component that would normally re-tune ITERM, the SQC userspace daemon on
+# /dev/sqc_chg_node, does not exist in this rootfs. So the probe-time value is the last
+# word, and it is wrong.
+#
+# The i2c client attribute bypasses all of that and bq2560x_write()s straight to the
+# chip (sqc_bq2560x.c:3140-3166):
+#
+#     echo "<charger_no> <reg-hex> <val-hex>" > .../bq2560x_charger/device/registers
+#
+# REG0x03[7:4] = IPRECHG and [3:0] = ITERM, both "60 mA + n*60 mA". Keep IPRECHG at
+# 180 mA (0x2) and drop ITERM from 960 mA to 180 mA (0x2) -- ~0.06C, an ordinary
+# end-of-charge threshold -- so the cell is actually allowed to climb the CV curve to
+# VREG instead of stopping a third of the way up it.
+#
+# This is a runtime write, so it has to be re-applied every boot; the driver only ever
+# writes ITERM again if it re-probes. The proper fix is one line in the kernel
+# (sanity-check current_max_ua in bq2560x_charger_hw_init), but that needs the module
+# rebuilt and redeployed, so it is not this script's job.
+R=/sys/class/power_supply/bq2560x_charger/device/registers
+
+# S99 runs long before the vendor modules are all in; wait for the node to appear.
+i=0
+while [ $i -lt 60 ]; do
+	[ -w "$R" ] && break
+	sleep 1
+	i=$((i + 1))
+done
+[ -w "$R" ] || exit 0
+
+# Leave a value alone if it is already sane (idempotent), and do not touch anything
+# unexpected: only the exact probe-time 0x2f is rewritten.
+val=$(awk '/Reg\[03\]/{print $3}' "$R" 2>/dev/null)
+if [ "$val" = "0x2f" ]; then
+	echo "charge-fix: ITERM 960mA -> 180mA (REG0x03 $val -> 0x22)"
+	echo "0 0x03 0x22" > "$R"
+fi
