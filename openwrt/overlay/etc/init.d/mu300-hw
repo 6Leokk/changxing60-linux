@@ -38,11 +38,14 @@ boot() {
 		iw reg set "$country"
 		for n in $(seq 1 10); do iw reg get | grep -q "country $country:" && break; sleep 1; done
 	fi
-	# The WCN chip has no factory MAC on this device (LK passes no androidboot.wifimac= in the cmdline) and
-	# the driver ignores MAC writes, so wlan0 gets a fresh random 40:45:da:xx address every boot. OpenWrt
-	# derives the AP's BSSID from the phy MAC, which is all-zero here, leaving hostapd with
-	# bssid=00:00:00:00:00:00 and no beacon at all; pin the vif to the driver's actual address so hostapd
-	# and the firmware agree on the BSSID. This has to happen before netifd starts hostapd, i.e. here.
+	# The board's factory MAC, out of prodnv, into the driver -- see wifi-mac. It has to be applied
+	# before netifd starts hostapd, and before the pin below reads the address back.
+	/opt/mu300/bin/wifi-mac >>/tmp/mu300-wifi-start.log 2>&1
+	# OpenWrt derives the AP's BSSID from the phy MAC, which is all-zero on this chip, leaving
+	# hostapd with bssid=00:00:00:00:00:00 and no beacon at all; pin the vif to the interface's
+	# actual address so hostapd and the firmware agree on the BSSID. (That address is the factory
+	# one now that wifi-mac has run, so this also keeps the BSSID stable across reboots; it is still
+	# what stops the all-zero case, which is why it stays.) Before netifd starts hostapd, i.e. here.
 	wifimac=$(cat /sys/class/net/wlan0/address 2>/dev/null)
 	if [ -n "$wifimac" ] && [ "$wifimac" != "00:00:00:00:00:00" ]; then
 		uci -q get wireless.ap0 >/dev/null && {

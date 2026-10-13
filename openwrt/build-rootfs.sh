@@ -76,7 +76,7 @@ fi
 # /opt/mu300/bin/display-modules, not at boot, so a broken panel cannot stop the device booting.
 [ -d /in/display ] && cp /in/display/*.ko $M/
 [ -e /in/display ] && echo "display modules: $(ls /in/display/*.ko | wc -l)"
-[ -d /in/screen-tools ] && for b in mu300-screen keyinject; do
+[ -d /in/screen-tools ] && for b in mu300-screen keyinject wifimac; do
     [ -e /in/screen-tools/$b ] && { cp /in/screen-tools/$b $R/usr/bin/$b; chmod 755 $R/usr/bin/$b; }
 done
 [ -e /in/cltest ] && { mkdir -p $R/opt/mu300/android/system/bin; cp /in/cltest $R/opt/mu300/android/system/bin/cltest; chmod 755 $R/opt/mu300/android/system/bin/cltest; }
