@@ -520,6 +520,126 @@ Practical rules that come out of this:
   watchdog timed out* -- a panic looks identical from there. Read pstore before blaming the modem, SIPA,
   or anything the log happened to be printing at the time.
 
+### 34. The SIPA delegate had no peer timeout (the wedge that only a reboot cured)
+
+The "WAN goes dead but stays up" failure finally has a cause and a fix. It is not the bearer, not the
+route, not the CP's data path: it is a *missing timeout* in the SIPA delegator, one layer below all of
+the watchdogs added for it in §26.
+
+Symptom, unchanged from every previous report: `sipa_eth0` keeps its address, `operstate` stays `up`,
+`ip route` has the default, and not one packet passes (v4 100 % loss; v6 `sendto: No buffer space
+available`). `mobile-data watch` cannot repair it -- its only cure was the last-resort reboot
+(`6c6fe97`), and the CP's AT channel is dead in this state too, so even that guard had to wait for the
+AT probe to go silent before it would act.
+
+**The signature.** `/sys/kernel/debug/sipa/rm_res` on a wedged device (2026-10-13, uptime 605 s):
+
+```
+[res] name = SIPA_RM_RES_PROD_IPA    type = 0 ref_count = 1 state = 2   granted   -- IPA is fine
+[res] name = SIPA_RM_RES_PROD_CP     type = 0 ref_count = 1 state = 1   REQUEST_IN_PROGRESS, stuck
+[res] name = SIPA_RM_RES_CONS_WWAN_UL type = 1 ref_count = 0 state = 3  RELEASE_IN_PROGRESS, stuck
+```
+
+dmesg, in order:
+
+```
+605.530121  sipa_rm: calling driver CB
+605.530229  sipa_rm: driver CB returned with -115          <- -EINPROGRESS, "not yet", not an error
+605.530236  sipa_rm: SIPA_RM_RES_PROD_CP state changed 0->1
+605.530257  sipa_eth: fail to send, ret -115
+605.535504  sipa_eth: stop queue on dev sipa_eth0
+605.535870  sipa_dele: smsg_send, dst=5 chan=120 type=5 flag=1   <- request goes out ...
+<nothing>                                                        <- ... and is never answered
+608.530877  sipa_rm: SIPA_RM_RES_CONS_WWAN_UL state changed 1->3
+```
+
+The 3 s gap is `sipa_nic`'s `SIPA_NIC_RM_INACTIVE_TIMER`: having got no grant, the nic releases the
+consumer. But a consumer can only finish releasing once all its producers are granted, and `PROD_CP`
+is stuck, so `CONS_WWAN_UL` parks in RELEASE_IN_PROGRESS and the TX queue is never woken again.
+
+**Why it latches.** `sipa_dele_local_req_r_prod()` returns `-EINPROGRESS` for as long as its `stat` is
+`SIPA_DELE_REQUESTING`, and only a `DONE` from the peer -- or a failed `smsg_send` -- ever leaves that
+state. Nothing in the tree has a timeout there. A peer that stops answering therefore freezes the
+producer for the rest of the boot, and every consumer depending on `PROD_CP` waits forever.
+`sipa_dele_reset` (`echo 1 > /sys/kernel/debug/sipa/sipa_dele_reset`) does **not** help: its
+`cp_dele_restart_handler()` powers SIPA down and drops `CONS_WWAN_DL`, but it never touches the
+delegator's `stat`, so `PROD_CP` stays in REQUEST_IN_PROGRESS and `CONS_WWAN_UL` stays latched. That is
+why rebooting was the only cure.
+
+Note the trigger is on the CP side: when this happens the CP's AT channel is dead as well, so the peer
+is not merely dropping SIPA messages, it is gone. Nothing on the AP can make it answer; what the AP
+*can* do is stop treating "no answer" as "wait forever".
+
+**The fix** -- `kernel/patches/sipa-delegate-peer-request-timeout.patch`. Arm a 2 s `delayed_work`
+whenever the delegator enters `REQUESTING` (request, retry, re-open, request-after-release) or
+`RELEASING`; on expiry, take the request back with `sipa_rm_notify_completion(SIPA_RM_EVT_FAIL,
+prod_id)` -- the vendor's own give-up signal, already used when `smsg_send` itself fails. The unwinding
+is then entirely vendor code:
+
+```
+FAIL -> producer_handle_cb      -> PROD_CP RELEASED, notify consumers
+     -> consumer_handle_cb(FAIL)-> sipa_rm_resource_consumer_do_release(CONS_WWAN_UL) -> RELEASED
+     -> sipa_nic_rm_notify_cb   -> sipa_nic_rm_res_reinit() (true while NIC_OPEN) -> clears rm_flow_ctrl
+     -> SIPA_LEAVE_FLOWCTRL     -> netif_wake_queue(sipa_eth0)
+     -> next TX re-requests from RELEASED -> a fresh smsg CMD to the CP
+```
+
+So the bearer retries instead of latching, and if the CP ever comes back it heals itself with no
+reboot. Details worth keeping:
+
+* 2 s is ~250x the peer's normal round trip (5-8 ms observed in the same log) and deliberately below
+  the nic's 3 s inactivity timer, so the failure is reported *before* the nic gives up on its own.
+* The work sits on `system_wq`, not the delegator's own `smsg_wq`: that queue is single-threaded and
+  `smsg_send(..., -1)` can block in it forever, which would make the timeout itself un-timeoutable.
+* Every path that legitimately ends a request cancels it (`GRANTED`, `RELEASING`-completion,
+  `on_close`), and a `SMSG_VAL_DELE_REQ_FAIL` retry re-arms with a fresh budget rather than inheriting
+  a nearly-expired one.
+
+**Verified:** built and deployed as `sipa-dele.ko` (`md5 8bb307a017a9ecd716b552aae837f9eb`, device copy
+backed up at `/root/sipa-dele.ko.orig`), reboot, WAN healthy (ping 0 % loss, `rm_res` cycling
+0->1->2->0 exactly as before, normal request granted in ~8 ms) and **zero `peer silent` lines after a
+6-flow/40 s load test** -- so the timeout does not fire in normal operation. **The recovery itself has
+not been observed end to end**: the wedge has no on-demand trigger, it has to come from the CP going
+mute. The way to catch it is to wait for the next natural one and watch `rm_res` plus
+`dmesg | grep "peer silent"`. The deterministic alternative is to stop the CP on purpose through
+`/dev/modem` (`MODEM_STOP_CMD` / `MODEM_UNCONDITIONAL_STOP_CMD`, which are not comm-gated the way
+`MODEM_ASSERT_CMD` is, then `MODEM_START_CMD`) -- that cuts cellular for a few minutes and may need a
+reboot, so it is a deliberate test, not a background one.
+
+**What this does not fix:** the CP going mute in the first place. The patch converts a permanent latch
+(reboot-only) into a bounded retry loop that recovers on its own when the peer returns. The reboot
+guard in `mobile-data watch` stays as the backstop for the case where the peer never returns.
+
+**Upstream survey (2026-10-13, `gh` only).** Nobody has fixed this, and nothing upstream contradicts
+the approach:
+
+* The runtime request path has *no* timeout anywhere in any UMS9620 tree. In
+  `drivers/net/sprd/sipa_v3/sipa_priv.h:53` the vendor even wrote `#define SIPA_RM_REQUEST_TIMEOUT
+  (1 * HZ)` -- and it is a **dead macro**: grep finds the definition and no use. `SIPA_RM_MAX_WAIT_TIME
+  (HZ * 10)`, the only other one, is used solely by `sipa_rm_add_dependency_sync()` at boot. So the
+  intent was there and was never wired up; our timeout is that intent, put where the wait actually
+  happens.
+* `dikeckaan/zte-ums9620-kernel-5.4.254` has exactly one commit touching `sipa_v3` (`b07050f10a first
+  upload`) -- a pristine vendor mirror. `SIPA_WWAN_CONS_TIMER` and `SIPA_NIC_RM_INACTIVE_TIMER` are
+  identical across the ZTE ums9620 trees (Enceka f50/u30air, Ssrml p720_w205ds, liuwang97 f50), and no
+  repo anywhere exposes either as a module parameter or sysfs knob. Issue searches for `sipa_rm -115`
+  / `sipa_dele` turn up nothing about this hang.
+* The only upstream sipa_delegate patches are *load-time* ones (kanoqwq `eb5336875c` / dikeckaan
+  `1cee306e7e`, `sipa-delegate-einprogress.patch`): tolerate `-EINPROGRESS` from
+  `sipa_rm_add_dependency()` during probe, `devm_kzalloc` -> `kzalloc`, check
+  `sipa_delegator_start()`'s return. Nothing about the runtime state machine.
+* The vendor's one recovery lever is the `sipa_dele_reset` sysfs node (see above) -- which does not
+  reach the delegator's `stat`, hence not this bug. `sprd-linux-devs/e5-linux` `4de42b4115` ("bearer: a
+  watch that brings it back after a CP reset") is the same layer of idea in userspace: react to a CP
+  reset rather than wait forever.
+* **The strongest corroboration** is `dikeckaan/mu300-linux`'s `docs/reference/android-ipa-state.txt`,
+  a capture of stock Android on this hardware: it shows the identical sequence -- RM idle release ->
+  "ready to suspend and change to single" -> `driver CB returned with -115` -> `sipa_eth: fail to
+  send, ret -115` -- **and then Android recovers 2.2 ms later, because the CP answers on chan 120**.
+  So `-115` is normal, not a bug; the only thing missing is a fallback for when the CP does not answer.
+  That is exactly what the 2 s timeout adds, along the `SIPA_RM_EVT_FAIL` path the state machine already
+  has.
+
 ## Audio
 
 ### 24. No internal audio hardware

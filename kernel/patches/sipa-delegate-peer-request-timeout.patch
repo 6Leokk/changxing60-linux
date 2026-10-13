@@ -1,0 +1,161 @@
+diff --git a/drivers/net/sprd/sipa_delegate/sipa_dele_cmn.c b/drivers/net/sprd/sipa_delegate/sipa_dele_cmn.c
+index de412765c..500724cc2 100644
+--- a/drivers/net/sprd/sipa_delegate/sipa_dele_cmn.c
++++ b/drivers/net/sprd/sipa_delegate/sipa_dele_cmn.c
+@@ -31,6 +31,24 @@
+ #include <linux/completion.h>
+ #include "sipa_dele_priv.h"
+ 
++/* How long the peer (PS CP) is given to answer a DELE_REQUEST/DELE_RELEASE.
++ *
++ * The peer answers in a few ms when it is alive, but when it goes silent
++ * (modem asleep or crashed) nothing ever takes the pending request back:
++ * sipa_dele_local_req_r_prod() keeps returning -EINPROGRESS, so
++ * SIPA_RM_RES_PROD_CP stays in REQUEST_IN_PROGRESS for good and every consumer
++ * that depends on it latches shut -- CONS_WWAN_UL ends up in
++ * RELEASE_IN_PROGRESS, sipa_eth stops its TX queue, and the bearer keeps its
++ * address while passing no packet at all. Report the request as failed once
++ * the peer has been silent for this long; that is the same notification the
++ * vendor already sends when the smsg send itself fails, and it unwinds both
++ * the producer and its consumers so the next TX starts a fresh request.
++ *
++ * Keep it below sipa_nic's SIPA_NIC_RM_INACTIVE_TIMER (3 s) so the failure is
++ * reported before the nic releases the resource on its own.
++ */
++#define SIPA_DELE_PEER_TIMEOUT_MS	2000
++
+ static int conn_thread(void *data)
+ {
+ 	struct smsg mrecv;
+@@ -197,6 +215,38 @@ void sipa_dele_start_done_work(struct sipa_delegator *delegator,
+ 		queue_work(delegator->smsg_wq, (struct work_struct *)work);
+ }
+ 
++static void sipa_dele_peer_timeout_handler(struct work_struct *work)
++{
++	struct sipa_delegator *delegator =
++		container_of(to_delayed_work(work), struct sipa_delegator,
++			     peer_timeout_work);
++	unsigned long flags;
++	bool fail = false;
++
++	spin_lock_irqsave(&delegator->lock, flags);
++	if (delegator->stat == SIPA_DELE_REQUESTING ||
++	    delegator->stat == SIPA_DELE_RELEASING) {
++		delegator->stat = SIPA_DELE_RELEASED;
++		fail = true;
++	}
++	spin_unlock_irqrestore(&delegator->lock, flags);
++
++	if (fail) {
++		pr_err_ratelimited("prod_id:%d peer silent for %d ms, failing the pending request\n",
++				   delegator->prod_id,
++				   SIPA_DELE_PEER_TIMEOUT_MS);
++		sipa_rm_notify_completion(SIPA_RM_EVT_FAIL,
++					  delegator->prod_id);
++	}
++}
++
++/* (re)start the peer timeout; callers hold delegator->lock */
++static void sipa_dele_arm_peer_timeout(struct sipa_delegator *delegator)
++{
++	mod_delayed_work(system_wq, &delegator->peer_timeout_work,
++			 msecs_to_jiffies(SIPA_DELE_PEER_TIMEOUT_MS));
++}
++
+ static void sipa_dele_r_user_req_cons(struct sipa_delegator *delegator)
+ {
+ 	int ret;
+@@ -239,8 +289,10 @@ static void sipa_dele_on_open(void *priv, u16 flag, u32 data)
+ 
+ 	pr_debug("prod_id:%d\n", delegator->prod_id);
+ 	spin_lock_irqsave(&delegator->lock, flags);
+-	if (delegator->stat == SIPA_DELE_REQUESTING)
++	if (delegator->stat == SIPA_DELE_REQUESTING) {
+ 		sipa_dele_start_req_work(delegator);
++		sipa_dele_arm_peer_timeout(delegator);
++	}
+ 	spin_unlock_irqrestore(&delegator->lock, flags);
+ }
+ 
+@@ -252,6 +304,7 @@ static void sipa_dele_on_close(void *priv, u16 flag, u32 data)
+ 	pr_debug("prod_id:%d\n", delegator->prod_id);
+ 	spin_lock_irqsave(&delegator->lock, flags);
+ 	delegator->stat = SIPA_DELE_RELEASED;
++	cancel_delayed_work(&delegator->peer_timeout_work);
+ 	spin_unlock_irqrestore(&delegator->lock, flags);
+ }
+ 
+@@ -290,8 +343,11 @@ static void sipa_dele_on_done(void *priv, u16 flag, u32 val)
+ 	case SIPA_DELE_REQUESTING:
+ 		if (val == SMSG_VAL_DELE_REQ_FAIL) {
+ 			sipa_dele_start_req_work(delegator);
++			/* the retry deserves a fresh budget */
++			sipa_dele_arm_peer_timeout(delegator);
+ 		} else {
+ 			delegator->stat = SIPA_DELE_ACTIVE;
++			cancel_delayed_work(&delegator->peer_timeout_work);
+ 			/* do request completed notify */
+ 			sipa_rm_notify_completion(SIPA_RM_EVT_GRANTED,
+ 						  delegator->prod_id);
+@@ -300,6 +356,7 @@ static void sipa_dele_on_done(void *priv, u16 flag, u32 val)
+ 	case SIPA_DELE_RELEASING:
+ 		sipa_dele_start_rls_work(delegator);
+ 		delegator->stat = SIPA_DELE_RELEASED;
++		cancel_delayed_work(&delegator->peer_timeout_work);
+ 		break;
+ 	case SIPA_DELE_RELEASED:
+ 		break;
+@@ -333,6 +390,8 @@ static int sipa_dele_local_rls_r_prod(void *user_data)
+ 		break;
+ 	case SIPA_DELE_REQUESTING:
+ 		delegator->stat = SIPA_DELE_RELEASING;
++		/* now waiting for the pending request to end, not to be granted */
++		sipa_dele_arm_peer_timeout(delegator);
+ 		ret = -EINPROGRESS;
+ 		break;
+ 	case SIPA_DELE_RELEASING:
+@@ -370,12 +429,14 @@ int sipa_dele_local_req_r_prod(void *user_data)
+ 		break;
+ 	case SIPA_DELE_RELEASING:
+ 		delegator->stat = SIPA_DELE_REQUESTING;
++		sipa_dele_arm_peer_timeout(delegator);
+ 		ret = -EINPROGRESS;
+ 		break;
+ 	case SIPA_DELE_RELEASED:
+ 		delegator->stat = SIPA_DELE_REQUESTING;
+ 		if (delegator->connected)
+ 			sipa_dele_start_req_work(delegator);
++		sipa_dele_arm_peer_timeout(delegator);
+ 		ret = -EINPROGRESS;
+ 		break;
+ 	case SIPA_DELE_POWER_OFF:
+@@ -430,6 +491,8 @@ int sipa_delegator_init(struct sipa_delegator *delegator,
+ 	delegator->local_request_prod = sipa_dele_local_req_r_prod;
+ 	delegator->local_release_prod = sipa_dele_local_rls_r_prod;
+ 	INIT_WORK(&delegator->notify_work, sipa_dele_notify_handler);
++	INIT_DELAYED_WORK(&delegator->peer_timeout_work,
++			  sipa_dele_peer_timeout_handler);
+ 	spin_lock_init(&delegator->lock);
+ 
+ 	delegator->smsg_wq = create_singlethread_workqueue("dele_smsg_wq");
+@@ -455,6 +518,7 @@ int sipa_delegator_init(struct sipa_delegator *delegator,
+ void sipa_delegator_exit(struct sipa_delegator *delegator)
+ {
+ 	if (delegator) {
++		cancel_delayed_work_sync(&delegator->peer_timeout_work);
+ 		destroy_workqueue(delegator->smsg_wq);
+ 		kthread_stop(delegator->thread);
+ 	}
+diff --git a/drivers/net/sprd/sipa_delegate/sipa_dele_priv.h b/drivers/net/sprd/sipa_delegate/sipa_dele_priv.h
+index cf2511438..db4263e73 100644
+--- a/drivers/net/sprd/sipa_delegate/sipa_dele_priv.h
++++ b/drivers/net/sprd/sipa_delegate/sipa_dele_priv.h
+@@ -80,6 +80,7 @@ struct sipa_delegator {
+ 	struct sipa_dele_smsg_work_type rls_work;
+ 	struct sipa_dele_smsg_work_type done_work;
+ 	struct delayed_work pd_work;
++	struct delayed_work peer_timeout_work;
+ 
+ 	sipa_dele_msg_func on_open;
+ 	sipa_dele_msg_func on_close;
