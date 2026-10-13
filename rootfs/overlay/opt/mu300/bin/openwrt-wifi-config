@@ -8,7 +8,7 @@ for n in $(seq 1 30); do [ -e /sys/class/ieee80211/phy0 ] && break; sleep 1; don
 CONF=/etc/mu300/hotspot.conf
 conf() { sed -n "s/^$1=//p" "$CONF" 2>/dev/null | head -1; }
 SSID=$(conf SSID); PSK=$(conf PSK); BAND=$(conf BAND); CHANNEL=$(conf CHANNEL); COUNTRY=$(conf COUNTRY)
-[ -n "$SSID" ] || SSID="MU300-$(tr -d : < /sys/class/net/wlan0/address 2>/dev/null | tail -c 5 | tr a-f A-F)"
+[ -n "$SSID" ] || SSID="CHANGXING60-$(tr -d : < /sys/class/net/wlan0/address 2>/dev/null | tail -c 5 | tr a-f A-F)"
 [ ${#PSK} -ge 8 ] || PSK=$(tr -dc 'A-HJ-NP-Za-km-z2-9' </dev/urandom | head -c 12)
 case "${BAND:-5}" in
 	2.4) band=2g; htmode=HT20; [ "$CHANNEL" = auto ] || [ -z "$CHANNEL" ] && CHANNEL=6 ;;
