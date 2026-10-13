@@ -263,9 +263,26 @@ average. `top` shows about 98 % idle.
   `sipa_delegate: modem_reset`, and `modem_control` stops and reloads the modem through Trusty. It comes back with
   `+CFUN: 0`, no registration and no PDP context, while `sipa_eth0` keeps its stale address, so clients lose internet.
   Android's RIL reconnects silently.
-* `mobile-data watch` (`mu300-mobile-data-watch.service`) checks `AT+CGACT?` and the interface address every 30 s and
-  runs `up` again after two failed checks; `mobile-data down` sets `/run/mu300-mobile-data-down` so a manual disconnect
-  is respected. Verified by switching the radio off: data returned without intervention.
+* `mobile-data watch` (procd instance `cellwatch`, started by `mu300-post`) no longer polls `AT+CGACT?`: the live data
+  call holds the AT channel (`/dev/stty_nr1`), so the watchdog must not touch it. It judges the link by *reachability*
+  instead. While idle (every third cycle, ~90 s) it sends ICMP probes to the carrier DNS plus 223.5.5.5/119.29.29.29;
+  moving packet counters count as proof of life without probing at all, which both saves the probe and avoids false
+  alarms where the carrier drops ICMP. Three consecutive failures make it repair with `ifdown`+`ifup` -- plain `ifup`
+  is a no-op while netifd still believes the interface is up, which is exactly the failure seen in practice ("fake
+  alive": address present, operstate `up`, `tx +0 rx +0`), rate-limited to one repair per 10 minutes; three failed
+  repairs trigger one `sim-reset`. It publishes `/tmp/mu300-wan-health` (`ok|dead` + uptime) so the status page can
+  report red instead of a green lie. `mobile-data down` sets `/run/mu300-mobile-data-down` so a manual disconnect is
+  respected.
+* Last resort (2026-10-13, commit `6c6fe97`): some wedges survive both the repair and `sim-reset` -- after
+  `SIPA_RM` released the WWAN bearer, or after a 6-stream 279 Mbps burst, `mobile-data up` hangs in `do_select` and
+  the cellular AT channel goes silent (bare `AT` unanswered, while the WCN `atcmd` attribute still answers `rc=0`,
+  i.e. it is the cellular AT channel that died, not WCN). Only a reboot recovers it. `watch` now reboots when all
+  four hold: health `dead` for >=300 s, a repair in flight for >=60 s (i.e. repairs are not helping), a bare `AT` on
+  `/dev/stty_nr1` going unanswered, and this boot has not rebooted yet (`/var/run/mu300-wan-rebooted`; `/var` is
+  tmpfs, so the marker is per-boot for free). The probe refuses to send AT at all while `$IFACE` still holds an
+  address, which keeps the "never put AT traffic on a live data call" rule. Verified against a stubbed copy with the
+  thresholds lowered: it fired exactly once, at the cooldown plus threshold, and never again.
+* Verified by switching the radio off: data returned without intervention.
 
 ### 27. Where the missing ~550 MiB of RAM goes
 * `Memory: 1430144K/2097084K available ... 617788K reserved`. The device tree reserves 464 MiB for the modem firmware
@@ -305,7 +322,8 @@ average. `top` shows about 98 % idle.
   official armsr/armv8 tarball (checksum-verified) with apk, our kernel modules flat in `/lib/modules/<release>`
   (ubox kmodloader), the vendor chroot and procd services (`mu300-vendor`, `mu300-hw`, `mu300-post`).
 * Cellular WAN is a netifd protocol (`proto mu300cell`, option `apn`), so LuCI/fw4 handle routing, DNS and NAT;
-  `mobile-data watch` calls `ifup wan` after modem resets.
+  `mobile-data watch` keeps it honest -- ICMP probes plus a health file, `ifdown`/`ifup` repairs, a `sim-reset` after
+  three failures, and a once-per-boot reboot as the last resort (see 26).
 * Pitfalls found on the device:
   * procd mounts `/dev` as a 512 KiB tmpfs: copying the 85 MiB Android property area gives empty files and
     `modem_control` never boots the modem (power cut at ~290 s). The property area is now bind-mounted (also on Ubuntu,
