@@ -5,6 +5,20 @@ export PATH="$PATH:/opt/mu300/busybox-bin"
 
 boot() {
 	/opt/mu300/bin/extra-modules >/tmp/mu300-extra-modules.log 2>&1
+	# Vendor drivers Android loads that the boot set does not carry: CPU crypto offload, USB-Ethernet,
+	# sensor hub, ION/DMA/DVFS glue. Staged from the same 5.4 build as the boot set, so the vermagic
+	# matches; see docs/mu300/drivers.md. The touchscreen is NOT one of them -- it stays opt-in
+	# through touch-ctl, see the note in that script.
+	/opt/mu300/bin/vendor-modules >>/tmp/mu300-vendor-modules.log 2>&1
+	# bootdiag writes the evidence a post-switch_root failure leaves nowhere else (WCN/hostapd/netifd,
+	# the wedge watch) into /root/diag, and attaches a UDC that only turns up after the initramfs gave
+	# up. It is driven by cron because a wedged init queue would stall an init script. Re-asserted
+	# every boot: this rootfs' crontab is hand-edited, so an install from before it exists would
+	# otherwise never get the line.
+	if [ -f /etc/crontabs/root ] || [ -d /etc/crontabs ]; then
+		grep -q 'mu300/bin/bootdiag' /etc/crontabs/root 2>/dev/null || \
+			echo '* * * * * /opt/mu300/bin/bootdiag >/dev/null 2>&1' >> /etc/crontabs/root
+	fi
 	# After the vendor modules are in (one of them is what leaves console_loglevel at 7 rather
 	# than the quiet default the kernel was built and booted with) and before the WLAN ones, so
 	# the SC2355 driver's startup burst never reaches the 115200-baud console. See quiet-console.

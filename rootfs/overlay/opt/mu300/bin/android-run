@@ -3,7 +3,12 @@
 # The binary is exec'd directly so its task name (comm) matches what vendor drivers expect.
 set -e
 A=/opt/mu300/android
+# /opt/mu300/busybox-bin carries the applets OpenWrt's own busybox leaves out, `mountpoint` among
+# them. Without this export the call below is "mountpoint: not found" on every iteration, the loop
+# never breaks early, and every android-run instance sits here for the full 60 s before exec'ing.
+export PATH="$PATH:/opt/mu300/bin:/opt/mu300/busybox-bin"
 for n in $(seq 1 60); do mountpoint -q $A/dev && break; sleep 1; done
+mountpoint -q $A/dev || echo "android-run: $A/dev never appeared (android-vendor-start still running?)" >&2
 # OpenWrt's procd preloads /lib/libsetlbf.so into services; the bionic linker in the chroot cannot load it
 unset LD_PRELOAD
 export LD_LIBRARY_PATH=/apex/com.android.runtime/lib64/bionic:/system/lib64:/vendor/lib64

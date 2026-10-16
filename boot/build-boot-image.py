@@ -51,31 +51,43 @@ def bootloader_control(misc_head):
     """Return (slot_a_block, slot_b_trial_block) derived from the live misc bootloader_control.
 
     7552n-port: derive from the live state instead of hardcoding F50 bytes (7552N live is
-    a=0xff/b=0x0f, F50 was a=0x9f/b=0x1e). The restore block is the live block verbatim;
-    the trial block lowers slot a's priority by one (tries/successful kept) and gives slot b
-    priority 15 with tries=2 — Unisoc LK decrements to 1 before booting b, and a boot that
-    never marks successful rolls back to slot a on the next reboot. On F50 live bytes this
-    reproduces the author's original 0x9e/0x2f trial block.
+    a=0xff/b=0x1e, F50 was a=0x9f/b=0x1e).  Each block is the live block with the *chosen*
+    slot pinned to priority 15 and the other one clamped to at most 14, so the chosen slot
+    always wins and the pair is stable no matter which slot we derive from:
+
+      * slot b (Linux): prio 15, tries 2, successful 0.  LK decrements tries to 1 before
+        booting b, and if the boot never marks itself successful the next reboot rolls back
+        to slot a (Android).
+      * slot a (Android): prio 15, tries 7, successful 1 — the stock Android slot; it must
+        stay *successful* or a stale "boot android" request would run out of tries and fall
+        back to Linux.
+
+    Deriving both from the live block (rather than "live is the restore block, live minus one
+    is the trial") is what makes the device work when it is already running slot b: the live
+    misc then *is* the slot-b block mu300-next-boot re-arms every boot, and a rule that just
+    lowered the live slot a's priority would ratchet it down on every rebuild.
     """
     bc = misc_head[MISC_BC_OFFSET:MISC_BC_OFFSET + 32]
     if bc[4:8] != b'BCAB':
         sys.exit('misc head has no bootloader_control magic at 0x800')
     if zlib.crc32(bc[:28]) != struct.unpack('<I', bc[28:])[0]:
         sys.exit('misc bootloader_control CRC mismatch')
-    if bc[0:2] != b'_a':
-        sys.exit(f'device must be on slot a, live suffix is {bc[0:4]!r}')
+    if bc[0:2] not in (b'_a', b'_b'):
+        sys.exit(f'misc bootloader_control suffix is neither _a nor _b: {bc[0:4]!r}')
 
-    slot_a = bytes(bc)  # restore block: live verbatim
+    def block(target):
+        t = bytearray(bc)
+        t[0:4] = target + b'\0\0'
+        if target == b'_b':
+            t[14] = 0x2f                                             # b: prio 15, tries 2, successful 0
+            t[12] = (bc[12] & 0xf0) | min(bc[12] & 0x0f, 14)         # a: <= 14, keeps tries/successful
+        else:
+            t[12] = 0xff                                             # a: prio 15, tries 7, successful 1
+            t[14] = (bc[14] & 0xf0) | min(bc[14] & 0x0f, 14)         # b: <= 14
+        t[28:32] = struct.pack('<I', zlib.crc32(bytes(t[:28])))
+        return bytes(t)
 
-    t = bytearray(bc)
-    t[0:4] = b'_b\0\0'
-    prio_a = bc[12] & 0x0f
-    if prio_a == 0:
-        sys.exit('slot a priority is already 0; cannot lower it for the trial block')
-    t[12] = (bc[12] & 0xf0) | (prio_a - 1)  # slot_info: prio bits 0-3, tries 4-6, successful 7
-    t[14] = 0x2f                            # b: prio 15, tries 2, not successful
-    t[28:32] = struct.pack('<I', zlib.crc32(bytes(t[:28])))
-    return slot_a, bytes(t)
+    return block(b'_a'), block(b'_b')
 
 
 def main():

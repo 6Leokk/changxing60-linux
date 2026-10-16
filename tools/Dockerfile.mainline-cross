@@ -1,0 +1,26 @@
+# amd64 build environment that CROSS-compiles the mainline arm64 kernel.
+#
+# Why this exists: upstream/Dockerfile is a *native arm64* environment (`build.sh` never sets
+# CROSS_COMPILE, and its Dockerfile has no --platform), so on an amd64 host you are forced to run it
+# under qemu-user emulation -- roughly an order of magnitude slower. But build.sh already passes
+# `ARCH=arm64` on every make line, so the only thing missing for a cross build is `CROSS_COMPILE`;
+# GNU make takes it straight from the environment, so no source edit is needed either.
+#
+#   docker build -t mu300-cross -f tools/Dockerfile.mainline-cross mu300-linux/
+#   docker run --rm -e CROSS_COMPILE=aarch64-linux-gnu- \
+#          -v mu300-mainline:/src -v "$PWD/upstream":/work mu300-cross bash /work/build.sh
+#
+# The package list mirrors upstream/Dockerfile (bc/bison/flex run on the host; libssl-dev/libelf-dev
+# are for host tools like scripts/sign-file and objtool, NOT target libs), plus the arm64 cross
+# toolchain. Cross gcc here is the same Ubuntu 26.04 gcc 15.2 the native arm64 image carries, so the
+# resulting vermagic / module ABI is identical either way.
+FROM ubuntu:26.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential bc bison flex libssl-dev libelf-dev lz4 cpio kmod python3 curl device-tree-compiler xz-utils ca-certificates dwarves \
+    gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
+ && rm -rf /var/lib/apt/lists/*
+# build-modules.sh:53 strips the vendor .ko files with a bare `strip` -- in the native arm64 image that is arm64
+# binutils, here it would be the x86_64 one and fail with "Unable to recognise the architecture". kbuild's own
+# modules_install already picks the cross strip up from CROSS_COMPILE, so this one call is all that needs the shim.
+RUN printf '#!/bin/sh\nexec aarch64-linux-gnu-strip "$@"\n' > /usr/local/bin/strip && chmod +x /usr/local/bin/strip

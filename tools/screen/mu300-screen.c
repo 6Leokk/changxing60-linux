@@ -1,5 +1,5 @@
 /* mu300-screen -- OpenWrt status page on the 7552N's internal 854x480 MIPI panel, plus the
- * power-key backlight toggle.
+ * power-key brightness control (five steps, remembered across reboots).
  *
  * Why it looks like this:
  *  - The kernel has no fbdev (/dev/fb0 does not exist: CONFIG_FB and DRM_FBDEV_EMULATION are both
@@ -7,8 +7,10 @@
  *  - The rootfs has no libdrm and no browser, so this is one static binary: raw DRM ioctls
  *    (drm_min.h), the kernel's own 8x16 console font (font8x16.h), and plain text output.
  *  - The power key is on gpio-keys /dev/input/event0 (KEY_POWER=116). There is no acpid here, so
- *    without this program the key does nothing at all; we bind it to the backlight and nothing else
- *    (a long press must not be turned into a shutdown: the PMIC owns that path).
+ *    without this program the key does nothing at all; we bind it to the backlight and nothing else.
+ *    It is the only key the board has, so one short press walks the five brightness steps and wraps
+ *    past "off" back to full, and the chosen step is kept in /etc/mu300/backlight. A long press is
+ *    still the PMIC's power-off: no software handler here must shadow it.
  *
  * Data sources are read-only and never touch the modem's AT port -- an AT query on a live data call
  * is exactly the failure mode fixed on 2026-10-13 (see rootfs/overlay/opt/mu300/bin/mobile-data).
@@ -375,22 +377,112 @@ static int backlight_find(void)
 	return -1;
 }
 
-static int bl_levels[] = { 0, 25, 50, 75, 100 };   /* percent */
-static int bl_index = 4;
+/* Five steps, brightest first, cycled by the one key this board actually has. The order is the
+ * point: stepping down and wrapping past "off" lands back on full, so a single key both dims the
+ * page and turns it off, and there is always a way back without a second button. The device tree
+ * describes no volume keys -- /dev/input carries gpio-keys with KEY_POWER (116) alone -- so the
+ * volume branches in handle_key() exist for keyinject and for boards that do have them. */
+static int bl_levels[] = { 100, 75, 50, 25, 0 };   /* percent */
+#define BL_N ((int)(sizeof bl_levels / sizeof bl_levels[0]))
+static int bl_index = 0;
 static int screen_on = 1;
 
-static void backlight_apply(void)
+/* The step is remembered across reboots: asking for a dim page is asking for it to stay dim, and
+ * this panel is the device's only display. /etc sits on the persistent ext4 rootfs, not a tmpfs.
+ * Step 0 is "backlight off", not "screen off" -- the panel keeps scanning the last frame, and the
+ * next press brings it back at 100%. */
+static char bl_state[64] = "/etc/mu300/backlight";
+
+static void backlight_save(void)
+{
+	mkdir("/etc/mu300", 0755);      /* the rootfs builder makes it; do not depend on that */
+	FILE *f = fopen(bl_state, "w");
+	if (!f) return;                 /* a read-only /etc must not take the page down */
+	fprintf(f, "%d\n", bl_levels[bl_index]);
+	fclose(f);
+}
+
+static void backlight_load(void)
+{
+	FILE *f = fopen(bl_state, "r");
+	int v = -1;
+	if (!f) return;
+	if (fscanf(f, "%d", &v) != 1) v = -1;
+	fclose(f);
+	if (v < 0) return;
+	for (int i = 0; i < BL_N; i++)
+		if (bl_levels[i] == v) { bl_index = i; return; }
+	/* a hand-edited file, or a step this build no longer offers: keep the default rather than
+	 * adopt a value the cycle could never leave */
+	fprintf(stderr, "mu300-screen: saved brightness %d is not a step, using %d%%\n",
+		v, bl_levels[bl_index]);
+}
+
+/* Raw write, independent of the remembered step -- the idle blank needs to darken the panel without
+ * changing what the next key press or the next boot will restore. */
+static void backlight_write_pct(int pct)
 {
 	if (bl_brightness[0] == 0) return;
-	int v = bl_max_val * bl_levels[bl_index] / 100;
+	int v = bl_max_val * pct / 100;
 	FILE *f = fopen(bl_brightness, "w");
 	if (!f) return;
 	fprintf(f, "%d\n", v);
 	fclose(f);
-	screen_on = bl_index > 0 || bl_levels[bl_index] > 0;
-	if (bl_index == 0) screen_on = 0;
-	else screen_on = 1;
-	fprintf(stderr, "mu300-screen: backlight %d%% (%d)\n", bl_levels[bl_index], v);
+}
+
+static void backlight_apply(void)
+{
+	int pct = bl_levels[bl_index];
+	screen_on = pct > 0;
+	backlight_write_pct(pct);
+	fprintf(stderr, "mu300-screen: backlight %d%%\n", pct);
+}
+
+/* ---------- idle blank (power policy) ----------
+ * The page's job is to be read once -- someone joins the hotspot and scans the join code -- and from
+ * then on it is a lighting bill: this panel is the only always-on output the board has, and nothing
+ * ever presses a key. After MU300_PANEL_IDLE seconds without one, the backlight goes dark and the
+ * repaints stop; any key brings the page back at exactly the step it was left on. The step itself is
+ * never changed by the blank, so /etc/mu300/backlight (and therefore the next boot) is unaffected.
+ *
+ * Off by default: the saving has not been measured on the device yet, and a screen that goes dark
+ * on its own reads as a hang. Enable with `echo 300 > /etc/mu300/panel-idle` (seconds; 0 = never),
+ * or per-run with MU300_PANEL_IDLE. */
+static int bl_idle_s = 0;         /* seconds without a key before darkening; 0 = never */
+static int bl_idle_dark = 0;      /* backlight currently darkened by the idle timer */
+static time_t bl_idle_seen = 0;   /* when a key was last pressed */
+
+static void idle_config(void)
+{
+	const char *e = getenv("MU300_PANEL_IDLE");
+	int v = -1;
+	if (e) v = atoi(e);
+	if (v < 0) {
+		FILE *f = fopen("/etc/mu300/panel-idle", "r");
+		if (f) {
+			if (fscanf(f, "%d", &v) != 1) v = -1;
+			fclose(f);
+		}
+	}
+	/* 0 means off and is authoritative: an explicit MU300_PANEL_IDLE=0 must be able to turn the timer
+	 * off even with /etc/mu300/panel-idle asking for it, otherwise there is no way to disable it
+	 * without editing the file first. Unset or unparsable falls through to the file. */
+	bl_idle_s = v > 0 ? v : 0;
+	if (bl_idle_s > 0)
+		fprintf(stderr, "mu300-screen: panel idle blank after %d s\n", bl_idle_s);
+	bl_idle_seen = time(NULL);
+}
+
+/* Called on the refresh tick; darkens the panel once the idle timeout has passed. */
+static void idle_tick(void)
+{
+	if (bl_idle_s <= 0 || bl_idle_dark) return;
+	if (bl_levels[bl_index] == 0) return;       /* already off, and that was the user's choice */
+	if (time(NULL) - bl_idle_seen < bl_idle_s) return;
+	bl_idle_dark = 1;
+	backlight_write_pct(0);
+	fprintf(stderr, "mu300-screen: idle %d s, backlight off (step %d%% kept)\n",
+		bl_idle_s, bl_levels[bl_index]);
 }
 
 /* ---------- status data ---------- */
@@ -401,7 +493,7 @@ static char ssid[64] = "?", psk[64] = "-", wifi_addr[18] = "-", wifi_ch[16] = "-
 static int wifi_clients = 0;
 static char wan_if[24] = "sipa_eth0", wan_ip[40] = "-", wan_mask[8] = "-", wan_state[12] = "-";
 static unsigned long long wan_rx = 0, wan_tx = 0, wlan_rx = 0, wlan_tx = 0;
-static char lan_ip[40] = "192.168.77.1";
+static char lan_ip[40] = "192.168.8.1";   /* hotspot side; br-lan is only a fallback -- see read_wan */
 static long long sys_uptime = 0;
 static int mem_total_kb = 0, mem_avail_kb = 0, zram_kb = 0;
 static int temp_max = 0, batt_cap = -1, batt_volt = 0;
@@ -554,9 +646,29 @@ static void read_system(void)
 	if (batt_status[0] == '-') snprintf(batt_status, sizeof batt_status, "Unknown");
 }
 
+/* Take the first non-loopback, non-WAN IPv4 address out of `ip -4 -o addr show` output into lan_ip.
+ * Returns 1 when it found one, so the caller can move on to the next candidate interface. */
+static int lan_take(const char *out)
+{
+	const char *q = out;
+	while ((q = strstr(q, "inet "))) {
+		char cidr[40];
+		q += 5;
+		if (sscanf(q, "%39s", cidr) != 1)
+			return 0;
+		char *slash = strchr(cidr, '/');
+		if (slash) *slash = 0;
+		if (strcmp(cidr, wan_ip) != 0 && strncmp(cidr, "127.", 4) != 0) {
+			snprintf(lan_ip, sizeof lan_ip, "%.39s", cidr);
+			return 1;
+		}
+	}
+	return 0;
+}
+
 static void read_wan(void)
 {
-	char b[512], p[200];
+	char b[512], p[200], all[2048];
 	snprintf(p, sizeof p, "/sys/class/net/%.15s/operstate", wan_if);
 	if (read_file_str(p, b, sizeof b) == 0) snprintf(wan_state, sizeof wan_state, "%.11s", b);
 	else snprintf(wan_state, sizeof wan_state, "absent");
@@ -586,31 +698,31 @@ static void read_wan(void)
 			}
 		}
 	}
-	/* LAN address for the URL on the panel. Ask br-lan first, and only fall back to the old
-	 * "first IPv4 that is not the WAN one" scan if it has none. The panel is read from both
-	 * sides and the two no longer share a subnet: a machine on the USB cable can only reach
-	 * 192.168.77.1, while a client on the hotspot reaches that one too (both networks sit in
-	 * the same firewall zone, so the device routes between them). Picking whichever address
-	 * `ip addr` happens to print first would eventually put a URL on the panel that half its
-	 * readers cannot open -- it only looked right because br-lan sorts first today. */
-	int have = run_cmd("ip -4 -o addr show dev br-lan 2>/dev/null", b, sizeof b);
-	if (!have)
-		have = run_cmd("ip -4 -o addr show 2>/dev/null", b, sizeof b);
-	if (have) {
-		char cidr[40];
-		char *q = b;
-		while ((q = strstr(q, "inet "))) {
-			q += 5;
-			if (sscanf(q, "%39s", cidr) == 1) {
-				char *slash = strchr(cidr, '/');
-				if (slash) *slash = 0;
-				if (strcmp(cidr, wan_ip) != 0 && strncmp(cidr, "127.", 4) != 0) {
-					snprintf(lan_ip, sizeof lan_ip, "%.39s", cidr);
-					break;
-				}
-			}
-		}
-	}
+	/* Address for the URL on the panel. The QR above it is a Wi-Fi join code and the SSID is
+	 * printed on the same page, so the reader is a phone that has just joined the hotspot: for
+	 * that reader the management address is the hotspot's own 192.168.8.1, not br-lan's
+	 * 192.168.77.1, which is the other side of the net-split. The panel used to print the br-lan
+	 * one on the theory that a hotspot client reaches it too (both networks are in one firewall
+	 * zone, so the router would route between them) -- in practice it did not, and the backend
+	 * was unreachable from the hotspot while 192.168.8.1 worked (2026-10-14). So ask br-wifi
+	 * first. br-lan is the fallback, for the cable side, where the reader already knows to type
+	 * 192.168.77.1 (every document and tool here says so) and where 192.168.8.1 is not reachable
+	 * at all, since br-lan deliberately hands out no gateway. Last resort is the old "first IPv4
+	 * that is not the WAN one" scan.
+	 *
+	 * Each step is "the command ran AND it had an address to give": an interface that exists but
+	 * carries nothing (a torn-down bridge, a hotspot that is off) must not stop the fallback, or
+	 * the panel would keep printing an address nothing answers on. */
+	int got = 0;
+	if (run_cmd("ip -4 -o addr show dev br-wifi 2>/dev/null", b, sizeof b))
+		got = lan_take(b);
+	if (!got && run_cmd("ip -4 -o addr show dev br-lan 2>/dev/null", b, sizeof b))
+		got = lan_take(b);
+	/* run_cmd_all, not run_cmd: the full listing is one line per address and read_wan's other
+	 * calls only ever want the first one, but here the whole list has to be looked at -- the
+	 * address worth printing may well not be the one `ip` printed first. */
+	if (!got && run_cmd_all("ip -4 -o addr show 2>/dev/null", all, sizeof all))
+		got = lan_take(all);
 }
 
 static void read_wifi(void)
@@ -924,7 +1036,7 @@ static void render(void)
 	fill_rect(0, fb_h - 20 * sc, fb_w, 20 * sc, FB_PANEL);
 	snprintf(line, sizeof line, "LuCI %s", url);
 	draw_text(8, fb_h - 16 * sc, sc, FB_TEXT, line);
-	snprintf(line, sizeof line, "power=on/off vol=dim");
+	snprintf(line, sizeof line, "power=brightness (kept)");
 	draw_text(fb_w - 8 - text_w(sc, line), hint_y, sc, FB_DIM, line);
 
 	/* The frame is complete in the off-screen buffer; hand it to the panel in one step. No-op
@@ -967,16 +1079,31 @@ static int input_scan(void)
 static void handle_key(__u16 code, __s32 value)
 {
 	if (value != 1) return;                 /* press only: ignore release and autorepeat */
+	bl_idle_seen = time(NULL);
+	if (bl_idle_dark) {
+		/* The press that wakes the page is the wake-up, not a brightness change: coming back
+		 * one step dimmer than you left it is exactly the surprise this avoids. */
+		bl_idle_dark = 0;
+		backlight_apply();
+		return;
+	}
 	if (code == KEY_POWER) {
-		if (screen_on) { bl_index = 0; }
-		else { bl_index = (bl_index <= 0 || bl_index > 4) ? 4 : bl_index; }
+		/* The board's only key. Each press steps the brightness one level down and wraps from
+		 * off back to full, and the new step is saved, so short presses both dim the page over
+		 * five levels and switch it off. A long press is deliberately left to the hardware: the
+		 * PMIC turns it into a power-off, and shadowing that with a software handler would be
+		 * the one way to lose the ability to turn the device off from the panel at all. */
+		bl_index = (bl_index + 1) % BL_N;
 		backlight_apply();
+		backlight_save();
 	} else if (code == KEY_VOLUMEUP) {
-		if (bl_index < 4) bl_index++;
-		backlight_apply();
-	} else if (code == KEY_VOLUMEDOWN) {
 		if (bl_index > 0) bl_index--;
 		backlight_apply();
+		backlight_save();
+	} else if (code == KEY_VOLUMEDOWN) {
+		if (bl_index < BL_N - 1) bl_index++;
+		backlight_apply();
+		backlight_save();
 	}
 }
 
@@ -991,7 +1118,7 @@ static void mock_data(void)
 	snprintf(wan_ip, sizeof wan_ip, "10.44.128.77");
 	snprintf(wan_mask, sizeof wan_mask, "30");
 	snprintf(wan_state, sizeof wan_state, "up");
-	snprintf(lan_ip, sizeof lan_ip, "192.168.77.1");
+	snprintf(lan_ip, sizeof lan_ip, "192.168.8.1");
 	wan_rx = 128ull * 1024 * 1024;
 	wan_tx = 9ull * 1024 * 1024;
 	sys_uptime = 3 * 3600 + 41 * 60;
@@ -1059,7 +1186,11 @@ int main(int argc, char **argv)
 	if (once || shot) present_enabled = 0;   /* both dump the drawn buffer, not the panel */
 
 	if (drm_init() < 0) return 1;
-	if (backlight_find() == 0) backlight_apply();
+	if (backlight_find() == 0) {
+		backlight_load();       /* the step the last boot was left at, if it was ever set */
+		backlight_apply();
+		idle_config();
+	}
 
 	if (input_scan() == 0)
 		fprintf(stderr, "mu300-screen: no /dev/input/event*: %s (keys disabled)\n",
@@ -1106,7 +1237,8 @@ int main(int argc, char **argv)
 		 * after startup is picked up here rather than being missed until the next restart */
 		if (input_scan())
 			fprintf(stderr, "mu300-screen: %d input device(s)\n", in_n);
-		if (!screen_on) continue;                       /* nothing to repaint while dark */
+		idle_tick();                                    /* darken once the panel has been idle */
+		if (!screen_on || bl_idle_dark) continue;       /* nothing to repaint while dark */
 		tz++;
 		read_system();
 		read_wan();

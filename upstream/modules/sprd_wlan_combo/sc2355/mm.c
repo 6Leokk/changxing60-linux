@@ -9,6 +9,7 @@
 * as published by the Free Software Foundation.
 */
 
+#include <linux/delay.h>
 #include "cmdevt.h"
 #include "common/common.h"
 #include "rx.h"
@@ -34,21 +35,23 @@ static void mm_check_mh_buffer(struct device *dev, void *buffer, dma_addr_t pa,
 		/* Check whether this buffer is ok to use */
 		while ((desc->data_write_done != 1) &&
 		       (retry < MAX_RETRY_NUM)) {
-			pr_err("%s: hw still writing: 0x%lx, 0x%lx\n",
-			       __func__, (unsigned long)buffer,
-			       (unsigned long)pa);
-			/* FIXME: Should we delay here? */
-			dma_sync_single_for_device(dev, pa, size, direction);
+			/*
+			 * MU300: re-read the descriptor from memory. The vendor code called
+			 * dma_sync_single_for_device() here, which on arm64 invalidated
+			 * FROM_DEVICE buffers until 5.19 and cleans them since: the CPU kept
+			 * reading the stale line, every retry failed, and the pr_err below
+			 * (at loglevel 8, over the serial console, from the RX path) could
+			 * stall the CPU for good under load.
+			 */
+			udelay(1);
+			dma_sync_single_for_cpu(dev, pa, size, direction);
 			retry++;
 		}
 	}
 
-	if (retry >= MAX_RETRY_NUM) {
-		/* TODO: How to deal with this situation? */
-		dma_sync_single_for_device(dev, pa, size, direction);
-		pr_err("%s: hw still writing: 0x%lx, 0x%lx\n",
-		       __func__, (unsigned long)buffer, (unsigned long)pa);
-	}
+	if (retry >= MAX_RETRY_NUM)
+		pr_err_ratelimited("%s: hw still writing: 0x%lx, 0x%lx\n",
+				   __func__, (unsigned long)buffer, (unsigned long)pa);
 }
 
 static void mm_clear_mh_buffer(void *buffer)
@@ -135,8 +138,13 @@ static inline int mm_do_addr_buf(struct mem_mgmt *mm_entry)
 	/* NOTE: addr_buf should be allocating after being sent,
 	 *       JUST avoid addr_buf allocating fail after being sent here
 	 */
+	/*
+	 * MU300: every message on this path is rate-limited. The RX refill retries it, and when the chip stops
+	 * taking address buffers (issue #94: the WCN in dump status for minutes) each attempt printed four lines
+	 * to the console until a CPU soft-locked in printk. The first ones still show; printk counts the rest.
+	 */
 	if (!hif->fw_awake) {
-		pr_info("%s, fw power save, need to wake up it!\n", __func__);
+		pr_info_ratelimited("%s, fw power save, need to wake up it!\n", __func__);
 		spin_lock_bh(&priv->list_lock);
 		list_for_each_entry(tmp_vif, &priv->vif_list, vif_node) {
 			if (tmp_vif->state & VIF_STATE_OPEN) {
@@ -152,7 +160,7 @@ static inline int mm_do_addr_buf(struct mem_mgmt *mm_entry)
 		if (!sc2355_cmd_host_wakeup_fw(vif->priv, vif)) {
 			hif->fw_power_down = 0;
 		} else {
-			pr_err("%s, wake up fw failed!!\n", __func__);
+			pr_err_ratelimited("%s, wake up fw failed!!\n", __func__);
 			return -EIO;
 		}
 	}
@@ -161,7 +169,7 @@ static inline int mm_do_addr_buf(struct mem_mgmt *mm_entry)
 		pr_debug("%s: addr buf is NULL, re-alloc here\n", __func__);
 		mm_alloc_addr_buf(mm_entry);
 		if (unlikely(!mm_entry->addr_trans)) {
-			pr_err("%s: alloc addr buf fail!\n", __func__);
+			pr_err_ratelimited("%s: alloc addr buf fail!\n", __func__);
 			ret = -ENOMEM;
 		}
 	} else if (value->num >= SPRD_MAX_ADD_MH_BUF_ONCE) {
@@ -177,11 +185,11 @@ static inline int mm_do_addr_buf(struct mem_mgmt *mm_entry)
 					  addr_trans_len, false) >= 0)) {
 			mm_alloc_addr_buf(mm_entry);
 			if (unlikely(!mm_entry->addr_trans)) {
-				pr_err("%s: alloc addr buf fail!\n", __func__);
+				pr_err_ratelimited("%s: alloc addr buf fail!\n", __func__);
 				ret = -ENOMEM;
 			}
 		} else {
-			pr_err("%s: send addr buf fail!\n", __func__);
+			pr_err_ratelimited("%s: send addr buf fail!\n", __func__);
 			ret = -EIO;
 		}
 	}
@@ -235,8 +243,8 @@ static int mm_single_buffer_alloc(struct mem_mgmt *mm_entry)
 		if (likely(pcie_addr)) {
 			ret = mm_w_addr_buf(mm_entry, pcie_addr);
 			if (ret) {
-				pr_err("%s: write addr buf fail: %d\n",
-				       __func__, ret);
+				pr_err_ratelimited("%s: write addr buf fail: %d\n",
+						   __func__, ret);
 				dev_kfree_skb(skb);
 			} else {
 				/* queue skb */
@@ -244,7 +252,7 @@ static int mm_single_buffer_alloc(struct mem_mgmt *mm_entry)
 			}
 		}
 	} else {
-		pr_err("%s: alloc skb fail\n", __func__);
+		pr_err_ratelimited("%s: alloc skb fail\n", __func__);
 	}
 
 	return ret;
@@ -293,7 +301,7 @@ int mm_buffer_relink(struct mem_mgmt *mm_entry,
 
 		ret = mm_w_addr_buf(mm_entry, pcie_addr);
 		if (ret) {
-			pr_err("%s: write addr buf fail: %d\n", __func__, ret);
+			pr_err_ratelimited("%s: write addr buf fail: %d\n", __func__, ret);
 			skb = mm_single_buffer_unlink(mm_entry, pcie_addr);
 			if (likely(skb))
 				dev_kfree_skb(skb);
@@ -436,7 +444,7 @@ static void mm_normal_data_process(struct mem_mgmt *mm_entry,
 	struct sprd_hif *hif = rx_mgmt->hif;
 
 	if (unlikely(len < sizeof(struct rx_msdu_desc))) {
-		pr_err("%s: data len is %d, too short\n", __func__, len);
+		pr_err_ratelimited("%s: data len is %d, too short\n", __func__, len);
 		free_data = true;
 	} else {
 		if (hif->hw_type == SPRD_HW_SC2355_PCIE)
@@ -449,16 +457,20 @@ static void mm_normal_data_process(struct mem_mgmt *mm_entry,
 		if (likely(skb_len <= len))
 			skb = mm_build_skb(data, skb_len, buffer_type);
 		else {
-			/* Should not happen */
-			pr_err("%s: data len is %d, skb need %d\n",
-			       __func__, len, skb_len);
+			/*
+			 * MU300 (#140): the vendor's "should not happen" happens on every short frame (an ACK-sized
+			 * buffer is smaller than skb_shared_info plus the aligned payload); the copy below handles it,
+			 * so it is a trace of the slow path, not an error
+			 */
+			pr_debug_ratelimited("%s: data len is %d, skb need %d\n",
+					     __func__, len, skb_len);
 			skb = mm_data2skb_process(mm_entry, data,
 						  SKB_WITH_OVERHEAD(skb_len));
 			free_data = true;
 		}
 
 		if (unlikely(!skb)) {
-			pr_err("%s: alloc skb fail\n", __func__);
+			pr_err_ratelimited("%s: alloc skb fail\n", __func__);
 			free_data = true;
 		} else {
 			skb_reserve(skb, mm_entry->hif_offset);
@@ -506,7 +518,16 @@ static int mm_single_event_process(struct mem_mgmt *mm_entry,
 		/* NOTE: Not need to do anything here */
 		break;
 	case SPRD_FLUSH_BUFFER:
-		sc2355_rx_flush_buffer(mm_entry);
+		/*
+		 * MU300: ignored. The vendor called sc2355_rx_flush_buffer(mm_entry) here, with mm_entry where it
+		 * takes the hif, so it read a garbage rx_mgmt pointer: this firmware never sends it, or it would have
+		 * crashed. Done right, it is still unsafe: from this RX context it would free buffer_list and the
+		 * address buffer under a running refill (sprd_work), and deferred to sprd_work it would free buffers
+		 * that later RX events in this same batch, and refills after it, still hand to or take from the chip.
+		 * Leaving the buffers alone is safe: the last interface's close flushes them all (sc2355_reset and
+		 * sc2355_handle_tx_status_after_close).
+		 */
+		pr_warn_ratelimited("%s: firmware asked for an RX buffer flush, ignored\n", __func__);
 		break;
 	default:
 		pr_err("%s: err type: %d\n", __func__, value->type);
@@ -549,7 +570,8 @@ void *sc2355_mm_phys_to_virt(struct device *dev, unsigned long pcie_addr,
 	pa = pcie_addr & (~(SPRD_MH_ADDRESS_BIT) & SPRD_PHYS_MASK);
 	buffer = phys_to_virt(pa);
 
-	dma_sync_single_for_device(dev, pa, size, direction);
+	/* MU300: for_cpu, not for_device: the CPU is about to read what the device wrote (see mm_check_mh_buffer) */
+	dma_sync_single_for_cpu(dev, pa, size, direction);
 
 	if (is_mh)
 		mm_check_mh_buffer(dev, buffer, pa, size, direction);
@@ -577,8 +599,9 @@ int sc2355_mm_buffer_alloc(struct mem_mgmt *mm_entry, int need_num)
 	for (num = 0; num < need_num; num++) {
 		ret = mm_single_buffer_alloc(mm_entry);
 		if (ret) {
-			pr_err("%s: alloc num: %d, need num: %d, ret: %d\n",
-			       __func__, num, need_num, ret);
+			/* MU300: rate-limited, the refill retries this (see mm_do_addr_buf) */
+			pr_err_ratelimited("%s: alloc num: %d, need num: %d, ret: %d\n",
+					   __func__, num, need_num, ret);
 			break;
 		}
 	}

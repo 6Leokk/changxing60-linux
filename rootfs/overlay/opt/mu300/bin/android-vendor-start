@@ -3,6 +3,9 @@
 # PM co-processor watchdog cuts power ~290 s after boot. See linux-boot/STATUS.md (v9).
 set -e
 A=/opt/mu300/android
+# mountpoint comes from /opt/mu300/busybox-bin on OpenWrt; without it the guards below always fall
+# through to their `|| mount ...` side and /dev, /proc and /sys get re-mounted on every run.
+export PATH="$PATH:/opt/mu300/bin:/opt/mu300/busybox-bin"
 mkdir -p /dev/socket /dev/block/by-name
 [ -S /dev/socket/logdw ] || { /opt/mu300/bin/logdw /dev/socket/logdw >> /var/log/android-logcat.txt 2>&1 & sleep 1; }
 # bind the read-only Android property area instead of copying it: it is ~85 MiB (RAM on tmpfs) and OpenWrt's /dev

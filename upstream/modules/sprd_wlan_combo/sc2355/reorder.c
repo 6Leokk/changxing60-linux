@@ -358,12 +358,13 @@ static int reorder_msdu(struct rx_ba_entry *ba_entry,
 		if (!ret && seqno_geq(seq_num, ba_node_desc->win_tail))
 			ba_node_desc->win_tail = seq_num;
 	} else {
-		pr_err("%s: seq_num: %d is less than win_start: %d\n",
-		       __func__, seq_num, ba_node_desc->win_start);
+		/* MU300 (#140): a retransmission the window already moved past; the drop below is the normal outcome */
+		pr_debug_ratelimited("%s: seq_num: %d is less than win_start: %d\n",
+				     __func__, seq_num, ba_node_desc->win_start);
 	}
 
 	if (ret && skb) {
-		pr_err("%s: kfree skb %d", __func__, ret);
+		pr_debug_ratelimited("%s: kfree skb %d", __func__, ret);
 		dev_kfree_skb(skb);
 	}
 
@@ -551,12 +552,13 @@ static void reorder_wlan_delba_event(struct rx_ba_entry *ba_entry,
 	struct rx_ba_node *ba_node = NULL;
 	struct rx_ba_node_desc *ba_node_desc = NULL;
 
-	pr_info("enter %s\n", __func__);
+	pr_debug("enter %s\n", __func__);
 	ba_node = reorder_find_ba_node(ba_entry,
 				       ba_event->sta_lut_index, ba_event->tid);
 	if (!ba_node) {
-		pr_err("%s: NOT FOUND sta_lut_index: %d, tid: %d\n",
-		       __func__, ba_event->sta_lut_index, ba_event->tid);
+		/* MU300 (#140): the firmware sends DELBA for sessions the host never opened or already tore down */
+		pr_debug("%s: NOT FOUND sta_lut_index: %d, tid: %d\n",
+			 __func__, ba_event->sta_lut_index, ba_event->tid);
 		return;
 	}
 
@@ -584,7 +586,7 @@ static void reorder_wlan_bar_event(struct rx_ba_entry *ba_entry,
 	struct rx_ba_node *ba_node = NULL;
 	struct rx_ba_node_desc *ba_node_desc = NULL;
 
-	pr_info("enter %s\n", __func__);
+	pr_debug("enter %s\n", __func__);
 	ba_node = reorder_find_ba_node(ba_entry,
 				       ba_event->sta_lut_index, ba_event->tid);
 	if (!ba_node) {
@@ -683,7 +685,7 @@ static int reorder_wlan_addba_event(struct rx_ba_entry *ba_entry,
 	unsigned short win_size = ba_event->win_param.win_size;
 	unsigned int index_size = reorder_get_index_size(2 * win_size);
 
-	pr_info("enter %s\n", __func__);
+	pr_debug("enter %s\n", __func__);
 	ba_node = reorder_find_ba_node(ba_entry, sta_lut_index, tid);
 	if (!ba_node) {
 		ba_node = reorder_create_ba_node(ba_entry, sta_lut_index,
@@ -728,7 +730,7 @@ reorder_get_first_seqno_in_buff(struct rx_ba_node_desc *ba_node_desc)
 		seqno = SEQNO_ADD(seqno, 1);
 	}
 
-	pr_info("%s: first seqno: %d\n", __func__, seqno);
+	pr_debug("%s: first seqno: %d\n", __func__, seqno);
 	return seqno;
 }
 
@@ -742,7 +744,7 @@ static void reorder_ba_timeout(struct timer_list *t)
 					       ba_entry);
 	unsigned short pos_seqno = 0;
 
-	pr_info("enter %s\n", __func__);
+	pr_debug("enter %s\n", __func__);
 	sprd_debug_cnt_inc(REORDER_TIMEOUT_CNT);
 	spin_lock_bh(&ba_node->ba_node_lock);
 	if (ba_node->active && ba_node_desc->buff_cnt &&
@@ -775,13 +777,13 @@ static void reorder_ba_timeout(struct timer_list *t)
 		spin_unlock_bh(&ba_entry->skb_list_lock);
 
 		if (!work_pending(&rx_mgmt->rx_work)) {
-			pr_info("%s: queue rx workqueue\n", __func__);
+			pr_debug("%s: queue rx workqueue\n", __func__);
 			queue_work(rx_mgmt->rx_queue, &rx_mgmt->rx_work);
 		}
 	} else {
 		spin_unlock_bh(&ba_entry->skb_list_lock);
 	}
-	pr_info("leave %s\n", __func__);
+	pr_debug("leave %s\n", __func__);
 }
 
 struct sk_buff *sc2355_reorder_get_skb_list(struct rx_ba_entry *ba_entry)
@@ -960,7 +962,7 @@ void sc2355_peer_entry_delba(struct sprd_hif *hif, unsigned char lut_index)
 	struct rx_mgmt *rx_mgmt = (struct rx_mgmt *)hif->rx_mgmt;
 	struct rx_ba_entry *ba_entry = &rx_mgmt->ba_entry;
 
-	pr_info("enter %s\n", __func__);
+	pr_debug("enter %s\n", __func__);
 	for (tid = 0; tid < NUM_TIDS; tid++) {
 		ba_node = reorder_find_ba_node(ba_entry, lut_index, tid);
 		if (ba_node) {

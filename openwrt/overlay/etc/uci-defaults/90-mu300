@@ -25,6 +25,15 @@ uci commit network
 # device stops handing the PC on the other end of the cable a default route and a DNS server.
 # net-split holds the whole change (and the reason for it) and is idempotent, so an install made
 # before the split can be brought up to date by running it there too.
-/opt/mu300/bin/net-split
+#
+# Through `sh`, and not silently. This line is the only thing that puts the hotspot's network into
+# a firewall zone, and a net-split that does not run is invisible from every angle that gets looked
+# at: the AP still beacons, clients still associate and still complete the 4-way handshake (EAPOL
+# rides a packet socket and never meets netfilter), the DHCP scope is still configured -- and not
+# one client can get an address, because the packets land on fw4's `jump handle_reject` instead of
+# `jump input_lan`. That is exactly what the 2026-10-16 flash shipped: net-split was committed
+# 644, the bare path answered "Permission denied", and this script's `exit 0` swallowed it.
+sh /opt/mu300/bin/net-split || \
+	logger -t mu300-uci-defaults "net-split failed (rc=$?) -- the hotspot will have no firewall zone and no client will get an address"
 grep -q '^ttyGS0:' /etc/inittab || echo 'ttyGS0::askfirst:/usr/libexec/login.sh' >> /etc/inittab
 exit 0

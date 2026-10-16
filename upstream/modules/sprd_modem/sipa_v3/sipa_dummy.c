@@ -306,14 +306,23 @@ static int sipa_dummy_rx_clean(struct sipa_dummy *dummy, int budget,
 			if (ret1 == -ENODATA)
 				sipa_dummy_set_bootts(dummy,
 						      SIPA_DUMMY_TS_RD_EMPTY);
+			/* MU300 debug: -ENODATA means the fifo was empty; anything else is a real error */
+			if (ret1 != -ENODATA)
+				pr_warn_ratelimited("mu300-ipa: nic_rx failed %d (fifo %d)\n",
+						    ret1, fifoid);
 			break;
 		}
 
 		skb_cnt++;
+		/* which interface is this packet addressed to? (dynamic_debug, see 13f) */
+		pr_debug("mu300-ipa: packet netid=%d src_id=%u len=%u\n",
+			 netid, src_id, skb->len);
 		ret2 = sipa_dummy_get_real_ndev(dummy, skb,
 						netid, src_id);
 		if (unlikely(ret2)) {
 			stats->rx_dropped++;
+			pr_warn_ratelimited("mu300-ipa: no netdev for netid=%d src_id=%u, dropped\n",
+					    netid, src_id);
 			dev_kfree_skb_any(skb);
 			continue;
 		}
@@ -592,7 +601,7 @@ static int sipa_dummy_set_mac_address(struct net_device *ndev, void *priv)
 		return -EADDRNOTAVAIL;
 
 	ether_addr_copy(dummy->mac_addr, addr->sa_data);
-	ether_addr_copy(ndev->dev_addr, addr->sa_data);
+	eth_hw_addr_set(ndev, addr->sa_data);	/* dev_addr only through dev_addr_set() */
 
 	return 0;
 }
@@ -786,7 +795,7 @@ static void sipa_dummy_ndev_init(struct net_device *ndev)
 			    NETIF_F_IPV6_CSUM |
 			    NETIF_F_HW_CSUM);
 	eth_random_addr(dummy->mac_addr);
-	ether_addr_copy(ndev->dev_addr, dummy->mac_addr);
+	eth_hw_addr_set(ndev, dummy->mac_addr);	/* dev_addr only through dev_addr_set() */
 	pr_info("got MAC address: %pM\n", ndev->dev_addr);
 
 	for (i = 0; i < SIPA_DUMMY_MAX_CPUS; i++) {

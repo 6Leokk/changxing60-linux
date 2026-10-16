@@ -1,0 +1,18 @@
+--- a/drivers/mmc/host/sdhci-sprd.c
++++ b/drivers/mmc/host/sdhci-sprd.c
+@@ -755,8 +755,14 @@
+ 	struct clk *clk;
+ 	int ret = 0;
+ 	/* MU300: only the eMMC and the card slot */
++	/* 7552N: a third host, sprd,name "sdio_wifi" (sdio@22220000), carries the SC2355 WCN SDIO card.
++	 * Upstream's boards have no SDIO Wi-Fi (theirs is on PCIe), so this filter rejects the host with
++	 * -ENODEV -- which is exactly why the 7552N came up with no wlan0 and the WCN probe reported
++	 * "sdio dev get drv data failed". Accept it next to the eMMC and the card slot.
++	 */
+ 	if (!of_property_read_bool(pdev->dev.of_node, "non-removable") &&
+-	    of_property_match_string(pdev->dev.of_node, "sprd,name", "sdio_sd") < 0)
++	    of_property_match_string(pdev->dev.of_node, "sprd,name", "sdio_sd") < 0 &&
++	    of_property_match_string(pdev->dev.of_node, "sprd,name", "sdio_wifi") < 0)
+ 		return -ENODEV;
+ 	/* MU300: the card slot waits for the eMMC's host. If that never binds, the card slot stays deferred:
+ 	 * no SD root without a working eMMC host. */

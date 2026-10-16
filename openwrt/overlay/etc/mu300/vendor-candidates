@@ -1,0 +1,17 @@
+# Driver-adaptation candidates, walked by `vendor-modules bisect`, one batch per 20 s window.
+# Format: <batch-name> <module.ko> ...
+# One batch died with `CFI failure (target: 0x0)` in a timer callback ~3 s after its modules
+# registered (2026-10-16); apsys-dvfs is first because its own probe said
+# "No matching driver data found", which is exactly how a driver ends up with an unarmed
+# callback. Batches are single modules where a single module can be blamed.
+apsys-dvfs   apsys-dvfs.ko
+sprd-map     sprd_map.ko
+sprd-dma     virt-dma.ko sprd-dma.ko
+ledtrig      ledtrig-pattern.ko
+sprd-uid     misc_sprd_uid.ko
+bootreason   zte_bootreason.ko
+board-state  board_state.ko
+smartpa      smartpa_stat.ko
+zte-stats    zte_stats_info.ko
+ion          ion_ipc_trusty.ko ion_cma_heap.ko
+sensorhub    sensorhub.ko

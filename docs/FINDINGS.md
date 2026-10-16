@@ -673,3 +673,98 @@ the approach:
 * Verified: `bluetoothd` powers the adapter and LE/BR-EDR scanning lists nearby devices.
 * Rebuilding with a modified tree appends `-dirty` to the kernel release and breaks module loading; `.scmversion` with
   `-gb50db5b6224c` in the source tree keeps the release string stable.
+
+## Packaging
+
+### 35. A script with no mode bit fails silently, and one of them was the hotspot's firewall zone
+
+* Symptom (2026-10-16): the AP is up and looks right -- hostapd `ENABLED` on ch36/5180, the pinned BSSID
+  `5c:4d:bf:xx:xx:xx`, SSID `changxing60`, `iw phy phy0` offering ch36 at 23 dBm -- and a phone *does*
+  associate and complete the WPA2 4-way handshake. Five seconds later it disassociates. Nothing on the
+  hotspot can reach anything.
+* The handshake is what makes this look like a radio or driver fault. It is neither. EAPOL rides an `AF_PACKET`
+  socket straight to hostapd and never enters netfilter, so a box that rejects every packet from a client still
+  completes the handshake perfectly. Two more false signals pointed the same way: `iwinfo wlan0 info` reports
+  `Channel: 0 / Tx-Power: 0 dBm` while `iw phy` and hostapd both say ch36 (this vendor driver does not answer
+  iwinfo's channel query on an AP interface), and `hostapd` in ubus said `ENABLED` throughout. The firmware was
+  demonstrably fine: `atcmd` probe rc 0, `reset_dump=reset`, one accepted `rsp[CMD_START_AP]` and 265
+  `rsp[CMD_TX_DATA]`.
+* What was actually wrong: fw4's input chain was `iifname "br-lan" jump input_lan` / `iifname "sipa_eth0" jump
+  input_wan` / `jump handle_reject` under `policy drop`, with `forward` the same. `br-wifi` was in **no** zone.
+  The one line that puts it there is in `net-split`, and `net-split` was committed `100644`.
+* Why it was invisible. `openwrt/overlay/etc/uci-defaults/90-mu300` invoked it as a bare
+  `/opt/mu300/bin/net-split`, which answered `Permission denied` and returned 126; the script ends in `exit 0`.
+  The device still had `br-wifi` / `192.168.8.1/24` (that lives in `etc/config/network`, which
+  `tools/mu300-carry-over.py` carries across a reflash) and the DHCP scope (its own `uci` section, `set:wifi`),
+  so the only missing piece was a zone no config file held.
+* The 2026-10-15 rebuild is what split them apart: it carried `etc/config/network`, `etc/config/wireless` and
+  `etc/mu300` -- including the `wifi-configured` marker that makes `openwrt-wifi-config` exit early -- but not
+  `etc/config/firewall`. Whatever carries `network` has to carry `firewall`; that is now in the ALWAYS list.
+* Four more scripts were 644 while every caller reached them by path, and every one of those failures was
+  silent: `hotspot-watch` (a procd instance in `mu300-post`, so the radio watchdog never ran), `charge-fix`
+  (crontab + `mu300-post`, so the charger was never re-pinned), `quiet-console` (`mu300-hw`, so the console was
+  never quieted for the SC2355), and the overlay's own `/etc/init.d/mu300-ndp` (so `ndp-learn` never routed the
+  carrier's /64 to the hotspot -- the metric 128 route appeared the moment it was made executable). A fifth,
+  `ndp-learn` itself, escaped only because `mu300-ndp` calls it through `sh`. The three in
+  `openwrt/overlay/opt/mu300/bin` -- `vendor-modules`, `bootdiag`, `touch-ctl` -- were 644 like the rest, and
+  that directory is not tracked at all, which is exactly why `tools/mu300-android-stage-adapt.sh` had to
+  `chmod` them by hand.
+* Fixes: all nine carry 755, and `openwrt/build-rootfs.sh` re-applies the bit at build time, so a wrong one
+  cannot ship again. Worth recording how long the second half took, because the gap was invisible: the bits
+  were right on disk well before they were right in git. Six of the nine
+  (`rootfs/overlay/opt/mu300/bin/{net-split,hotspot-watch,charge-fix,quiet-console,ndp-learn}` plus
+  `openwrt/overlay/etc/init.d/mu300-ndp`) were tracked but still recorded `100644` in HEAD -- a mode-only
+  worktree edit that nothing stages for you -- and the three under `openwrt/overlay/opt/mu300/bin/` were
+  untracked, along with the rest of that overlay subtree. `git ls-files -s` is the only check that sees the
+  difference; the device, `ls -l`, and a `git diff` of the scripts all looked correct the whole time. Both
+  landed in the same commit, 2026-10-16.
+  The other fixes: `90-mu300` calls net-split through `sh` and logs a non-zero exit rather than swallowing it;
+  `mu300-carry-over.py` carries `etc/config/firewall`. A mode bit is not a thing anyone reviews, so the build
+  should not depend on one.
+* The lesson generalises past modes. The check that decides "is the hotspot working" has to be one a client
+  would pass. Every signal that said healthy here -- beaconing AP, `ENABLED` hostapd, associated station,
+  completed handshake, configured DHCP scope -- was true, and not one of them meant a client could get an
+  address.
+
+
+## Verification
+
+### 36. A bisect that certified thirteen modules it had never loaded
+
+* Context. Thirteen vendor modules Android loads at boot (sensor hub, ION heaps, the DMA engine,
+  AP/DPU/GSP DVFS glue, `uid`/stats/bootreason, the status-LED pattern trigger) are staged into the
+  OpenWrt rootfs and loaded by `/opt/mu300/bin/vendor-modules`. On 2026-10-16 the first attempt to load
+  the whole group took the kernel down with `CFI failure (target: 0x0)` about three seconds later -- a
+  driver arming a timer with a NULL callback -- with no way to tell which one from a single boot. So the
+  box bisects itself: `vendor-modules bisect` walks `/etc/mu300/vendor-candidates` one batch per 20 s
+  window, writes `TRYING <batch>` to `/root/vendor-bisect.log` *before* loading it (a batch that kills
+  the kernel leaves a TRYING with no verdict behind, which names it on the next boot), and appends what
+  survived to `/etc/mu300/vendor-good` -- which the default path then loads.
+* The bug. The verdict was "the kernel survived the window", and `load()` shells out to
+  `timeout 15 insmod`. `timeout(1)` is not in OpenWrt's busybox: it comes from the static busybox in
+  `/opt/mu300/busybox-bin`, and `mu300-hw` (S12) puts that directory on PATH **for itself**. `bootdiag`
+  reaches `vendor-modules bisect` from **cron**, whose PATH is `/usr/sbin:/usr/bin:/sbin:/bin`. Every
+  load therefore failed with `timeout: not found`, the kernel survived every window -- of course it did,
+  nothing was loaded -- and the bisect wrote thirteen `OK`s and thirteen module names into
+  `vendor-good`. A set that had never been loaded was recorded as proven safe, and the default path
+  loaded it as such from the next boot on.
+* Why it went unnoticed: the log said so on consecutive lines --
+  `FAILED apsys-dvfs.ko: .../vendor-modules: line 51: timeout: not found` immediately followed by
+  `OK apsys-dvfs` -- but the script's own summary said OK, and that is the line anyone reads.
+* Fixes, both aimed at the same mistake. (1) *One script, one PATH*: `vendor-modules` prepends
+  `/opt/mu300/busybox-bin:/opt/mu300/bin` itself, so what it can call no longer depends on who called
+  it. (2) *The verdict reads state, not survival*: after each window it checks every module in
+  `/proc/modules`, and if any is missing writes `SKIPPED <batch> : not loaded:<mods> -- nothing proven`
+  and does **not** add it to `vendor-good`. `SKIPPED` counts as a verdict, so the previous-boot detector
+  does not mistake it for a kernel death and blacklist the batch.
+* After one reboot: all 11 batches `already loaded ... OK`, zero `FAILED` in
+  `/tmp/mu300-vendor-modules.log`, zero `CFI failure` in dmesg, `vendor-bad` still absent, all 13 modules
+  up in `/proc/modules`. The first suspect, `apsys-dvfs`, was clean. The 13 lines in `vendor-good` were
+  originally written by the broken verdict, but every boot since has re-confirmed each one against
+  `/proc/modules`, so the set is real now.
+* The lesson is §35's from the other side. A verdict that reads a log line, an exit code, or "it is
+  still running" can certify *nothing happened* as *everything is fine*. Read state -- `/proc/modules`,
+  sysfs links, device registers -- and never let a script's reach depend on the caller's environment.
+  The sibling trap is in the outer tree's `docs/mu300/drivers.md` §2.1: the USB verdict there used to be
+  two dmesg debug prints, and on the boot that actually fixed USB neither of them appeared, so the check
+  called a working box broken.

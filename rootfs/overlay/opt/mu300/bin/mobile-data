@@ -1,6 +1,6 @@
 #!/bin/bash
 # Mobile data on the MU300 modem without Android RIL: AT commands on /dev/stty_nr1, data over sipa_eth<cid-1>.
-# usage: mobile-data up [APN] | down | status | sim-reset | watch
+# usage: mobile-data up [APN] | down | status | sim-reset | cp-reset | watch
 # MU300_NETIFD=1 mobile-data up [APN]: only attach and print IFACE/IP/PREFIX/DNS1/DNS2 (OpenWrt netifd protocol)
 # OpenWrt: od/timeout come from the static busybox in /opt/mu300/busybox-bin
 export PATH="$PATH:/opt/mu300/busybox-bin"
@@ -192,6 +192,7 @@ probe_ok() {
 # signal that lied above. "<ok|dead> <uptime-seconds>".
 set_health() {
     local up
+    [ "$1" = ok ] && rm -f "$CP_MARK"   # a healthy call ends the outage: a later one may CP-restart again
     read -r up _ < /proc/uptime 2>/dev/null || up=0
     printf '%s %s\n' "$1" "${up%.*}" > /tmp/.mu300-wan-health &&
         mv /tmp/.mu300-wan-health /tmp/mu300-wan-health
@@ -214,6 +215,54 @@ set_health() {
 # once. The marker lives in /var/run, which is tmpfs (/var -> tmp on this rootfs), so it is per boot
 # by construction: one reboot may be worth it, a reboot loop is not.
 REBOOT_MARK=/var/run/mu300-wan-rebooted
+
+# ---------------------------------------------------------------------------
+# Subsystem-level recovery: restart the CP (modem firmware), not the phone.
+#
+# The wedge is CP-side (docs/mu300/sipa-wedge.md): the AP's 2 s delegator timeout unlocks the
+# AP's resource manager, but the CP never answers again, so re-attaching cannot bring the
+# bearer back and neither can sim_reset -- its AT commands go to the very port that is dead.
+# The only thing that did was a reboot, at ~16 min per cycle, 20-25 times a day.
+#
+# The modem loader's own stop/start (/dev/modem ioctl; unlike MODEM_ASSERT_CMD it has no
+# comm gate) is the vendor-supported way back. Dry run on a healthy boot (sipa-wedge.md
+# §6.6): the AP holds the CP down, RM releases every session, and the whole stack rebuilds
+# by itself in ~5-10 s with no reboot. MU300_CP_RESET=0 disables the whole path, so the old
+# reboot-only behaviour is one variable away without editing this file.
+#
+# modem_control (the vendor daemon in the chroot) must be alive, or the PM co-processor cuts
+# power mid-experiment -- the same preflight the standalone tools/mu300-cp-reset.sh runs.
+CP_TOOL=/opt/mu300/bin/modem-ioctl
+CP_DEV=${MU300_MODEM_DEV:-/dev/modem}   # MU300_MODEM_DEV is a test seam (see tools/mobile-data/test-escalate.sh)
+CP_MARK=/var/run/mu300-wan-cp-reset      # set while a CP restart has been spent on this outage
+
+cp_reset() {
+    [ "${MU300_CP_RESET:-1}" = 1 ] || return 1
+    [ -x "$CP_TOOL" ] || { echo "cp-reset: $CP_TOOL missing" >&2; return 1; }
+    [ -c "$CP_DEV" ] || { echo "cp-reset: $CP_DEV missing" >&2; return 1; }
+    # [v] keeps the grep from matching this shell's own command line.
+    if ! ps w 2>/dev/null | grep -q "[v]endor/bin/modem_control"; then
+        echo "cp-reset: modem_control is not running, refusing (the PM may cut power)" >&2
+        return 1
+    fi
+    echo "cp-reset: stopping the CP" >&2
+    "$CP_TOOL" stop >&2 || true
+    sleep 3
+    echo "cp-reset: starting the CP" >&2
+    "$CP_TOOL" start >&2 || true
+    # The stack rebuilds on its own; give it ~90 s and watch for the call to come back.
+    local i=0
+    while [ $i -lt 90 ]; do
+        sleep 3
+        i=$((i + 3))
+        if link_up && probe_ok; then
+            echo "cp-reset: data call back by itself after ${i}s" >&2
+            return 0
+        fi
+    done
+    echo "cp-reset: CP restarted but the call did not return within ${i}s" >&2
+    return 1
+}
 
 # 0 = the modem answered, 1 = silence, 2 = not asked (and then do not reboot).
 at_state() {
@@ -246,7 +295,7 @@ bad_clock() {
 }
 
 maybe_reboot() {  # $1 = bad_clock value, $2 = uptime of the repair that is (or was) in flight
-    local now age st=0
+    local now age st=0 cp_tried=0
     [ "${1:-0}" -ne 0 ] || return 0     # the call looks usable: nothing to escalate
     [ "${2:-0}" -ne 0 ] || return 0     # no repair has run yet: repair before rebooting
     read -r now _ < /proc/uptime 2>/dev/null || return 0
@@ -257,7 +306,30 @@ maybe_reboot() {  # $1 = bad_clock value, $2 = uptime of the repair that is (or 
     # arrives here as $2 = the time that attach began, so this does not mute the wedged-pending case.)
     [ $((now - $2)) -ge 60 ] || return 0
     [ -e "$REBOOT_MARK" ] && return 0   # once per boot
+
+    # Before giving up on this boot, spend the one repair that is stronger than re-attaching:
+    # restart the CP. It re-creates the modem stack the wedge lives in, and the dry run showed
+    # the call returning by itself in ~5-10 s. Reached only when the call has been unusable for
+    # MU300_WAN_REBOOT_AFTER seconds with repairs not helping, so it can never fire against a
+    # working call. Attempted once per outage -- the marker is cleared as soon as a call is
+    # healthy again (set_health ok), so a later outage may restart the CP again.
+    if [ "${MU300_CP_RESET:-1}" = 1 ] && [ ! -e "$CP_MARK" ]; then
+        cp_tried=1
+        touch "$CP_MARK"
+        echo "call unusable for ${age}s, repairs not helping: restarting the CP" >&2
+        cp_reset && return 0            # it worked; watch() sees the call back on the next tick
+    elif [ -e "$CP_MARK" ]; then
+        cp_tried=1
+    fi
+
     at_state || st=$?
+    # 0 = answered, 1 = silence, 2 = not asked. Silence is the reboot's go-ahead. "Not asked" is
+    # normally a veto -- never reboot on a guess -- but once a CP restart has been spent and
+    # failed there is nothing left to wait for: the call has been bad for MU300_WAN_REBOOT_AFTER
+    # and the one subsystem-level repair is gone, so escalate instead of watching forever.
+    if [ "$cp_tried" -eq 1 ] && [ "$st" -eq 2 ]; then
+        st=1
+    fi
     [ "$st" -eq 1 ] || return 0         # it answered (0), or it must not be asked (2)
     echo "call unusable for ${age}s, repairs not helping and no answer to AT: rebooting" >&2
     touch "$REBOOT_MARK"
@@ -389,6 +461,7 @@ case "${1:-status}" in
     down) down ;;
     status) status ;;
     sim-reset) sim_reset ;;
+    cp-reset) cp_reset ;;          # subsystem-level recovery: restart the CP (see cp_reset above)
     watch) watch ;;
-    *) echo "usage: $0 up [APN] | down | status | sim-reset | watch" >&2; exit 2 ;;
+    *) echo "usage: $0 up [APN] | down | status | sim-reset | cp-reset | watch" >&2; exit 2 ;;
 esac

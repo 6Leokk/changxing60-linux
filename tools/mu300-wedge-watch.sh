@@ -8,11 +8,17 @@
 #   ssh root@192.168.77.1 'cat > /root/wedge-watch.sh && chmod 755 /root/wedge-watch.sh' < tools/mu300-wedge-watch.sh
 #   ssh root@192.168.77.1 'setsid /root/wedge-watch.sh >>/root/wedge-watch.log 2>&1 </dev/null &'
 # Read the result:  ssh root@192.168.77.1 'tail -40 /root/wedge-watch.log'
+#
+# One sample per line, on stdout -- redirect it yourself, as above. There is deliberately no
+# log-path argument: an earlier version assigned a LOG variable it never used, and the natural
+# reading of that was to pass a path, which silently threw the whole run away. Args are
+# [iface] [probe host].
+#
 # Judgement rule (docs/mu300/sipa-wedge.md §6.3/§7): a healthy-looking WAN before uptime ~1200 s means
-# nothing -- wedges have landed at 566/592/628 s. Only "no wedge past ~1200 s" counts.
-LOG=${1:-/root/wedge-watch.log}
-IFACE=${2:-sipa_eth0}
-PROBE=${3:-223.5.5.5}
+# nothing -- wedges have landed at 566/592/628 s. Only "no wedge past ~1200 s" counts (and §6.5
+# later showed even that is not enough -- the observed window is 543~2955 s, so it takes hours).
+IFACE=${1:-sipa_eth0}
+PROBE=${2:-223.5.5.5}
 n=0
 while :; do
     up=$(cut -d. -f1 /proc/uptime 2>/dev/null)

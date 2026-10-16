@@ -1,0 +1,79 @@
+#!/bin/sh
+# Host-side stand-in for /opt/mu300/bin/mu300-at, so the SMS pool CLI can be driven without a modem.
+#
+# It answers from a text file instead of a tty: one line per SIM slot, "index<TAB>stat<TAB>PDU". Writes go back
+# to that file (AT+CMGD removes a line, AT+CMGR marks one read), so a test can watch the SIM change as the pool
+# takes messages off it. Sent messages are appended to $FAKE_AT_SENT. Not part of the device build.
+#
+#   FAKE_AT_SIM   the SIM, as above (required)
+#   FAKE_AT_SENT  where AT+CMGS PDUs are appended (optional)
+#
+# The real one takes "-t SECONDS" first; anything else about the shape of the call is deliberate -- the pool CLI
+# hands an AT+CMGS with its CR and Ctrl-Z as one argument, and that is what this expects too.
+set -u
+SIM=${FAKE_AT_SIM:?FAKE_AT_SIM is not set}
+SENT=${FAKE_AT_SENT:-/dev/null}
+CR=$(printf '\r')
+SUB=$(printf '\032')
+
+[ "${1:-}" = -t ] && shift 2
+cmd=${1:-}
+
+# sim_used: how many slots hold a message
+sim_used() { grep -c . "$SIM" 2>/dev/null || echo 0; }
+
+case $cmd in
+    'AT+CPMS='*)
+        n=$(sim_used)
+        printf '+CPMS: %s,20,%s,20,%s,20\nOK\n' "$n" "$n" "$n"
+        ;;
+    'AT+CMGF='*|'AT+CSMS='*|'AT+CNMI='*|'AT+CSCA='*)
+        echo OK
+        ;;
+    'AT+CSCA?')
+        printf '+CSCA: "+8613800100500",145\nOK\n'
+        ;;
+    'AT+CPIN?')
+        printf '+CPIN: READY\nOK\n'
+        ;;
+    'AT+CMGL='*)
+        # "+CMGL: <index>,<stat>,<oa>,<alpha>,<scts>" -- the parser reads fields 1 and 2 as index and stat
+        while IFS="$(printf '\t')" read -r idx stat pdu; do
+            [ -n "$idx" ] || continue
+            printf '+CMGL: %s,%s,,,\n%s\n' "$idx" "$stat" "$pdu"
+        done < "$SIM"
+        echo OK
+        ;;
+    'AT+CMGR='*)
+        want=${cmd#AT+CMGR=}
+        line=$(awk -F'\t' -v w="$want" '$1 == w { print; exit }' "$SIM")
+        if [ -z "$line" ]; then
+            echo ERROR
+        else
+            idx=$(printf '%s' "$line" | cut -f1)
+            pdu=$(printf '%s' "$line" | cut -f3)
+            printf '+CMGR: 1,,,\n%s\nOK\n' "$pdu"
+            # a message read off the SIM is no longer unread; the real modem does the same
+            awk -F'\t' -v OFS='\t' -v w="$idx" '$1 == w { $2 = 1 } { print }' "$SIM" > "$SIM.new" && mv "$SIM.new" "$SIM"
+        fi
+        ;;
+    'AT+CMGD='*)
+        want=${cmd#AT+CMGD=}
+        awk -F'\t' -v w="$want" '$1 != w' "$SIM" > "$SIM.new" && mv "$SIM.new" "$SIM"
+        echo OK
+        ;;
+    AT+CMGS=*)
+        # "AT+CMGS=<length><CR><PDU><Ctrl-Z>", all in the one argument
+        body=${cmd#*"$CR"}
+        body=${body%"$SUB"}
+        [ "$body" = "$cmd" ] && { echo ERROR; exit 0; }
+        # a modem that takes its time answering +CMGS. A real one does, and the caller is not allowed to wait for
+        # it (rpcd ends a call at 30 s), so the tests that matter need a send that is slow on purpose.
+        [ "${FAKE_AT_SEND_DELAY:-0}" != 0 ] && sleep "$FAKE_AT_SEND_DELAY"
+        printf '%s\n' "$body" >> "$SENT"
+        printf '+CMGS: 1\nOK\n'
+        ;;
+    *)
+        echo OK
+        ;;
+esac

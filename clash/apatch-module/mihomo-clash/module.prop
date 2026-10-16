@@ -1,0 +1,6 @@
+id=mihomo_clash
+name=7552N Clash Gateway (mihomo)
+version=v1.0.0
+versionCode=1
+author=7552n port
+description=Transparent proxy gateway natively on Android: mihomo (Clash.Meta) TUN mode, no iptables, no chroot. Hotspot clients are proxied automatically. Dashboard http://hotspot-ip:9090/ui. Config /data/clash/config.yaml.

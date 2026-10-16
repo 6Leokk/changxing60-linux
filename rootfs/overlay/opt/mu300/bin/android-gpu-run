@@ -3,6 +3,8 @@
 # usage: android-gpu-run /system/bin/cltest [args]   (path inside /opt/mu300/android)
 set -e
 A=/opt/mu300/android
+# mountpoint lives in /opt/mu300/busybox-bin on OpenWrt; see android-run.
+export PATH="$PATH:/opt/mu300/bin:/opt/mu300/busybox-bin"
 [ -e /dev/mali0 ] || { modprobe sprd_gpu_cooling; modprobe mali_kbase; }
 for n in $(seq 1 60); do mountpoint -q $A/dev && break; sleep 1; done
 # OpenWrt's procd preloads /lib/libsetlbf.so into services; the bionic linker in the chroot cannot load it

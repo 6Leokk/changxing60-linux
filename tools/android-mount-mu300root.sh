@@ -15,11 +15,19 @@ SIZE=${MU300_SIZE:-50096766976}
 # The window is exactly "while this filesystem is mounted read-write": -u closes it again.
 SELINUX_PREV=/data/local/tmp/.mu300-selinux.prev
 if [ "$1" = -u ]; then
-    L=$(grep " $2 " /proc/mounts | cut -d' ' -f1)
-    umount "$2"; [ -n "$L" ] && losetup -d "$L"
+    # Teardown must not be able to fail its caller.  Android attaches these loops with autoclear, so by
+    # the time we get here the kernel has usually detached the loop already and `losetup -d` answers
+    # ENXIO ("No such device or address").  Under `set -e` that used to end this script non-zero, and
+    # through it the installer's cleanup -- which is how the 2026-10-16 08:06 run, which had failed for
+    # an unrelated reason, left the box running Android with SELinux still Permissive.  Every step here
+    # is therefore tolerated, and the restore always reports.
+    L=$(grep " $2 " /proc/mounts 2>/dev/null | cut -d' ' -f1 || true)
+    umount "$2" 2>/dev/null || true
+    if [ -n "$L" ]; then losetup -d "$L" 2>/dev/null || true; fi
     if [ -f "$SELINUX_PREV" ]; then
-        setenforce "$(cat "$SELINUX_PREV")" && rm -f "$SELINUX_PREV"
-        echo "selinux back to $(getenforce)"
+        setenforce "$(cat "$SELINUX_PREV")" 2>/dev/null || true
+        rm -f "$SELINUX_PREV"
+        echo "selinux back to $(getenforce 2>/dev/null)"
     fi
     echo UNMOUNTED; exit 0
 fi
@@ -47,14 +55,31 @@ magic=$(dd if="$L" bs=1 skip=1080 count=2 2>/dev/null | od -An -tx1 | tr -d ' \n
 label=$(dd if="$L" bs=1 skip=1144 count=16 2>/dev/null | tr -d '\000')
 [ "$label" = mu300root ] || { echo "NOT-MU300ROOT label=$label"; losetup -d "$L"; exit 1; }
 mkdir -p "$MP"
-mount -t ext4 -o noatime "$L" "$MP"
+# The window has to open BEFORE mount(2), not after it.  The rootfs was last written by a Linux boot
+# that never unmounted, so mounting it read-write replays the journal -- and that replay is a write
+# issued by the loop kworker as u:r:kernel:s0, which the policy denies on ufs_device.  With SELinux
+# still enforcing, mount fails outright and nothing is attached:
+#     avc: denied { write } for comm="loop30" path="/dev/block/sda" ... tclass=blk_file permissive=0
+#     EXT4-fs (loop30): error loading journal
+#     mount: '/dev/block/loop30'->'/mnt/mu300': I/O error
+# which is exactly how the first real run (2026-10-16 08:01) died, having set permissive one line too
+# late.  -u closes the window again.
 if [ "$(getenforce 2>/dev/null)" != Permissive ]; then
     getenforce > "$SELINUX_PREV"
     if setenforce 0 2>/dev/null; then
-        echo "NOTE: SELinux was $(cat "$SELINUX_PREV"); it is Permissive while this mount lives (loop writes run as the kernel loop kworker, which the policy denies on this device node). -u restores it."
+        echo "NOTE: SELinux was $(cat "$SELINUX_PREV"); it is Permissive across the mount and everything written through it (loop writes run as the kernel loop kworker, which the policy denies on this device node). -u restores it."
     else
         rm -f "$SELINUX_PREV"
-        echo "WARNING: cannot set SELinux permissive; writes through $L will fail with EIO (reads are fine)"
+        echo "WARNING: cannot set SELinux permissive; the mount itself will fail with EIO while the journal is dirty (reads are fine)"
     fi
+fi
+if ! mount -t ext4 -o noatime "$L" "$MP"; then
+    echo "MOUNT-FAILED $L -> $MP"
+    losetup -d "$L" 2>/dev/null
+    if [ -f "$SELINUX_PREV" ]; then
+        setenforce "$(cat "$SELINUX_PREV")" 2>/dev/null && rm -f "$SELINUX_PREV"
+        echo "selinux back to $(getenforce 2>/dev/null)"
+    fi
+    exit 1
 fi
 echo "MOUNTED $L on $MP"

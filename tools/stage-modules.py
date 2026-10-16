@@ -29,15 +29,19 @@ ROOTFS_ROOTS = [
     "sprd_soc_thm", "thermal-generic-adc", "sprd_cpu_cooling", "leds-sc27xx-bltc",
     "zte_card_holder_det", "sc27xx-vibra", "sprd_cp_dvfs",
     "sprd_ddr_dvfs", "sprd_gpu_cooling",
+    # extra-modules, Mali. Out-of-tree: kernel/build-mali.sh builds it from the realme C51/C53
+    # kernel_modules tree (kernel5.4/gpu/natt/mali, DDK r40p0-01eac0) and drops the .ko into
+    # out-linux/, so it lands in this index like any other module. It is a hard root now -- it
+    # silently stayed out of the rootfs and extra-modules logged "FAILED mali_kbase" at boot.
+    "mali_kbase",
     # zram-start (zram -> zsmalloc)
     "zram",
 ]
 
-# Named by the rootfs scripts but absent from out-linux: Mali comes from kernel/build-mali.sh, and
-# sprdbt_tty and zte_sar from the realme vendor tree -- separate out-of-tree builds that have not
-# been run here. Report them, do not fail the build: a missing root in this list is a known feature
-# gap (GPU, Bluetooth, SAR), not a staging bug.
-OPTIONAL_ROOTS = ["mali_kbase", "zte_sar", "sprdbt_tty"]
+# Named by the rootfs scripts but absent from out-linux: sprdbt_tty and zte_sar come from the realme
+# vendor tree -- separate out-of-tree builds that have not been run here. Report them, do not fail
+# the build: a missing root in this list is a known feature gap (Bluetooth, SAR), not a staging bug.
+OPTIONAL_ROOTS = ["zte_sar", "sprdbt_tty"]
 
 
 def modinfo(path: Path) -> dict:

@@ -11,6 +11,8 @@
 
 #include <linux/ctype.h>
 #include <linux/moduleparam.h>
+#include <linux/reboot.h>
+#include <linux/workqueue.h>
 #include <misc/wcn_bus.h>
 #include <linux/miscdevice.h>
 
@@ -114,17 +116,30 @@ static struct miscdevice wlan_misc_device = {
 };
 
 #ifndef DRV_RESET_SELF
-static int iface_host_reset(struct notifier_block *nb,
-			    unsigned long data, void *ptr)
+/*
+ * MU300: the FW_ERROR uevent from a work item. wcn_reset_notifier_list is an atomic notifier chain (RCU read side),
+ * and kobject_uevent_env() allocates with GFP_KERNEL and may sleep; the vendor sent it from the notifier, and also
+ * leaked the path kobject_get_path() allocated for its log line. The uevent is what reopens Wi-Fi after the
+ * recovery watchdog's reset (see iface_wd_tick).
+ */
+static void iface_fw_error_uevent(struct work_struct *work)
 {
-	struct sprd_priv *priv = iface_get_priv();
-	struct sprd_hif *hif;
-
 	char *envp[3] = {
 		[0] = "SOURCE=unisocwl",
 		[1] = "EVENT=FW_ERROR",
 		[2] = NULL,
 	};
+
+	kobject_uevent_env(&wlan_misc_device.this_device->kobj, KOBJ_CHANGE, envp);
+	pr_err("%s: FW_ERROR uevent sent on %s\n", __func__, dev_name(wlan_misc_device.this_device));
+}
+static DECLARE_WORK(iface_fw_error_work, iface_fw_error_uevent);
+
+static int iface_host_reset(struct notifier_block *nb,
+			    unsigned long data, void *ptr)
+{
+	struct sprd_priv *priv = iface_get_priv();
+	struct sprd_hif *hif;
 
 	if (!priv) {
 		pr_err("%s sprd_prv is NULL\n", __func__);
@@ -134,9 +149,7 @@ static int iface_host_reset(struct notifier_block *nb,
 	hif = &priv->hif;
 	hif->cp_asserted = 1;
 
-	kobject_uevent_env(&wlan_misc_device.this_device->kobj, KOBJ_CHANGE, envp);
-	pr_err("%s() dev_path: %s\n", __func__,
-	       kobject_get_path(&wlan_misc_device.this_device->kobj, GFP_KERNEL));
+	schedule_work(&iface_fw_error_work);
 	sprd_chip_force_exit((void *)&priv->chip);
 
 	return NOTIFY_OK;
@@ -170,6 +183,119 @@ static int iface_host_reset(struct notifier_block *nb,
 static struct notifier_block iface_host_reset_cb = {
 	.notifier_call = iface_host_reset,
 };
+
+/*
+ * MU300: recovery watchdog (issue #94). After a firmware assert our builds leave the WCN in card-dump state for
+ * good (wcn_bsp's reset_dump defaults to "dump"): every mbuf_link_alloc() fails, Wi-Fi is dead, and until the RX
+ * refill was given a back-off the printk flood soft-locked a CPU and softlockup_panic rebooted the device - which
+ * is what brought Wi-Fi back. Without that, something else has to:
+ *
+ * - every second, Wi-Fi counts as stuck while the card-dump flag is set, or while the firmware is marked asserted
+ *   (cp_asserted) with an interface open, i.e. the chip was reset but Wi-Fi has not been reopened yet (after our
+ *   reset: until a power-on has succeeded, interface open or not);
+ * - card dump for 10 s: reset the chip once per boot (wcn_mu300_recover(), what procfs "rebootwcn" does), in a work
+ *   item of its own so that a reset that hangs cannot stall this one. The reset's FW_ERROR uevent (iface_host_reset)
+ *   is userspace's cue to reopen Wi-Fi (OpenWrt: /etc/hotplug.d/misc/10-mu300-wcn), which powers the chip on again;
+ * - still stuck 70 s after it began (the reset hung, or Wi-Fi was not reopened), or card dump again after the one
+ *   reset of this boot: orderly_reboot(), unless recovery_reboot=0. Never worse than the panic it replaces.
+ * It runs outside every Wi-Fi lock and only reads two flags.
+ */
+static bool recovery_reboot = true;
+module_param(recovery_reboot, bool, 0644);
+MODULE_PARM_DESC(recovery_reboot, "MU300: reboot when Wi-Fi stays stuck after the WCN reset (default on)");
+
+#define IFACE_WD_PERIOD		HZ
+#define IFACE_WD_RESET_AFTER	(10 * HZ)
+#define IFACE_WD_REBOOT_AFTER	(70 * HZ)
+
+static struct {
+	struct delayed_work tick;
+	struct work_struct reset;
+	struct sprd_hif *hif;
+	unsigned long stuck_since;
+	bool stuck;
+	bool reset_used;	/* the one chip reset of this boot */
+	bool reset_this_time;	/* ... and it was for the current stuck spell */
+	bool gave_up;
+} iface_wd;
+
+static void iface_wd_reset(struct work_struct *work)
+{
+	if (wcn_mu300_recover())
+		pr_err("MU300 recovery: WCN reset done, Wi-Fi comes back when it is reopened\n");
+	else
+		pr_err("MU300 recovery: no WCN reset (see wcn_mu300_recover's line above)\n");
+}
+
+static void iface_wd_give_up(const char *why)
+{
+	iface_wd.gave_up = true;
+	if (recovery_reboot) {
+		pr_emerg("MU300 recovery: Wi-Fi stuck (%s)%s, rebooting\n", why,
+			 work_busy(&iface_wd.reset) ? ", the WCN reset has not returned" : "");
+		orderly_reboot();
+	} else {
+		pr_emerg("MU300 recovery: Wi-Fi stuck (%s); recovery_reboot=0, so it stays down\n", why);
+	}
+}
+
+static void iface_wd_tick(struct work_struct *work)
+{
+	struct sprd_hif *hif = iface_wd.hif;
+	bool dump = sprdwcn_bus_get_carddump_status() != 0;
+	/* after our reset only a successful power-on clears cp_asserted (sc2355_reset): a reopen that fails is stuck too */
+	bool asserted = READ_ONCE(hif->cp_asserted) &&
+			(atomic_read(&hif->power_cnt) > 0 || iface_wd.reset_this_time);
+	const char *why = dump ? "WCN in card dump" : "firmware asserted, Wi-Fi not reopened";
+	unsigned long now = jiffies;
+
+	if (!dump && !asserted) {
+		if (iface_wd.stuck)
+			pr_err("MU300 recovery: Wi-Fi is back after %u s\n",
+			       jiffies_to_msecs(now - iface_wd.stuck_since) / 1000);
+		iface_wd.stuck = false;
+		iface_wd.reset_this_time = false;
+		goto again;
+	}
+	if (!iface_wd.stuck) {
+		iface_wd.stuck = true;
+		iface_wd.stuck_since = now;
+		pr_err("MU300 recovery: %s, watching\n", why);
+	}
+	if (iface_wd.gave_up)
+		goto again;
+
+	if (dump && time_after_eq(now, iface_wd.stuck_since + IFACE_WD_RESET_AFTER)) {
+		if (!iface_wd.reset_used) {
+			iface_wd.reset_used = true;
+			iface_wd.reset_this_time = true;
+			pr_err("MU300 recovery: %s for %u s, resetting the WCN (once per boot)\n", why,
+			       jiffies_to_msecs(now - iface_wd.stuck_since) / 1000);
+			queue_work(system_unbound_wq, &iface_wd.reset);
+		} else if (!iface_wd.reset_this_time) {
+			iface_wd_give_up("card dump again, this boot's one WCN reset is used");
+			goto again;
+		}
+	}
+	if (time_after_eq(now, iface_wd.stuck_since + IFACE_WD_REBOOT_AFTER))
+		iface_wd_give_up(why);
+again:
+	queue_delayed_work(system_wq, &iface_wd.tick, IFACE_WD_PERIOD);
+}
+
+static void iface_wd_start(struct sprd_priv *priv)
+{
+	iface_wd.hif = &priv->hif;
+	INIT_DELAYED_WORK(&iface_wd.tick, iface_wd_tick);
+	INIT_WORK(&iface_wd.reset, iface_wd_reset);
+	queue_delayed_work(system_wq, &iface_wd.tick, IFACE_WD_PERIOD);
+}
+
+static void iface_wd_stop(void)
+{
+	cancel_delayed_work_sync(&iface_wd.tick);
+	cancel_work_sync(&iface_wd.reset);
+}
 
 static void iface_stop_net(struct sprd_vif *vif)
 {
@@ -266,6 +392,15 @@ int sprd_iface_set_power(struct sprd_hif *hif, int val)
 {
 	int ret = 0;
 
+	/*
+	 * MU300: power_cnt is atomic, the transitions behind it are not.  Probe powers the chip off after it
+	 * registered wlan0, outside RTNL, so userspace (hostapd, netifd) can open the interface meanwhile: the
+	 * open's power-on (1st count) ran start_marlin + post_init while the probe's power-off (last count) was
+	 * still in post_deinit.  post_deinit then cleared the channels and sc2355_hif.hif that post_init had just
+	 * set, stop_marlin powered the chip down, and the next RX interrupt read hif->rx_mgmt from NULL
+	 * (pcie_rx_handle+0x34, "paging request at 00000000000030b8", FINDINGS 31n).  One transition at a time.
+	 */
+	mutex_lock(&hif->power_lock);
 	if (val) {
 		sprd_wlan_power_status_sync(1, 1);
 		ret = sprd_hif_power_on(hif);
@@ -276,12 +411,14 @@ int sprd_iface_set_power(struct sprd_hif *hif, int val)
 			else if (ret == -EIO)
 				pr_err("SYNC cmd error!\n");
 
-			return ret;
+			goto out;
 		}
 		if (atomic_read(&hif->power_cnt) == 1)
 			sprd_get_fw_info(hif->priv);
 	} else
 		sprd_hif_power_off(hif);
+out:
+	mutex_unlock(&hif->power_lock);
 	return ret;
 }
 #ifdef DRV_RESET_SELF
@@ -1437,18 +1574,24 @@ static int iface_notify_init(struct sprd_priv *priv)
 {
 	int ret = 0;
 
-	atomic_notifier_chain_register(&wcn_reset_notifier_list,
-				       &iface_host_reset_cb);
-
+	/*
+	 * MU300 (from kanoqwq/mu300-linux): the WCN reset notifier last, and every step undone when a later one
+	 * fails. The vendor registered the notifier first and returned on a failure with it (and the misc device,
+	 * and the inetaddr notifier) still registered: the probe then freed priv, and the next WCN reset called
+	 * iface_host_reset() on it. A reset before misc_register() also queued the FW_ERROR uevent for a misc
+	 * device that had no this_device yet, and a failed misc_register() went on as if it had worked.
+	 */
 	ret = misc_register(&wlan_misc_device);
-	if (ret)
+	if (ret) {
 		pr_err("wlan misc dev register fail\n");
+		return ret;
+	}
 
 	ret = register_inetaddr_notifier(&iface_inetaddr_cb);
 	if (ret) {
 		pr_err("%s failed to register inetaddr notifier(%d)!\n",
 		       __func__, ret);
-		return ret;
+		goto err_misc;
 	}
 
 	if (priv->fw_capa & SPRD_CAPA_NS_OFFLOAD) {
@@ -1458,18 +1601,33 @@ static int iface_notify_init(struct sprd_priv *priv)
 			pr_err
 			    ("%s failed to register inet6addr notifier(%d)!\n",
 			     __func__, ret);
-			return ret;
+			goto err_inet;
 		}
 	}
 
+	ret = atomic_notifier_chain_register(&wcn_reset_notifier_list,
+					     &iface_host_reset_cb);
+	if (!ret)
+		return 0;
+
+	if (priv->fw_capa & SPRD_CAPA_NS_OFFLOAD)
+		unregister_inet6addr_notifier(&iface_inet6addr_cb);
+err_inet:
+	unregister_inetaddr_notifier(&iface_inetaddr_cb);
+err_misc:
+	misc_deregister(&wlan_misc_device);
 	return ret;
 }
 
 static void iface_notify_deinit(struct sprd_priv *priv)
 {
-	misc_deregister(&wlan_misc_device);
+	/* MU300: no notifier call after this, then no uevent work left, before the misc device goes */
 	atomic_notifier_chain_unregister(&wcn_reset_notifier_list,
 					 &iface_host_reset_cb);
+#ifndef DRV_RESET_SELF
+	cancel_work_sync(&iface_fw_error_work);
+#endif
+	misc_deregister(&wlan_misc_device);
 	unregister_inetaddr_notifier(&iface_inetaddr_cb);
 	if (priv->fw_capa & SPRD_CAPA_NS_OFFLOAD)
 		unregister_inet6addr_notifier(&iface_inet6addr_cb);
@@ -1707,12 +1865,42 @@ static int iface_core_init(struct device *dev, struct sprd_priv *priv)
 	sprd_tcp_ack_init(priv);
 	sprd_setup_wiphy(wiphy, priv);
 	sprd_vendor_init(priv, wiphy);
+	/*
+	 * MU300: the phy's permanent address (/sys/class/ieee80211/phy0/macaddress) was all zeros. OpenWrt's wifi
+	 * scripts derive the AP's address from it, and an address that differs from the one the firmware uses breaks
+	 * the WPA handshake. The factory address from LK is what wlan0 gets as well (iface_set_mac_addr()); without
+	 * one the phy keeps no address, as before, and wlan0 its random one.
+	 * (After a community contribution, the u30air charge2 build.)
+	 */
+	if (!is_valid_ether_addr(priv->default_mac))
+		iface_bootargs_mac(priv->default_mac);
+	if (is_valid_ether_addr(priv->default_mac))
+		ether_addr_copy(wiphy->perm_addr, priv->default_mac);
 	set_wiphy_dev(wiphy, dev);
 	ret = wiphy_register(wiphy);
 	if (ret) {
 		wiphy_err(wiphy, "failed to regitster wiphy(%d)!\n", ret);
 		goto out;
 	}
+#ifdef CONFIG_PM
+	/*
+	 * MU300: WoWLAN "any" on by default. Without a WoWLAN configuration cfg80211's wiphy_suspend() closes every
+	 * interface (cfg80211_leave_all), and the WCN PCI function, which suspends asynchronously, has usually taken
+	 * the bus down by then: CMD_CLOSE and CMD_DISCONNECT were dropped ("fail because bus done"), the firmware kept
+	 * them open, and the next close and open of Wi-Fi after the resume hit a firmware assert (mchn.c line 137)
+	 * that only a reboot cleared (FINDINGS 37). With a configuration the interfaces stay as they are; the
+	 * firmware is told about the sleep through the PCIe channel's power_notify, as before. "iw phy phy0 wowlan
+	 * disable" brings the old behaviour back. wiphy_unregister() frees it.
+	 */
+	if (!wiphy->wowlan_config) {
+		struct cfg80211_wowlan *wowlan = kzalloc(sizeof(*wowlan), GFP_KERNEL);
+
+		if (wowlan) {
+			wowlan->any = true;
+			wiphy->wowlan_config = wowlan;
+		}
+	}
+#endif
 
 	rtnl_lock();
 	wdev = sprd_add_iface(priv, "wlan%d", NL80211_IFTYPE_STATION, NULL);
@@ -1770,6 +1958,7 @@ int sprd_iface_probe(struct platform_device *pdev,
 	iface_set_priv(priv);
 	platform_set_drvdata(pdev, priv);
 	hif = &priv->hif;
+	mutex_init(&hif->power_lock);
 	hif->priv = priv;
 	hif->pdev = pdev;
 	hif->ops = hif_ops;
@@ -1792,9 +1981,10 @@ int sprd_iface_probe(struct platform_device *pdev,
 	ret = iface_core_init(&pdev->dev, priv);
 	if (ret) {
 		pr_err("%s core init failed: %d\n", __func__, ret);
+		/* MU300: power off while hif still exists (sprd_core_free frees priv, and hif with it) */
+		sprd_iface_set_power(hif, false);
 		sprd_hif_deinit(hif);
 		sprd_core_free(priv);
-		sprd_iface_set_power(hif, false);
 		return ret;
 	}
 
@@ -1802,15 +1992,18 @@ int sprd_iface_probe(struct platform_device *pdev,
 	if (ret) {
 		pr_err("%s notify init failed: %d\n", __func__, ret);
 		iface_core_deinit(priv);
+		sprd_iface_set_power(hif, false);
 		sprd_hif_deinit(hif);
 		sprd_core_free(priv);
-		sprd_iface_set_power(hif, false);
 		return ret;
 	}
 
 	/* Power off chipset in order to save power */
 	pr_info("Power off WCN (%d time)\n", atomic_read(&hif->power_cnt));
 	sprd_iface_set_power(hif, false);
+
+	/* MU300: the recovery watchdog (see iface_wd_tick) */
+	iface_wd_start(priv);
 
 	return ret;
 }
@@ -1823,19 +2016,28 @@ int sprd_iface_remove(struct platform_device *pdev)
 	int ret;
 
 	pr_info("%s\n wlan driver remove.", __func__);
+	iface_wd_stop();	/* MU300: before hif goes */
 
+	/*
+	 * MU300 (issue #146): the vendor returned here when the power-on failed, with everything still registered;
+	 * a platform remove cannot refuse (the device is unbound and the module freed either way), so the
+	 * teardown goes on without the chip. The power-on only fails from a count of 0, i.e. with no interface
+	 * open, so the close commands it would have carried are not needed and there is no power-off to balance.
+	 */
 	pr_info("Power on WCN (%d time)\n", atomic_read(&hif->power_cnt));
 	ret = sprd_iface_set_power(hif, true);
 	if (ret)
-		return ret;
+		pr_err("%s: WCN power-on failed (%d), removing without the chip\n", __func__, ret);
 
 	iface_notify_deinit(priv);
 	iface_core_deinit(priv);
+	/* MU300: power off while hif still exists (sprd_core_free frees priv, and hif and its lock with it) */
+	pr_info("Power off WCN (%d time)\n", atomic_read(&hif->power_cnt));
+	if (!ret)
+		sprd_iface_set_power(hif, false);
 	sprd_hif_deinit(hif);
 	sprd_core_free(priv);
 	iface_set_priv(NULL);
-	pr_info("Power off WCN (%d time)\n", atomic_read(&hif->power_cnt));
-	sprd_iface_set_power(hif, false);
 
 	return 0;
 }

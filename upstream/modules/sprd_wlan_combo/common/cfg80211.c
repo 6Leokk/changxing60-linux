@@ -181,6 +181,11 @@ static void cfg80211_do_work(struct work_struct *work)
 		}
 
 		kfree(sprd_work);
+		/*
+		 * MU300: this loop drains every queued item in one run, and items requeue themselves (the RX
+		 * refill did, back to back, in issue #94). Yield between them so a long run cannot hold the CPU.
+		 */
+		cond_resched();
 	}
 }
 
@@ -1561,21 +1566,140 @@ int sprd_uninit_fw(struct sprd_vif *vif)
 	return 0;
 }
 
+/*
+ * MU300: the stations of the access point. hostapd knows them, but iw, iwinfo and so LuCI ask the driver, which
+ * had no dump_station (issue #8). The firmware's peer table has them: the entries of this interface with a
+ * unicast address other than its own (the table also holds the interface itself and its broadcast entry). The
+ * firmware reports no signal or byte counts for them, so only the address is filled in.
+ */
+static int sprd_cfg80211_dump_station(struct wiphy *wiphy, struct net_device *ndev, int idx, u8 *mac,
+				      struct station_info *sinfo)
+{
+	struct sprd_vif *vif = netdev_priv(ndev);
+	struct sprd_hif *hif = &vif->priv->hif;
+	int i, n = 0;
+
+	if (vif->wdev.iftype != NL80211_IFTYPE_AP && vif->wdev.iftype != NL80211_IFTYPE_P2P_GO)
+		return -ENOENT;
+	for (i = 0; i < MAX_LUT_NUM; i++) {
+		const u8 *da = hif->peer_entry[i].tx.da;
+
+		if (hif->peer_entry[i].ctx_id != vif->ctx_id || !is_valid_ether_addr(da) ||
+		    ether_addr_equal(da, ndev->dev_addr))
+			continue;
+		if (n++ < idx)
+			continue;
+		ether_addr_copy(mac, da);
+		sinfo->filled = 0;
+		return 0;
+	}
+	return -ENOENT;
+}
+
+/* MU300: the access point's channel, which cfg80211 keeps from start_ap (iwinfo showed "Channel: 0") */
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0))
+static int sprd_cfg80211_get_channel(struct wiphy *wiphy, struct wireless_dev *wdev, unsigned int link_id,
+				     struct cfg80211_chan_def *chandef)
+{
+	if ((wdev->iftype != NL80211_IFTYPE_AP && wdev->iftype != NL80211_IFTYPE_P2P_GO) ||
+	    !wdev->links[link_id].ap.chandef.chan)
+		return -ENODATA;
+	*chandef = wdev->links[link_id].ap.chandef;
+	return 0;
+}
+#else
+static int sprd_cfg80211_get_channel(struct wiphy *wiphy, struct wireless_dev *wdev,
+				     struct cfg80211_chan_def *chandef)
+{
+	if ((wdev->iftype != NL80211_IFTYPE_AP && wdev->iftype != NL80211_IFTYPE_P2P_GO) || !wdev->chandef.chan)
+		return -ENODATA;
+	*chandef = wdev->chandef;
+	return 0;
+}
+#endif
+
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(7, 0, 0))
+/*
+ * MU300: 7.x hands the key and station ops a wireless_dev where 6.x passed the net_device, and adds rx_addr to
+ * remain_on_channel. The driver's functions stay as they are; these adapt the calls.
+ */
+static int sprd_cfg80211_add_key_wdev(struct wiphy *wiphy, struct wireless_dev *wdev, int link_id,
+				      u8 key_index, bool pairwise, const u8 *mac_addr,
+				      struct key_params *params)
+{
+	return sprd_cfg80211_add_key(wiphy, wdev->netdev, link_id, key_index, pairwise, mac_addr, params);
+}
+
+static int sprd_cfg80211_del_key_wdev(struct wiphy *wiphy, struct wireless_dev *wdev, int link_id,
+				      u8 key_index, bool pairwise, const u8 *mac_addr)
+{
+	return sprd_cfg80211_del_key(wiphy, wdev->netdev, link_id, key_index, pairwise, mac_addr);
+}
+
+static int sprd_cfg80211_set_default_mgmt_key_wdev(struct wiphy *wiphy, struct wireless_dev *wdev,
+						   int link_id, u8 key_index)
+{
+	return sprd_cfg80211_set_default_mgmt_key(wiphy, wdev->netdev, link_id, key_index);
+}
+
+static int sprd_cfg80211_add_station_wdev(struct wiphy *wiphy, struct wireless_dev *wdev,
+					  const u8 *mac, struct station_parameters *params)
+{
+	return sprd_cfg80211_add_station(wiphy, wdev->netdev, mac, params);
+}
+
+static int sprd_cfg80211_del_station_wdev(struct wiphy *wiphy, struct wireless_dev *wdev,
+					  struct station_del_parameters *params)
+{
+	return sprd_cfg80211_del_station(wiphy, wdev->netdev, params);
+}
+
+static int sprd_cfg80211_change_station_wdev(struct wiphy *wiphy, struct wireless_dev *wdev,
+					     const u8 *mac, struct station_parameters *params)
+{
+	return sprd_cfg80211_change_station(wiphy, wdev->netdev, mac, params);
+}
+
+static int sprd_cfg80211_get_station_wdev(struct wiphy *wiphy, struct wireless_dev *wdev,
+					  const u8 *mac, struct station_info *sinfo)
+{
+	return sprd_cfg80211_get_station(wiphy, wdev->netdev, mac, sinfo);
+}
+
+static int sprd_cfg80211_dump_station_wdev(struct wiphy *wiphy, struct wireless_dev *wdev, int idx, u8 *mac,
+					   struct station_info *sinfo)
+{
+	return sprd_cfg80211_dump_station(wiphy, wdev->netdev, idx, mac, sinfo);
+}
+
+static int sprd_cfg80211_remain_on_channel_wdev(struct wiphy *wiphy, struct wireless_dev *wdev,
+						struct ieee80211_channel *chan, unsigned int duration,
+						u64 *cookie, const u8 *rx_addr)
+{
+	return sprd_cfg80211_remain_on_channel(wiphy, wdev, chan, duration, cookie);
+}
+#define MU300_WDEV_OP(f) f##_wdev
+#else
+#define MU300_WDEV_OP(f) f
+#endif
+
 static struct cfg80211_ops sprd_cfg80211_ops = {
 	.add_virtual_intf = sprd_cfg80211_add_iface,
 	.del_virtual_intf = sprd_cfg80211_del_iface,
 	.change_virtual_intf = sprd_cfg80211_change_iface,
-	.add_key = sprd_cfg80211_add_key,
-	.del_key = sprd_cfg80211_del_key,
+	.add_key = MU300_WDEV_OP(sprd_cfg80211_add_key),
+	.del_key = MU300_WDEV_OP(sprd_cfg80211_del_key),
 	.set_default_key = sprd_cfg80211_set_default_key,
-	.set_default_mgmt_key = sprd_cfg80211_set_default_mgmt_key,
+	.set_default_mgmt_key = MU300_WDEV_OP(sprd_cfg80211_set_default_mgmt_key),
 	.start_ap = sprd_cfg80211_start_ap,
 	.change_beacon = sprd_cfg80211_change_beacon,
 	.stop_ap = sprd_cfg80211_stop_ap,
-	.add_station = sprd_cfg80211_add_station,
-	.del_station = sprd_cfg80211_del_station,
-	.change_station = sprd_cfg80211_change_station,
-	.get_station = sprd_cfg80211_get_station,
+	.add_station = MU300_WDEV_OP(sprd_cfg80211_add_station),
+	.del_station = MU300_WDEV_OP(sprd_cfg80211_del_station),
+	.change_station = MU300_WDEV_OP(sprd_cfg80211_change_station),
+	.get_station = MU300_WDEV_OP(sprd_cfg80211_get_station),
+	.dump_station = MU300_WDEV_OP(sprd_cfg80211_dump_station),
+	.get_channel = sprd_cfg80211_get_channel,
 	.libertas_set_mesh_channel = sprd_cfg80211_set_channel,
 	.scan = sprd_cfg80211_scan,
 	.connect = sprd_cfg80211_connect,
@@ -1585,7 +1709,7 @@ static struct cfg80211_ops sprd_cfg80211_ops = {
 	.set_pmksa = sprd_cfg80211_set_pmksa,
 	.del_pmksa = sprd_cfg80211_del_pmksa,
 	.flush_pmksa = sprd_cfg80211_flush_pmksa,
-	.remain_on_channel = sprd_cfg80211_remain_on_channel,
+	.remain_on_channel = MU300_WDEV_OP(sprd_cfg80211_remain_on_channel),
 	.cancel_remain_on_channel = sprd_cfg80211_cancel_remain_on_channel,
 	.mgmt_tx = sprd_cfg80211_mgmt_tx,
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0))
@@ -1669,6 +1793,11 @@ void sprd_core_free(struct sprd_priv *priv)
 #ifdef DRV_RESET_SELF
 	cfg80211_deinit_reset_work(priv);
 #endif
+	/*
+	 * MU300 (issue #146): the scan timer lives in priv and is only deleted when a scan completes; a scan still
+	 * running at remove is reported done by iface_deinit_vif, but nothing owned the timer here, where priv goes.
+	 */
+	timer_shutdown_sync(&priv->scan_timer);
 	sprd_cmd_deinit(priv);
 
 	wiphy = priv->wiphy;

@@ -62,4 +62,4 @@ echo "== dmesg (new lines) =="
 echo
 echo "== done. inspect with: =="
 echo "  ssh $HOST 'ls -la /dev/dri; dmesg | tail -40'"
-echo "  ssh $HOST '/opt/mu300/bin/mu300-screen --once'   # draw one frame and exit"
+echo "  ssh $HOST '/usr/bin/mu300-screen --once'   # draw one frame and exit"

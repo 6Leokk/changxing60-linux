@@ -765,6 +765,13 @@ int sprd_pcie_scan_card(void *wcn_dev)
 	struct marlin_device *marlin_dev = wcn_dev;
 
 	init_completion(&priv->scan_done);
+	/*
+	 * MU300: sprd_pcie_remove() completes remove_done, and it also runs when a scan times out with the card half
+	 * probed - before sprd_pcie_remove_card() ever initialised it: complete() on a zeroed completion oopsed in
+	 * __wake_up_locked and the board panicked (seen on OpenWrt, docs/FINDINGS.md 31i). Completing it with nobody
+	 * waiting is harmless.
+	 */
+	init_completion(&priv->remove_done);
 	WCN_INFO("device node name: %s\n", marlin_dev->np->name);
 	pdev = to_pdev_from_ep_node(marlin_dev->np);
 	if (!pdev) {
@@ -781,8 +788,17 @@ int sprd_pcie_scan_card(void *wcn_dev)
 	sprd_pcie_configure_device(pdev);
 
 	if (wait_for_completion_timeout(&priv->scan_done,
-		msecs_to_jiffies(5000)) == 0)
-		goto pcie_rescan_timeout;
+		msecs_to_jiffies(5000)) == 0) {
+		/* MU300: the card is sometimes just late - one more scan before giving up on Wi-Fi and Bluetooth */
+		WCN_ERR("PCIe scan card timeout, scanning once more\n");
+		sprd_pcie_unconfigure_device(pdev);
+		msleep(200);
+		reinit_completion(&priv->scan_done);
+		sprd_pcie_configure_device(pdev);
+		if (wait_for_completion_timeout(&priv->scan_done,
+			msecs_to_jiffies(5000)) == 0)
+			goto pcie_rescan_timeout;
+	}
 
 	WCN_INFO("scan end\n");
 
@@ -1124,6 +1140,8 @@ static void sprd_pcie_remove(struct pci_dev *pdev)
 
 	WCN_INFO("%s\n", __func__);
 	priv = (struct wcn_pcie_info *) pci_get_drvdata(pdev);
+	if (!priv)	/* MU300: a probe that never got as far as setting it */
+		return;
 
 	if (priv->legacy_en == 1)
 		free_irq(priv->irq, (void *)priv);
@@ -1250,7 +1268,11 @@ static int sprd_ep_resume(struct device *dev)
 
 	wcn_bus_change_state(priv, WCN_BUS_UP);
 	atomic_set(&priv->is_suspending, 0);
-	wcn_set_armlog(true);
+	/*
+	 * MU300: the vendor turned the firmware's ARM log on here after every resume. The firmware keeps the setting
+	 * through D3hot, and with the log on it pulls PCIe WAKE# within 0-2 s of every L2 entry to push log packets:
+	 * a system sleep with Wi-Fi up ended at once (FINDINGS 37). It is off by default (sysfs.c); leave it as it was.
+	 */
 	mdbg_device_lock_notify();
 	for (chn = 0; chn < 16; chn++) {
 		ops = mchn_ops(chn);

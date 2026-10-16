@@ -18,6 +18,8 @@
 #include <linux/platform_device.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
+#include <linux/slab.h>
+#include <linux/usb/otg.h>
 #include <linux/usb/phy.h>
 #include <dt-bindings/soc/sprd,qogirn6pro-mask.h>
 #include <dt-bindings/soc/sprd,qogirn6pro-regs.h>
@@ -680,6 +682,56 @@ static struct regmap *sprd_ssphy_pmic_regmap(struct device *dev)
 	return map;
 }
 
+/*
+ * Where VBUS comes from. The F50's device tree gives the PHY the extcon-usb-gpio device; the U30 Air's gives it the
+ * PMIC's Type-C block (sprd,sc27xx-typec), which has no driver here, so usb_add_phy_dev() waited for it for ever
+ * and there was no USB at all (no network, no serial console). Both boards have the VBUS GPIO node: point the
+ * property at it when it names the Type-C block. The property stays with the node, so it is never freed.
+ */
+static void sprd_ssphy_vbus_source(struct device *dev)
+{
+	struct device_node *np = dev->of_node, *ext, *gpio;
+	struct property *prop;
+	bool typec;
+
+	ext = of_parse_phandle(np, "extcon", 0);
+	if (!ext)
+		return;
+	typec = of_device_is_compatible(ext, "sprd,sc27xx-typec");
+	of_node_put(ext);
+	if (!typec)
+		return;
+
+	gpio = of_find_compatible_node(NULL, NULL, "linux,extcon-usb-gpio");
+	if (!gpio || !of_device_is_available(gpio) || !gpio->phandle) {
+		of_node_put(gpio);
+		dev_warn(dev, "extcon is the Type-C block and there is no VBUS GPIO: USB will not come up\n");
+		return;
+	}
+	prop = kzalloc(sizeof(*prop) + sizeof(__be32), GFP_KERNEL);
+	if (prop) {
+		prop->name = kstrdup("extcon", GFP_KERNEL);
+		prop->length = sizeof(__be32);
+		prop->value = prop + 1;
+		*(__be32 *)prop->value = cpu_to_be32(gpio->phandle);
+		if (prop->name && !of_update_property(np, prop))
+			dev_info(dev, "VBUS from %pOF (no driver for the Type-C block)\n", gpio);
+		else
+			dev_warn(dev, "could not point extcon at %pOF\n", gpio);
+	}
+	of_node_put(gpio);
+}
+
+/*
+ * dwc3 tells the PHY about a role change through otg_set_vbus() - host: the host eye pattern, an A-type ID and the
+ * D+/D- pull-downs; device: back. Without an otg structure it never did, and a host-mode port kept the device
+ * settings (a failed first descriptor read, "error -71", and slow transfers).
+ */
+static int sprd_ssphy_otg_set_vbus(struct usb_otg *otg, bool on)
+{
+	return sprd_ssphy_set_vbus(otg->usb_phy, on);
+}
+
 static int sprd_ssphy_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -749,7 +801,13 @@ static int sprd_ssphy_probe(struct platform_device *pdev)
 	phy->phy.notify_connect = sprd_ssphy_notify_connect;
 	phy->phy.notify_disconnect = sprd_ssphy_notify_disconnect;
 	phy->phy.vbus_nb.notifier_call = sprd_ssphy_vbus_notify;
+	phy->phy.otg = devm_kzalloc(dev, sizeof(*phy->phy.otg), GFP_KERNEL);
+	if (!phy->phy.otg)
+		return -ENOMEM;
+	phy->phy.otg->usb_phy = &phy->phy;
+	phy->phy.otg->set_vbus = sprd_ssphy_otg_set_vbus;
 
+	sprd_ssphy_vbus_source(dev);
 	ret = usb_add_phy_dev(&phy->phy);
 	if (ret)
 		return dev_err_probe(dev, ret, "cannot add phy\n");

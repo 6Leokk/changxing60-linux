@@ -26,6 +26,19 @@ log() {
     [ -d /run ] && echo "$(cut -d' ' -f1 /proc/uptime) $*" >> /run/stages
 }
 
+# Bounded, filtered state dump for blind boots: when the rootfs cannot be mounted there is no storage,
+# so persist() writes nowhere and kmsg/pmsg (ramoops) is the ONLY channel that survives the fallback
+# into Android. Keep every line short and the counts small -- the pmsg ramoops ring is a few hundred KiB
+# and a full dmesg would have rolled it over before the interesting part.
+diag() {  # diag TAG
+    log "stage=$1-block $(ls /sys/class/block 2>/dev/null | tr '\n' ',')"
+    log "stage=$1-deferred $(tr '\n' ',' < /sys/kernel/debug/devices_deferred 2>/dev/null)"
+    log "stage=$1-pdrv $(ls /sys/bus/platform/drivers 2>/dev/null | grep -E 'ufs|sdhci|dwc3|sprd' | tr '\n' ',')"
+    log "stage=$1-bnd $(ls /sys/bus/platform/drivers/ufs-sprd /sys/bus/platform/drivers/dwc3 2>/dev/null | grep -v '^bind\|^unbind\|^uevent\|^module$' | tr '\n' ',')"
+    dmesg 2>/dev/null | grep -iE 'ufs|scsi|sdhci|dwc3|usb|phy|regulator|clk|deferred|probe of|error|fail' \
+        | tail -n 70 | while IFS= read -r l; do log "dmesg: $l"; done
+}
+
 # Persistent log: 8 MiB at 48 MiB inside boot_b, past the image and its AVB data
 # (image ends near 39 MiB). Survives a cold power cycle, unlike pstore.
 bootb=
@@ -87,6 +100,37 @@ failed=0
 while read module; do
     # vendor_boot's /lib/modules were built for the stock kernel; only our rebuilt copies match
     file="/linux-modules/$module"
+    # The live DT gives usb3 its phys as `usb-phy = <&dummyphy &ssphy>`; the glue's
+    # devm_usb_get_phy_by_phandle(dev, "usb-phy", 0) wants the sprd,usb-dummy-phy provider
+    # (E19) and bails out of its probe without it -- "unable to get usb2.0 phy device", no
+    # core child, no UDC, ever. module-order loads phy-sprd-dummy.ko first, but on a bad boot
+    # its driver has not bound by the time the glue's insmod runs, so wait for the bind here
+    # (and bind it ourselves if the device is sitting there unbound). Never unbind the glue:
+    # that only pushes it into EPROBE_DEFER permanently.
+    case "$module" in
+        dwc3-sprd.ko)
+            phywait=0
+            while [ $phywait -lt 15 ]; do
+                for d in /sys/bus/platform/devices/*dummyphy*; do
+                    [ -e "$d/driver" ] && break 2
+                done
+                phywait=$((phywait + 1))
+                sleep 1
+            done
+            if [ $phywait -lt 15 ]; then
+                log "stage=usb-dummyphy-ok wait=${phywait}s"
+            else
+                log "stage=usb-dummyphy-wait-timeout phyclass=[$(ls /sys/class/phy 2>/dev/null | tr '\n' ',')] deferred=[$(cat /sys/kernel/debug/devices_deferred 2>/dev/null | tr '\n' ' ')]"
+                for d in /sys/bus/platform/devices/*dummyphy*; do
+                    [ -e "$d" ] || continue
+                    bdev=$(basename "$d")
+                    berr=$(echo "$bdev" > /sys/bus/platform/drivers/sprd-dummy-phy/bind 2>&1)
+                    brc=$?
+                    log "stage=usb-dummyphy-bind dev=$bdev rc=$brc err=[$berr]"
+                done
+            fi
+            ;;
+    esac
     if insmod "$file" 2>/run/insmod.err; then
         loaded=$((loaded + 1))
     else
@@ -96,6 +140,7 @@ while read module; do
 done < /etc/module-order
 mdev -s
 log "stage=modules-done loaded=$loaded failed=$failed"
+diag modules-done
 
 # Locate misc now; whether slot a is restored is decided once the rootfs is known.
 # 7552n-port: universal partition scan (UFS names partitions sdaN without the mmcblk 'p');
@@ -133,6 +178,9 @@ persist
 (while :; do sleep 15; persist; done) &
 
 hostname mu300-linux
+# One-line state of the USB chain, written to the persist window: which phys registered,
+# whether the glue's phy device is bound, and what is still deferred.
+log "stage=usb-phy-state dummyphy_dev=[$(ls -d /sys/bus/platform/devices/*dummyphy* 2>/dev/null | tr '\n' ',')] dummyphy_drv=[$(readlink /sys/bus/platform/devices/*dummyphy*/driver 2>/dev/null | tr '\n' ',')] phyclass=[$(ls /sys/class/phy 2>/dev/null | tr '\n' ',')] udc=[$(ls /sys/class/udc 2>/dev/null | tr '\n' ',')] deferred=[$(cat /sys/kernel/debug/devices_deferred 2>/dev/null | tr '\n' ' ')]"
 ifconfig lo 127.0.0.1 up
 log "stage=usb-configfs"
 mount -t configfs configfs /config
@@ -187,6 +235,9 @@ for n in $(seq 1 40); do
     [ -e /sys/class/udc/25100000.dwc3 ] && break
     sleep 1
 done
+if [ ! -e /sys/class/udc/25100000.dwc3 ]; then
+    log "stage=usb-no-udc dummyphy_drv=[$(readlink /sys/bus/platform/devices/*dummyphy*/driver 2>/dev/null | tr '\n' ',')] phyclass=[$(ls /sys/class/phy 2>/dev/null | tr '\n' ',')] dwc3dev=[$(ls -d /sys/bus/platform/devices/*dwc3* 2>/dev/null | tr '\n' ',')] deferred=[$(cat /sys/kernel/debug/devices_deferred 2>/dev/null | tr '\n' ' ')] phyerr=$(dmesg | grep -c 'unable to get usb2.0 phy')"
+fi
 udc=
 [ -e /sys/class/udc/25100000.dwc3 ] && udc=25100000.dwc3
 [ -z "$udc" ] && for u in /sys/class/udc/*; do [ -e "$u" ] && { udc=$(basename "$u"); break; }; done
@@ -247,6 +298,79 @@ if [ -n "$rootloop" ] && losetup -o $ROOT_OFFSET "$rootloop" /dev/$rootdisk 2>>/
     mkdir -p /run/mu300 && cp /etc/misc-bc-slot-a.bin /etc/misc-bc-slot-b-trial.bin /run/mu300/
     [ -n "$misc" ] && echo "$misc" > /run/mu300/misc-dev
     echo "$rootloop" > /run/mu300/disk-dev
+    # Bring the modem CP up BEFORE switch_root. This is the proven 5.4 sequence (persist
+    # log of the live 5.4 boot: ext4-modem_control-started pid=2540 -> "Modem Alive" at
+    # +7 s, from this same block in the v10 ramdisk init). The rootfs S11 chroot start of
+    # modem_control does NOT work on 6.18 (the bind-mounted property area is never mmapped
+    # by bionic there, so it reads zero properties and dies at "can't get modem type!"):
+    # on 6.18 this ramdisk-phase start is the ONLY thing that loads the CP. As in the 5.4
+    # variant the daemon is killed and the chroot torn down before switch_root: once the CP
+    # is up it runs on its own, and the rootfs-side S11 start reattaches later (harmless if
+    # that one still fails at the property read). It waits for both the PMIC-watchdog ack
+    # and the CP itself (Modem Alive), but ONLY within a fixed slice of uptime — the block
+    # must return well before the ~290 s watchdog cut, so the wait is deadline-bounded, not
+    # a flat 240 s (a flat cap could overrun on a boot that was already slow).
+    A=/android
+    if [ -x "$A/vendor/bin/modem_control" ]; then
+        # cp -a, not bind: the property area must be regular files on the same devtmpfs
+        # (the 5.4 boot that worked copied it; the 6.18 rootfs bind variant reads empty).
+        cp -a "$A/dev/__properties__" /dev/__properties__ 2>/dev/null || true
+        mkdir -p /dev/block/by-name /dev/socket
+        for u in /sys/class/block/*/uevent; do
+            d=$(basename "$(dirname "$u")"); n=$(sed -n 's/^PARTNAME=//p' "$u")
+            ln -sf "/dev/$d" "/dev/block/$d"
+            [ -n "$n" ] && ln -sf "/dev/$d" "/dev/block/by-name/$n"
+        done
+        mkdir -p "$A/dev" "$A/proc" "$A/sys" "$A/data/vendor" "$A/mnt" "$A/tmp"
+        mount --bind /dev "$A/dev"
+        mount -t proc proc "$A/proc"
+        mount -t sysfs sysfs "$A/sys"
+        sh /etc/ueventd-perms.sh
+        src=/proc/cmdline
+        grep -q androidboot.slot_suffix /proc/cmdline || [ ! -r /proc/device-tree/chosen/bootargs ] || src=/proc/device-tree/chosen/bootargs
+        tr -d '\000' < "$src" | sed 's/androidboot.slot_suffix=_b/androidboot.slot_suffix=_a/' > /run/cmdline.android
+        mount --bind /run/cmdline.android "$A/proc/cmdline"
+        /bin/logdw /dev/socket/logdw > /run/logcat.txt 2>&1 &
+        LD_LIBRARY_PATH=/apex/com.android.runtime/lib64/bionic:/system/lib64:/vendor/lib64 \
+            chroot "$A" /vendor/bin/modem_control > /run/modem_control.log 2>&1 &
+        mcpid=$!
+        log "stage=ext4-modem_control-started pid=$mcpid"
+        persist
+        rstoff_ready=0; alive=0
+        # deadline: at most 120 s inside this block, so a slow boot still hands over before
+        # the PMIC watchdog cut (~290 s); on the proven 5.4 boot "Modem Alive" came at +7 s.
+        deadline=$(( $(cut -d. -f1 /proc/uptime) + 120 ))
+        n=0
+        while [ "$(cut -d. -f1 /proc/uptime)" -lt "$deadline" ]; do
+            n=$((n + 1))
+            if [ "$alive" = 0 ] && grep -aq "Modem Alive" /run/modem_control.log 2>/dev/null; then
+                log "stage=ext4-modem-alive t=$n"
+                alive=1
+            fi
+            if [ "$rstoff_ready" = 0 ] && dmesg | grep -q "sbuf ready for pmic wdt init"; then
+                log "stage=ext4-pmic-wdt-rstoff-ready t=$n"
+                rstoff_ready=1
+            fi
+            [ "$alive" = 1 ] && [ "$rstoff_ready" = 1 ] && break
+            sleep 2
+        done
+        [ "$alive" = 0 ] && log "stage=ext4-modem-NOT-alive (CP may be down; WAN will fail)"
+        [ "$rstoff_ready" = 0 ] && log "stage=ext4-pmic-wdt-NOT-ready (will cut ~290s)"
+        persist
+        # kill + teardown exactly like the proven 5.4 flow: the CP, once started, runs on
+        # its own; the switch_root below requires /dev free of bind children, and this
+        # init's process reaper would kill the daemon anyway. The rootfs-side S11 start
+        # fails at property reads on BOTH kernels (harmless: modem_has_been_boot would
+        # only make it listen, and the CP is already up).
+        kill "$mcpid" 2>/dev/null
+        umount "$A/proc/cmdline" 2>/dev/null
+        umount "$A/proc" 2>/dev/null
+        umount "$A/sys" 2>/dev/null
+        umount "$A/dev" 2>/dev/null
+        log "stage=ext4-chroot-torn-down alive=$alive rstoff=$rstoff_ready"
+    else
+        log "stage=ext4-no-modem_control (PMIC watchdog NOT disabled)"
+    fi
     init=/sbin/init
     [ -x /newroot/lib/systemd/systemd ] && init=/lib/systemd/systemd
     log "stage=switch-root root=$rootdir init=$init os=$(sed -n 's/^PRETTY_NAME=//p' /newroot/etc/os-release)"
@@ -262,6 +386,7 @@ if [ -n "$rootloop" ] && losetup -o $ROOT_OFFSET "$rootloop" /dev/$rootdisk 2>>/
     exec switch_root /newroot $init
 fi
 log "stage=rootfs-unavailable $(cat /run/rootmount.err)"
+diag rootfs-unavailable
 restore_slot_a
 ifconfig usb0 192.168.77.1 netmask 255.255.255.0 up
 log "stage=usb0 $(ifconfig usb0 2>&1 | head -1)"

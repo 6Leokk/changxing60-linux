@@ -2184,12 +2184,19 @@ static const struct file_operations sblock_debug_fops = {
 	.release = single_release,
 };
 
-static DEVICE_ATTR(base_addr, 0440, NULL, NULL);
 
 int sblock_init_debug(void)
 {
 	int rval;
 	dev_t dev_no;
+
+	/*
+	 * MU300: sprd_ipc_probe() calls this once per SIPC device (four of them), but there is one class and one
+	 * device of this name: every later call failed with "cannot create duplicate filename '/class/sblock'" and a
+	 * stack dump, and leaked a chrdev region and a cdev.
+	 */
+	if (sblock_dev)
+		return 0;
 
 	sblock_dev = kzalloc(sizeof(struct sblock_device), GFP_KERNEL);
 	if (!sblock_dev) {
@@ -2218,7 +2225,8 @@ int sblock_init_debug(void)
 	sblock_dev->sys_dev = device_create(sblock_class, NULL,
 				       dev_no,
 				       sblock_dev, "sipc_sblock");
-	device_create_file(&sblock_dev->pdev.dev, &dev_attr_base_addr);
+	/* the vendor also created a "base_addr" attribute here: with neither show nor store, on a device that is
+	 * never registered - it could never be read, and newer kernels warn twice for it */
 
 	return 0;
 

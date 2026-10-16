@@ -1,11 +1,27 @@
 #!/bin/sh
-# Vendor drivers Android loads that the initramfs does not: thermal throttling, status LEDs, SAR power
-# backoff, SIM tray detection, vibrator, DDR/CP DVFS and the Mali GPU (/dev/mali0). Loaded one by one; a failure is logged, not fatal.
-for m in sprd_soc_thm thermal-generic-adc sprd_cpu_cooling leds-sc27xx-bltc zte_sar zte_card_holder_det sc27xx-vibra sprd_cp_dvfs sprd_ddr_dvfs sprd_gpu_cooling mali_kbase; do
+# Vendor drivers Android loads that the initramfs does not. Loaded one by one; a failure is logged, not fatal.
+#
+# Two kernels, two module sets: the list below is the vendor 5.4 one (thermal throttling, status LEDs, SAR
+# power backoff, SIM tray detection, vibrator, DDR/CP DVFS, Mali). On mainline 6.18 those same jobs are done
+# by the four out-of-tree modules the 6.18 tree builds -- mali_kbase, mu300_thermal, sprd_pmic_wdt and (by
+# wifi-start, not here) the WCN pair -- and none of the vendor names exist, so modprobe would just log
+# FAILED for all of them and nothing would come up. Picked off uname, so 5.4 is untouched.
+case "$(uname -r)" in
+6.*) MODULES="mali_kbase mu300_thermal sprd_pmic_wdt" ;;
+*)   MODULES="sprd_soc_thm thermal-generic-adc sprd_cpu_cooling leds-sc27xx-bltc zte_sar zte_card_holder_det sc27xx-vibra sprd_cp_dvfs sprd_ddr_dvfs sprd_gpu_cooling mali_kbase" ;;
+esac
+
+for m in $MODULES; do
     if modprobe "$m" 2>/tmp/mu300-modprobe.err; then
         echo "loaded $m"
     else
-        echo "FAILED $m: $(cat /tmp/mu300-modprobe.err)"
+        why=$(cat /tmp/mu300-modprobe.err)
+        # busybox modprobe writes nothing to stderr when the .ko file simply is not there, so a bare
+        # "FAILED x:" reads the same as a CRC/vermagic rejection. Say which one it is -- a missing
+        # file means the *build* is wrong, a rejection means the module is. (mali_kbase sat as a
+        # nameless "FAILED" for several rounds for want of this line.)
+        [ -n "$why" ] || why="no message from modprobe -- $m.ko is probably not installed"
+        echo "FAILED $m: $why"
     fi
 done
 true

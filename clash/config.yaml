@@ -1,0 +1,103 @@
+# 7552N 安卓原生科学上网网关 — mihomo (Clash.Meta) 配置
+# 位置: /data/clash/config.yaml   管理: http://<手机热点IP>:9090/ui (zashboard)
+# 订阅: 把下面 proxy-providers 的 url 换成你的机场订阅链接即可
+
+# --- 核心 ---
+mixed-port: 7890
+allow-lan: true
+bind-address: "*"
+mode: rule
+log-level: info
+ipv6: false
+
+# --- 管理面板 (zashboard) ---
+external-controller: 0.0.0.0:9090
+external-ui: ui/dist
+secret: ""
+
+# --- TUN 模式: 接管整机+热点客户端的流量 (root, 内核 TUN=y, 无需 iptables) ---
+tun:
+  enable: true
+  stack: system
+  device: mihomo_tun
+  auto-route: true
+  auto-redirect: false
+  auto-detect-interface: true
+  dns-hijack:
+    - any:53
+  mtu: 1400
+  strict-route: false
+
+# --- DNS: fake-ip + 国内外分流, 防污染 ---
+dns:
+  enable: true
+  listen: 0.0.0.0:1053
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  fake-ip-filter:
+    - "*.lan"
+    - "+.local"
+    - "time.*.com"
+    - "+.ntp.org"
+    - "+.msftconnecttest.com"
+    - "+.msftncsi.com"
+  default-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+  nameserver:
+    - https://223.5.5.5/dns-query
+    - https://doh.pub/dns-query
+  # 国外域名用代理侧 DNS 解析 (防污染); 走 rule 的 GEOIP 判断
+  proxy-server-nameserver:
+    - https://223.5.5.5/dns-query
+
+# --- 订阅: 换成你的机场链接 ---
+proxy-providers:
+  my-sub:
+    type: http
+    url: "在这里粘贴你的订阅链接"
+    path: ./providers/my-sub.yaml
+    interval: 86400
+    health-check:
+      enable: true
+      url: http://www.gstatic.com/generate_204
+      interval: 600
+
+# --- 策略组 ---
+proxy-groups:
+  - name: PROXY
+    type: select
+    use:
+      - my-sub
+    proxies:
+      - AUTO
+  - name: AUTO
+    type: url-test
+    use:
+      - my-sub
+    url: http://www.gstatic.com/generate_204
+    interval: 600
+    tolerance: 50
+
+# --- 分流规则: 国内直连, 其余走代理 ---
+rules:
+  - RULE-SET,applications,DIRECT
+  - DOMAIN,clash.razord.top,DIRECT
+  - DOMAIN,yacd.haishan.me,DIRECT
+  - IP-CIDR,127.0.0.0/8,DIRECT
+  - IP-CIDR,192.168.0.0/16,DIRECT
+  - IP-CIDR,10.0.0.0/8,DIRECT
+  - IP-CIDR,172.16.0.0/12,DIRECT
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - GEOIP,CN,DIRECT
+  - MATCH,PROXY
+
+# rule-providers (国内域名/应用直连规则集, mihomo 首次联网自动下载)
+rule-providers:
+  applications:
+    type: http
+    behavior: classical
+    format: text
+    url: "https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Clash/China/China_Domain.txt"
+    path: ./ruleset/applications.list
+    interval: 86400
