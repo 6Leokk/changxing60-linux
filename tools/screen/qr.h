@@ -1,7 +1,7 @@
 /* Minimal QR encoder (byte mode, ECC level L, versions 1-5) for the status page.
  * See qr.c for why versions 1-5 and level L specifically. */
-#ifndef MU300_QR_H
-#define MU300_QR_H
+#ifndef CHANGXING60_QR_H
+#define CHANGXING60_QR_H
 
 /* Encode `text`; writes size*size bytes (1 = dark) into `out` (needs 41*41).
  * Returns the module count (e.g. 25 for version 2) or -1 if it does not fit. */

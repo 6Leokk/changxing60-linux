@@ -1,12 +1,14 @@
 /* Host-side check for the management address the panel prints as "LuCI http://.../" in
- * mu300-screen.c.
+ * changxing60-screen.c.
  *
- * This one has a real failure history. The panel used to ask br-lan first, so it printed
- * 192.168.77.1 -- the USB-cable address -- to a reader that had just scanned the Wi-Fi join code
- * printed on the same page and whose only way in was 192.168.8.1 (reported from the device
- * 2026-10-14; the "a hotspot client reaches br-lan too" theory in the old comment did not hold).
- * The address is displayed nowhere else, so getting it wrong is silent until someone tries to open
- * it -- worth pinning down here rather than by squinting at the panel after a flash.
+ * This one has a real failure history, in both directions. The panel originally asked br-lan first
+ * and printed 192.168.77.1; on 2026-10-14 it was changed to ask br-wifi first (192.168.8.1) on the
+ * theory that the reader is a phone that has just scanned the Wi-Fi join code on the same page and
+ * cannot reach br-lan. On 2026-10-16 the owner ruled that the panel must show the real backend
+ * address, 192.168.77.1, and not a hotspot-side substitute -- so br-lan is primary again and
+ * br-wifi is the fallback. The address is displayed nowhere else, so getting it wrong is silent
+ * until someone tries to open it -- worth pinning down here rather than by squinting at the panel
+ * after a flash.
  *
  *   usage: test-lan        (exit 0 = all checks passed)
  *
@@ -14,8 +16,8 @@
  * real read_wan()/lan_take() against a fake ip(8) that serves whatever the current scenario wrote
  * into $FAKE_IP -- one file per device listing plus "all" for the unfiltered listing.
  */
-#define main mu300_screen_main
-#include "mu300-screen.c"
+#define main changxing60_screen_main
+#include "changxing60-screen.c"
 #undef main
 
 #include <sys/stat.h>
@@ -66,7 +68,7 @@ static void expect(const char *want, const char *what)
 
 int main(void)
 {
-	char p[] = "/tmp/mu300-lan-test.XXXXXX";
+	char p[] = "/tmp/changxing60-lan-test.XXXXXX";
 	FILE *f;
 
 	dir = mkdtemp(p);
@@ -92,30 +94,30 @@ int main(void)
 	 * address" filter has something to filter */
 	put("dev-sipa_eth0", WAN_LINE);
 
-	/* --- the bug this exists for: hotspot up, cable up -> the hotspot address wins --- */
+	/* --- br-lan is the backend address the owner opens: it wins when both are up --- */
 	put("dev-br-wifi", WIFI_LINE);
 	put("dev-br-lan", LAN_LINE);
-	expect("192.168.8.1", "hotspot and cable both up -> hotspot");
+	expect("192.168.77.1", "hotspot and cable both up -> backend address");
 
-	/* --- hotspot off: br-wifi is gone, so the cable address is what is left --- */
-	put("dev-br-wifi", NULL);
-	expect("192.168.77.1", "hotspot gone -> cable address");
+	/* --- br-lan gone: the hotspot address is what is left --- */
+	put("dev-br-lan", NULL);
+	expect("192.168.8.1", "cable gone -> hotspot address");
 
-	/* --- hotspot present but carrying nothing: must not stop the fallback --- */
-	put("dev-br-wifi", "");
-	expect("192.168.77.1", "hotspot up but addressless -> cable address");
+	/* --- br-lan present but carrying nothing: must not stop the fallback --- */
+	put("dev-br-lan", "");
+	expect("192.168.8.1", "cable up but addressless -> hotspot address");
 
 	/* --- neither named interface exists: the full listing, and the address worth printing is
 	 * not the one `ip` printed first --- */
-	put("dev-br-wifi", NULL);
 	put("dev-br-lan", NULL);
+	put("dev-br-wifi", NULL);
 	put("all", WAN_LINE LO_LINE USB_LINE WIFI_LINE);
 	expect("192.168.77.1", "no named iface -> first usable in the full listing");
 
 	/* --- only the WAN and loopback: nothing to print, so the previous value stays --- */
 	put("all", WAN_LINE LO_LINE);
-	snprintf(lan_ip, sizeof lan_ip, "192.168.8.1");
-	expect("192.168.8.1", "nothing usable -> previous value kept");
+	snprintf(lan_ip, sizeof lan_ip, "192.168.77.1");
+	expect("192.168.77.1", "nothing usable -> previous value kept");
 
 	unlink(dir);
 	fprintf(stderr, fails ? "FAILURES\n" : "all passed\n");

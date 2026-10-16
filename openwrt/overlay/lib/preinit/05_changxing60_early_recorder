@@ -1,0 +1,8 @@
+# changxing60: record dmesg and procd/service state into boot_b's persistent log area for the first minutes,
+# so tools/collect-logs.sh can show from Android why a boot did not complete.
+changxing60_early_recorder() {
+	[ -x /opt/changxing60/bin/early-recorder ] || return 0
+	PATH="$PATH:/opt/changxing60/busybox-bin" /opt/changxing60/bin/early-recorder 420 </dev/null >/dev/null 2>&1 &
+}
+
+boot_hook_add preinit_essential changxing60_early_recorder

@@ -1,0 +1,185 @@
+#!/bin/sh
+# Load the VBC voice-band-codec profiles into the kernel, so call audio has parameters to run on.
+#
+# WHY THIS IS NEEDED. Call audio on this board goes through the SC2730/UMP9620 VBC block, and the VBC
+# will not process a voice path until four firmware profiles are in the kernel: audio_structure,
+# dsp_vbc, cvs, dsp_smartamp (names from vbc-dai.c:436-439; minor N of /dev/vbc_turningN is profile N).
+# They are not on this rootfs, not in the vendor image, and not in any partition dump -- Android's own
+# audio HAL does not read them from disk either, it *derives* them from the vendor parameter XML in
+# /odm/etc/audio_params/sprd and writes the result in. So the blobs have to be produced, and
+# tools/voice/make-vbc-profiles.sh produces them (XML -> blob, using the converter in
+# tools/voice/vbc-profile.py). This script is the other half: getting them into the running kernel.
+#
+# WHY THE CHARACTER DEVICE AND NOT request_firmware. The driver has two load paths (vbc-dai.c): a
+# write to /dev/vbc_turningN, and request_firmware() from /lib/firmware/<name> triggered by writing 1
+# to the "X Profile Update" mixer control. The second is what the reference project uses, and it is
+# the tidier one -- but it needs a mixer, and this rootfs has no amixer, no libasound and no
+# alsa-utils in its feeds. The character device needs nothing but dd. Both paths end in the same
+# vbc_turning_profile_loading(), so the result in the kernel is identical.
+#
+# THE TRAP, measured on this board (2026-10-16). ONE write() is ONE complete profile: the driver
+# copies the whole thing and checks the 16-byte "audio_profile" magic at the front of every write. So
+# dd must hand the blob over in a single write, which means the block size has to be at least the
+# blob's size. With the obvious bs=65536, the 124,728-byte dsp_vbc blob went out as two writes and the
+# second one -- starting 64 KiB into the blob, with no magic at its front -- was rejected:
+#
+#     dd: error writing '/dev/vbc_turning1': Invalid argument
+#     1+1 records in
+#     1+0 records out
+#
+# The two smaller profiles (48,934 and 55,500 bytes) round-tripped byte-for-byte at bs=65536 and it
+# was only dsp_vbc that failed, which is exactly the shape of bug that gets mistaken for a bad blob.
+# So the block size is computed from the file, not guessed.
+#
+# WHY IT VERIFIES. The driver checks the magic and nothing else -- no length, no checksum, no version
+# (vbc-dai.c:2964-2984). A blob that is well-formed but wrong loads silently and is only discovered
+# by listening to a call. So every profile is read back out of the kernel and compared byte for byte
+# against the file. The read is /dev/vbc_turningN's other direction and the ABI is fiddly enough to
+# have its own tool, so the comparison goes through changxing60-vbc-dump rather than reimplementing
+# it here.
+#
+# Idempotent: a profile already in the kernel and already identical is left alone. That matters --
+# this board reboots itself when the WAN wedges, and re-writing a profile the driver is not currently
+# using is not worth the risk of doing at the wrong moment.
+#
+#   changxing60-vbc-load              load and verify (quiet unless something is wrong)
+#   changxing60-vbc-load --check      say what would happen, write nothing
+#   changxing60-vbc-load --verbose    name every profile as it goes
+#   changxing60-vbc-load --dir DIR    take the blobs from DIR (default /lib/firmware)
+#
+# Exit 0 when every profile is in and verified, 1 otherwise. Where it got to is written to $LOG as
+# well as stderr, because the console only carries ERR and above.
+set -u
+
+FW=${CHANGXING60_VBC_FW:-/lib/firmware}
+LOG=${CHANGXING60_VBC_LOG:-/root/vbc-load.log}
+DUMP=${CHANGXING60_VBC_DUMP:-/opt/changxing60/bin/changxing60-vbc-dump}
+CHECK=0
+VERBOSE=0
+for a in "$@"; do
+    case $a in
+        --check)      CHECK=1 ;;
+        --verbose|-v) VERBOSE=1 ;;
+        --dir)        shift; FW=${1:-} ;;
+        -h|--help)    sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "changxing60-vbc-load: unknown option $a" >&2; exit 2 ;;
+    esac
+done
+[ -n "$FW" ] || { echo "changxing60-vbc-load: --dir needs a directory" >&2; exit 2; }
+
+# profile 3 (dsp_smartamp) is deliberately not loaded: it is the smart-amplifier profile and this
+# board's AW87xxx amplifier has no driver in the tree, so nothing would consume it. The driver's
+# read of turning3 answers -ENOMEM, which is the normal state and not a fault.
+NAMES="audio_structure dsp_vbc cvs"
+
+log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG" 2>/dev/null; }
+say() { [ "$VERBOSE" = 1 ] && echo "$*"; return 0; }
+
+[ "$CHECK" = 1 ] || : > "$LOG" 2>/dev/null
+log "start: fw=$FW check=$CHECK"
+
+# What the kernel holds right now, one file per loaded profile. Its exit status is 1 when nothing is
+# loaded, which is the normal first-boot answer and not an error here.
+snap() {
+    rm -rf "$1" 2>/dev/null
+    "$DUMP" "$1" >/dev/null 2>&1
+    return 0
+}
+# same FILE1 FILE2: byte-for-byte. cmp when the rootfs has it, md5sum otherwise (both are busybox).
+same() {
+    if command -v cmp >/dev/null 2>&1; then
+        cmp -s "$1" "$2"
+    else
+        [ "$(md5sum < "$1" 2>/dev/null)" = "$(md5sum < "$2" 2>/dev/null)" ]
+    fi
+}
+
+TMP=$(mktemp -d 2>/dev/null) || TMP=/tmp/vbc-load.$$
+mkdir -p "$TMP" 2>/dev/null
+trap 'rm -rf "$TMP"' EXIT
+
+snap "$TMP/before"
+
+todo=0
+i=0
+for name in $NAMES; do
+    dev=/dev/vbc_turning$i
+    i=$((i + 1))
+    blob=$FW/$name
+    if [ ! -e "$dev" ]; then
+        echo "changxing60-vbc-load: $dev does not exist (is the vbc driver loaded?)" >&2
+        log "MISSING: $dev"
+        todo=$((todo + 1))
+        continue
+    fi
+    if [ ! -f "$blob" ]; then
+        echo "changxing60-vbc-load: no $blob -- run tools/voice/make-vbc-profiles.sh first" >&2
+        log "MISSING: $blob"
+        todo=$((todo + 1))
+        continue
+    fi
+    if [ -f "$TMP/before/$name.bin" ] && same "$blob" "$TMP/before/$name.bin"; then
+        say "ok    $name (already loaded, identical)"
+        log "already loaded: $name"
+        continue
+    fi
+    todo=$((todo + 1))
+    if [ "$CHECK" = 1 ]; then
+        echo "would load $name -> $dev ($(wc -c < "$blob") bytes)"
+        log "would load: $name"
+        continue
+    fi
+    size=$(wc -c < "$blob")
+    case $size in ''|0|*[!0-9]*) echo "changxing60-vbc-load: $blob is empty" >&2; log "EMPTY: $blob"; continue ;; esac
+    # bs=size, count=1: exactly one read of the whole file and so exactly one write(). See the header.
+    err=$(dd if="$blob" of="$dev" bs="$size" count=1 2>&1 >/dev/null)
+    if [ $? -ne 0 ]; then
+        echo "changxing60-vbc-load: writing $name to $dev failed: $err" >&2
+        log "FAILED write: $name: $err"
+        continue
+    fi
+    say "load  $name -> $dev ($size bytes)"
+    log "wrote: $name ($size bytes)"
+done
+
+if [ "$CHECK" = 1 ]; then
+    [ "$todo" -gt 0 ] && { echo "changxing60-vbc-load: $todo profile(s) would be loaded"; exit 0; }
+    echo "changxing60-vbc-load: every profile is already loaded and identical"
+    exit 0
+fi
+
+# Read them all back and compare. This is the only thing that distinguishes "the kernel took it" from
+# "the kernel took something" -- the driver validates the magic alone.
+snap "$TMP/after"
+
+bad=0
+i=0
+for name in $NAMES; do
+    i=$((i + 1))
+    blob=$FW/$name
+    [ -f "$blob" ] || { bad=$((bad + 1)); continue; }
+    got=$TMP/after/$name.bin
+    if [ ! -f "$got" ]; then
+        echo "changxing60-vbc-load: $name did not read back from the kernel" >&2
+        log "NOT LOADED: $name"
+        bad=$((bad + 1))
+        continue
+    fi
+    if same "$blob" "$got"; then
+        say "verify $name: identical ($(wc -c < "$got") bytes)"
+        log "verified: $name"
+    else
+        echo "changxing60-vbc-load: $name does not match what the kernel holds" >&2
+        log "MISMATCH: $name"
+        bad=$((bad + 1))
+    fi
+done
+
+if [ "$bad" -gt 0 ]; then
+    echo "changxing60-vbc-load: $bad profile(s) not loaded and verified" >&2
+    log "incomplete: $bad"
+    exit 1
+fi
+log "complete: 3 profiles loaded and verified"
+[ "$VERBOSE" = 1 ] && echo "changxing60-vbc-load: all 3 profiles loaded and verified"
+exit 0

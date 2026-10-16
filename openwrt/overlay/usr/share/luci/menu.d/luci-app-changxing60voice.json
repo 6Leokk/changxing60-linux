@@ -1,0 +1,13 @@
+{
+	"admin/services/changxing60voice": {
+		"title": "Calls",
+		"order": 61,
+		"action": {
+			"type": "view",
+			"path": "changxing60voice/voice"
+		},
+		"depends": {
+			"acl": [ "luci-app-changxing60voice" ]
+		}
+	}
+}

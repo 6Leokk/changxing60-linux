@@ -1,0 +1,682 @@
+#!/bin/sh
+# Cell status for the changxing60 modem, as one snapshot: signal strength, registration, the serving
+# cell's band and channel, traffic counters, and the neighbour cells the modem reports. The panel's
+# network page (luci-app-changxing60net) reads the --json form; a terminal gets the human one.
+#
+#   changxing60-net-status            human-readable summary
+#   changxing60-net-status --json     the same snapshot as one JSON line
+#   changxing60-net-status --fast     the cheap tier only (radio, registration, operator, signal,
+#                                     traffic) -- no engineering pages, no neighbours
+#
+# Every AT command goes through changxing60-at, the one client front-end of the channel
+# changxing60-atd owns; this script never opens /dev/stty_nr*, not even to peek. On a SIPC tty each
+# line goes to exactly one reader, so a second one steals half of every reply from the first and
+# neither sees a whole answer (docs/FINDINGS.md 13b) -- which is one documented way to leave the
+# modem silent until a reboot.
+#
+# A command the modem did not answer is reported as null, never as a value and never as zero: a
+# fabricated 0 for an unanswered read is the one lie that makes a status page worse than none.
+# When NOTHING answered the --json form carries a top-level "error" instead of values and both
+# forms exit 1 (any exit code otherwise says the round ran). Each lock wait defaults to 2 s
+# (CHANGXING60_AT_LOCK_WAIT moves it), so a channel another client holds for a whole transaction
+# reads as busy, in the error, not as a row of nulls after a minute of waiting.
+#
+# The AT surface is the one this modem family answers (the mu300 cell collector, whose SPENGMD
+# decode is ported below, the ModemManager unisoc plugin, e5-linux docs/FINDINGS.md 37):
+#   AT+CFUN?                    radio on/off
+#   AT+CEREG? / AT+C5GREG?      registration, tracking area, cell id, access technology
+#                               (AcT 7 = LTE, 11 = NR SA, 13 = EN-DC on this family)
+#   AT+COPS?                    operator name and access technology
+#   AT+CSQ                      RSSI/BER; answers 99 ("unknown") while camping on NR
+#   AT+CESQ                     quality indexes (27.007 8.69), from which RSRP/RSRQ come
+#   AT+SPENGMD=0,6,0            Unisoc engineering: LTE serving cell, dash-separated line
+#   AT+SPENGMD=0,0,6            LTE PHY: the SINR +CESQ lacks, MCS and BLER histograms
+#   AT+SPENGMD=0,14,1           NR serving cell (band, ARFCN, PCI, RSRP, RSRQ, SINR, MCS, BLER)
+#   AT+SPENGMD=0,6,6            LTE neighbour cells, eight 12-field slots (full rounds only)
+#   AT+SPQ5GNCELLEX             NR neighbour cells with per-cell SINR (full rounds only)
+#
+# The engineering reads are sent only when the registration line says the modem is on a cell (up
+# stream does the same: unanswered engineering reads against a searching modem are a row of
+# timeouts). AT+SPENGMD=0,1,0 is NEVER sent from here: it switches the AT port into streaming mode
+# and leaves the channel dead until the next reboot (upstream's blacklist, same warning in the
+# panel's AT terminal). The band LOCKS (AT+SPLBAND, AT+SPFORCEFRQ) are deliberately not read
+# either: they are write-shaped commands whose readback form nothing in this family has verified
+# on hardware, and a wrong readback would be printed as the truth. The serving cell's band comes
+# from the SPENGMD serving reads instead, which upstream verified against a live network.
+#
+# Unisoc separates the SPENGMD fields with "-" and writes negative numbers as "+<abs>"
+#   "1-300-211--11747--654"  =  band 1, EARFCN 300, PCI 211, RSRP -117.47, RSRQ -6.54
+# The dB values are centi-units; the signature restores signs, and awk -- not shell arithmetic --
+# divides them, because a busybox awk wraps integers at 32 bits (upstream's measured note) and a
+# wrapped dB value would print as a plausible-looking negative of nothing.
+#
+# Traffic is NOT an AT command and none is invented for it: the kernel already keeps the
+# per-interface counters in /sys/class/net/<iface>/statistics, which is where upstream's dashboard
+# reads them too. The interface is the data bearer's, sipa_eth<cid-1> -- the same mapping
+# mobile-data prints as IFACE -- overridable for a test (CHANGXING60_NET_STATUS_IFACE).
+#
+# Every AT reply is parsed only as far as its shape is trusted; a reply that does not parse is
+# null, never an approximation. Fields of the --json form:
+#   ts, time                    when the snapshot was taken (epoch / RFC 3339, UTC)
+#   cfun                        radio 1 = on, 0 = off
+#   reg / reg5                  CEREG / C5GREG: {stat,tac,cid,act} (stat 1 = home, 5 = roaming);
+#                               TAC and cell id are strings -- the cell id is 28 bits on LTE and
+#                               36 on NR, past what shell arithmetic keeps exact
+#   ops                         COPS: {name,plmn,act}
+#   serving.lte                 the SPENGMD LTE serving cell: {rat,band,earfcn,pci,rsrp,rsrq,bw,
+#                               enb,cid,tac,ca,sinr,ul_mcs,dl_mcs,ul_bler,dl_bler}
+#   serving.nr                  the SPENGMD NR serving cell: {rat,band,arfcn,pci,rsrp,rsrq,sinr,
+#                               bw_mhz,gnb,cid,ul_mcs,dl_mcs,ul_bler,dl_bler}
+#   sig                         the quality summary, preferred source first (SPENGMD NR, SPENGMD
+#                               LTE, CESQ, CSQ): {source,rsrp,rsrq,sinr,rssi}
+#   csq / cesq                  the raw 27.007 readings, derived to dBm / dB
+#   neighbours.lte / nr         the neighbour cells (full rounds only): null when the modem did not
+#                               answer, [] when it answered with none
+#   eng_skip                    why serving and neighbours carry no answer when they carry none:
+#                               "fast" (--fast does not ask) or "unregistered" (the engineering
+#                               reads are skipped while the modem is off a cell). null when the reads
+#                               were made -- a null serving cell is then the modem's own answer, and
+#                               the two cases must not read alike
+#   traffic                     {iface,present,operstate,rx_bytes,tx_bytes,rx_packets,tx_packets}
+#   error                       only when nothing answered; "busy":1 means another client held the
+#                               channel the whole round
+#
+# Every path can be moved for a test (a host-side run has no modem):
+#   CHANGXING60_AT_BIN              the AT client (default /opt/changxing60/bin/changxing60-at;
+#                                   the same seam mobile-data and changxing60-voice use)
+#   CHANGXING60_AT_LOCK_WAIT        seconds to wait for the AT lock per command (default 2)
+#   CHANGXING60_NET_STATUS_IFACE    the traffic interface (default sipa_eth0)
+#   CHANGXING60_NET_STATUS_SYS      the sysfs root for it (default /sys/class/net; a test
+#                                   moves the whole directory, since a name cannot be
+#                                   moved relative to /sys)
+#   CHANGXING60_NET_STATUS_DEADLINE seconds for the whole round (default 30, 15 with --fast)
+set -u
+export PATH="$PATH:/opt/changxing60/bin:/opt/changxing60/busybox-bin:/usr/sbin:/sbin"
+export LC_ALL=C
+
+usage() {
+    awk 'NR == 1 { next } /^set -u$/ { exit } { sub(/^# ?/, ""); print }' "$0"
+}
+
+# --------------------------------------------------------------------- arguments
+MODE=human
+FAST=0
+for arg in "$@"; do
+    case $arg in
+        --json) MODE=json ;;
+        --fast) FAST=1 ;;
+        -h|--help) usage; exit 0 ;;
+        *) echo "changxing60-net-status: unknown argument '$arg' (usage: [--json] [--fast])" >&2; exit 2 ;;
+    esac
+done
+AT_BIN=${CHANGXING60_AT_BIN:-/opt/changxing60/bin/changxing60-at}
+IFACE=${CHANGXING60_NET_STATUS_IFACE:-sipa_eth0}
+
+# stderr of the last at() call lands here, so that "the AT channel was busy" can be told apart
+# from "the modem said nothing" and from "the daemon is gone" (changxing60-at prints one line to
+# stderr for each). A file, not capture-and-merge: the reply must not carry the diagnostics.
+ERRF=${TMPDIR:-/tmp}/changxing60-net-status.$$
+OUTF=${TMPDIR:-/tmp}/changxing60-net-status-out.$$
+trap 'rm -f "$ERRF" "$OUTF"' EXIT
+
+# --------------------------------------------------------------------- helpers
+# at CMD [TIMEOUT]: the reply lines land in $AT_OUT, or it is empty when the channel was busy or
+# silent. The caller reads $AT_ERR for which one it was. An empty answer is "unknown" and nothing
+# here invents a value for an unanswered command. LOCK_WAIT defaults low: a status read backs off
+# when another client holds the channel (an SMS send, a dial), it does not queue behind it.
+# It runs in the parent shell -- no $( ) around a call -- because the classification flags it
+# sets are how the error branch tells a busy channel from a dead daemon, and a command
+# substitution runs it in a subshell and would discard both.
+at() {  # at CMD [TIMEOUT]
+    AT_OUT=; AT_ERR=
+    left=$(( DEADLINE - $(date +%s) ))
+    if [ "$left" -lt 1 ]; then
+        AT_ERR="the round ran past its deadline"
+        return 1
+    fi
+    : >"$ERRF" 2>/dev/null || true
+    CHANGXING60_AT_LOCK_WAIT=${CHANGXING60_AT_LOCK_WAIT:-2} CHANGXING60_AT_BUDGET=$left \
+        "$AT_BIN" -t "${2:-3}" "$1" 2>"$ERRF" >"$OUTF"
+    at_rc=$?
+    AT_ERR=$(tr -d '\r' <"$ERRF" 2>/dev/null)
+    AT_OUT=$(tr -d '\r' <"$OUTF" 2>/dev/null)
+    case $AT_ERR in
+        *': busy'*) AT_BUSY=1 ;;
+        *'not reading commands'*) AT_DEAD=1 ;;
+        *[!\ ]*) AT_SILENT=1 ;;
+    esac
+    return $at_rc
+}
+
+# REG_LINE: the +CEREG and +C5GREG answers differ in the middle of the word (EREG / 5GREG), which
+# is why every registration match below carries both spellings.
+# answer_line RAW REGEX: the first reply line matching REGEX (the echoed command and the final
+# result code do not match), CR stripped. Empty when the modem said nothing of the sort: the
+# caller's null.
+answer_line() {  # answer_line RAW REGEX
+    [ -n "$1" ] || return 0
+    printf '%s\n' "$1" | tr -d '\r' | grep -E -- "$2" | head -n1
+}
+
+# json_num NUMBER: NUMBER as a JSON number, or null when it is not one. A dash or an empty field
+# ("no reading") must not become 0, and a lone "-" must not become a bare JSON minus.
+json_num() {
+    case $1 in
+        ''|-|*[!0-9-]*|*--*) printf 'null' ;;
+        -*) case ${1#-} in ''|*[!0-9]*) printf 'null' ;; *) printf '%s' "$1" ;; esac ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+# json_str TEXT: TEXT as a JSON string (quotes and backslashes escaped, CR dropped), or null when
+# empty.
+json_str() {
+    if [ -n "$1" ]; then
+        printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\r')"
+    else
+        printf 'null'
+    fi
+}
+# jget JSON KEY: the raw JSON value of KEY in a fragment this script built itself (every key
+# appears once, so the greedy prefix is safe). Empty when absent.
+jget() {
+    printf '%s' "$1" | sed -n "s/.*\"$2\":\([^,}]*\).*/\1/p"
+}
+# reg_stat RAW: the stat field of a +CEREG/+C5GREG answer, digits only, empty when unanswered.
+reg_stat() {
+    [ -n "$1" ] || return 0
+    printf '%s\n' "$1" | tr -d '"' | awk -F',' 'NR == 1 { s = $2; gsub(/[ \t]/, "", s); print s }'
+}
+
+# reg_json LINE: one registration line ("+CEREG: 2,1,"01F0","0ABCD12",13") as
+#   {"stat":1,"tac":"01F0","cid":"0ABCD12","act":13}
+# with null for every field the modem left out or answered with a dash. TAC and cell id stay
+# strings: the cell id is 28 bits on LTE and 36 on NR, beyond what shell arithmetic keeps exact.
+reg_json() {
+    line=$(answer_line "$1" '^[+]C(5GR|ER)EG:')
+    if [ -z "$line" ]; then printf '{"stat":null,"tac":null,"cid":null,"act":null}'; return; fi
+    printf '%s\n' "$line" | sed -E 's/^\+C(5GR|ER)EG: *//' | tr -d '"' | awk -F',' '
+        function rn(x) { gsub(/[ \t]/, "", x); return (x ~ /^[0-9]+$/) ? x : "null" }
+        function rs(x) { gsub(/[ \t]/, "", x); return (x == "") ? "null" : "\"" x "\"" }
+        { printf "{\"stat\":%s,\"tac\":%s,\"cid\":%s,\"act\":%s}", rn($2), rs($3), rs($4), rn($5) }'
+}
+
+# ops_json LINE: "+COPS: 0,0,"China Mobile",7" -> {"name":"China Mobile","act":7}
+# A numeric-format answer (format 2) gives a PLMN instead of a name; the name is then null and the
+# PLMN is carried in plmn, because a name that looks like a PLMN is not the same as a name.
+ops_json() {
+    line=$(answer_line "$1" '^[+]COPS:')
+    if [ -z "$line" ]; then printf '{"name":null,"plmn":null,"act":null}'; return; fi
+    fmt=$(printf '%s' "$line" | cut -d, -f2 | tr -cd '0-9')
+    quoted=$(printf '%s' "$line" | sed -n 's/^[^"]*"\([^"]*\)".*/\1/p')
+    [ "$quoted" != "$line" ] || quoted=
+    if [ -z "$quoted" ]; then
+        # a numeric answer can also be given without quotes: the PLMN is then bare field 3
+        [ "$fmt" = 2 ] && quoted=$(printf '%s' "$line" | cut -d, -f3 | tr -cd '0-9')
+    fi
+    # The act is the field after the operator, and the operator may be a quoted name holding a comma
+    # ("China Mobile, Ltd"), so it cannot be found by counting commas from the left. Take the quoted run
+    # out of the line first and read the last field that is left. Measured on the device 2026-10-16:
+    # "+COPS: 0,2,\"46000\",11" is what this modem answers, and matching the *last quoted group* (what
+    # this did) read the PLMN back as the act -- 46000 instead of 11.
+    rest=$(printf '%s' "$line" | sed -n 's/^\([^"]*\)"[^"]*"\(.*\)$/\1\2/p')
+    [ -n "$rest" ] || rest=$line
+    # ...and the act only exists when the answer has the field. 27.007 makes it "+COPS: <mode>[,<format>,
+    # <oper>[,<AcT>]]", so after the operator is taken out the act is there exactly when three commas are.
+    # Without this, "+COPS: 0,2,46000" (no act) hands back the PLMN, and "+COPS: 0" hands back the mode --
+    # both fabricated answers of the kind the header forbids.
+    # act is assigned only inside the branch above, and the tool runs under set -u: an answer without
+    # the field ("+COPS: 0,2,46000", "+COPS: 0") used to kill ops_json here ("act: parameter not set")
+    # and truncate the whole snapshot's JSON.
+    act=
+    # act is assigned only inside the branch above, and the tool runs under set -u: an answer without
+    # the field ("+COPS: 0,2,46000", "+COPS: 0") used to kill ops_json here ("act: parameter not set")
+    # and truncate the whole snapshot's JSON.
+    act=
+    if [ "$(printf '%s' "$rest" | tr -cd ',' | wc -c)" -ge 3 ]; then
+        act=$(printf '%s' "$rest" | awk -F',' '{ v = $NF; gsub(/[^0-9]/, "", v); print v }')
+    fi
+    case $act in ''|*[!0-9]*) act= ;; esac
+    [ -n "$act" ] && [ "$act" -gt 99 ] && act=
+    case $fmt in
+        2) printf '{"name":null,"plmn":%s,"act":%s}' "$(json_str "$quoted")" "$(json_num "$act")" ;;
+        *) printf '{"name":%s,"plmn":null,"act":%s}' "$(json_str "$quoted")" "$(json_num "$act")" ;;
+    esac
+}
+
+# csq_json LINE: "+CSQ: 25,99" -> {"rssi":-63,"ber":null}. RSSI 0..31 is -113..-51 dBm
+# (27.007 8.5); BER 0..7 in hundredths of a percent; 99 is "unknown" for either and becomes null.
+csq_json() {
+    line=$(answer_line "$1" '^[+]CSQ:')
+    if [ -z "$line" ]; then printf '{"rssi":null,"ber":null}'; return; fi
+    printf '%s\n' "$line" | sed 's/^+CSQ: *//' | awk -F',' '
+        { gsub(/[ \t]/, "", $1); gsub(/[ \t]/, "", $2)
+          rssi = ber = "null"
+          if ($1 ~ /^[0-9]+$/ && $1 < 32) rssi = -113 + 2 * $1
+          if ($2 ~ /^[0-9]+$/ && $2 < 8) ber = $2 + 0
+          printf "{\"rssi\":%s,\"ber\":%s}", rssi, ber }'
+}
+
+# cesq_json LINE: "+CESQ: 24,99,55,255,36,98" -> {"rsrp":-42,"rsrq":-6.5}
+# Field 6 is the RSRP index (0..97 -> -140..-43 dBm), field 5 the RSRQ index (0..34 -> -19.5..-3
+# dB), 255 "not known" (27.007 8.69); the mu300 collector derives the same two.
+cesq_json() {
+    line=$(answer_line "$1" '^[+]CESQ:')
+    if [ -z "$line" ]; then printf '{"rsrp":null,"rsrq":null}'; return; fi
+    printf '%s\n' "$line" | sed 's/^+CESQ: *//' | awk -F',' '
+        { gsub(/[ \t]/, "", $5); gsub(/[ \t]/, "", $6)
+          rsrp = rsrq = "null"
+          if ($6 ~ /^[0-9]+$/ && $6 != 255) rsrp = $6 - 140
+          if ($5 ~ /^[0-9]+$/ && $5 != 255) rsrq = sprintf("%.1f", -19.5 + $5 * 0.5)
+          printf "{\"rsrp\":%s,\"rsrq\":%s}", rsrp, rsrq }'
+}
+
+# sp_line RAW: the answer line of a SPENGMD query. Not the echoed command, and it carries dashes:
+# the modem answers these with the bare dash line, no "+SPENGMD:" prefix.
+sp_line() {
+    [ -n "$1" ] || return 0
+    printf '%s\n' "$1" | tr -d '\r' | grep -v '^AT' | grep -- '-' | head -n1
+}
+
+# sp_bit MODE LINE [PHYLINE]: the JSON fragment of one SPENGMD answer.
+#   lte    the LTE serving cell (0,6,0), with the (0,0,6) PHY line for SINR/MCS/BLER
+#   nr     the NR serving cell (0,14,1)
+#   ltenb  the LTE neighbour slots (0,6,6): eight 12-field slots, first 4 per slot are the reading
+# Ported from the mu300 cell collector (which verified it against a live network), trimmed to
+# what a status page needs. Its notes are load-bearing:
+#   * Unisoc writes negatives as "+<abs>" because "-" is the separator; normalize ",-" -> ",+"
+#     and "--" -> "-+" first, then split on "-". A token may carry a comma list (bandwidth codes,
+#     CA flags, MCS histograms); the scalar is the part before the first comma.
+#   * The dB values are centi-units, divided by 100 here -- never in shell arithmetic, which
+#     wraps at 32 bits.
+#   * BusyBox awk tags an all-digit field as a numeric string and can wrap a 36-bit cell id
+#     before it is read, so every field is stored behind an "x" prefix and stripped after.
+#   * The NR cell id and gNB id pass through as strings with a 2's-complement restore (u32), so
+#     they stay exact past 32 bits.
+#   * "NA"/"N/A"/empty mean no reading and become null, never 0: an engineering page full of
+#     fabricated zeroes is the one lie that survives a glance.
+sp_bit() {  # sp_bit MODE LINE [PHYLINE]
+    [ -n "$2" ] || { echo null; return; }
+    awk -v mode="$1" -v line="$2" -v phy="${3:-}" '
+        function jesc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); gsub(/\r/, "", s); return s }
+        function norm(l, arr,   s, n, i) {
+            s = l
+            gsub(/,-/, ",+", s); gsub(/--/, "-+", s); sub(/^-/, "+", s)
+            n = split(s, raw, "-")
+            for (i = 1; i <= n; i++) {
+                arr[i-1] = "x" raw[i]; gsub(/ /, "", arr[i-1]); arr[i-1] = substr(arr[i-1], 2)
+            }
+            return n
+        }
+        # scalar part of a token, sign restored ("+11747" -> -11747)
+        function f(x,   v) {
+            v = x; sub(/,.*/, "", v); gsub(/\+/, "-", v)
+            return (v == "" || v == "NA" || v == "N/A") ? "" : v + 0
+        }
+        function num(x) { return (x == "") ? "null" : x }
+        # centi-units -> one decimal
+        function c1(x) { if (x == "") return "null"; return sprintf("%.1f", x / 100) }
+        # large ids never go through arithmetic: a 36-bit cell id wraps at 32. This restores the
+        # 2 complement by hand and passes the token as a string.
+        function u32(v,   top, b, out, i, d, borrow) {
+            top = "4294967296"; b = v
+            while (length(b) < 10) b = "0" b
+            out = ""; borrow = 0
+            for (i = 10; i > 0; i--) {
+                d = substr(top, i, 1) - substr(b, i, 1) - borrow
+                if (d < 0) { d += 10; borrow = 1 } else borrow = 0
+                out = d out
+            }
+            sub(/^0+/, "", out); return (out == "") ? "0" : out
+        }
+        function fs(x,   v) {
+            v = x; sub(/,.*/, "", v)
+            if (v ~ /^\+/) v = u32(substr(v, 2))
+            return (v == "" || v == "NA" || v == "N/A") ? "null" : "\"" jesc(v) "\""
+        }
+        function lteband(fr,   a, b, r, i, n) {
+            n = split("1:0-599 2:600-1199 3:1200-1949 4:1950-2399 5:2400-2649 7:2750-3449 8:3450-3799 12:5010-5179 13:5180-5279 14:5280-5379 17:5730-5849 18:5850-5999 19:6000-6149 20:6150-6449 25:8040-8689 26:8690-9039 27:9040-9209 28:9210-9659 30:9770-9869 31:9870-9919 33:36000-36199 34:36200-36349 35:36350-36949 36:36950-37549 37:37550-37749 38:37750-38249 39:38250-38649 40:38650-39649 41:39650-41589 42:41590-43589 43:43590-45589 44:45590-46589 46:46790-54539 47:54540-55239 48:55240-56739 49:56740-58239 50:58240-59089 51:59090-59139 65:65536-66435 66:66436-67335", a, " ")
+            for (i = 1; i <= n; i++) { split(a[i], b, ":"); split(b[2], r, "-")
+                if (fr >= r[1] && fr <= r[2]) return b[1] }
+            return 0
+        }
+        function nrband(fr,   a, b, r, i, n) {
+            n = split("1:422000-434000 3:361000-376000 5:173800-178800 8:185000-192000 28:151600-160600 40:460000-480000 41:499200-537999 78:620000-653333 77:620000-680000 79:693334-733333", a, " ")
+            for (i = 1; i <= n; i++) { split(a[i], b, ":"); split(b[2], r, "-")
+                if (fr >= r[1] && fr <= r[2]) return b[1] }
+            return 0
+        }
+        BEGIN {
+            n = norm(line, t)
+            if (mode == "lte") {
+                band = f(t[0]); earfcn = f(t[1]); pci = f(t[2])
+                if ((band == 0 || band == "") && earfcn == 0 && pci == 0) { print "null"; exit }
+                # bandwidth codes (0..5 -> MHz), possibly a comma list of carriers
+                bw = ""; m = split(t[7], c, ",")
+                for (i = 1; i <= m; i++) { v = c[i] + 0
+                    w = (v == 0) ? 1.4 : (v == 1) ? 3 : (v == 2) ? 5 : (v == 3) ? 10 : (v == 4) ? 15 : (v == 5) ? 20 : 0
+                    if (w) bw = bw (bw == "" ? "" : "+") w "M" }
+                enb = f(t[11]); cidl = f(t[12])
+                tac = f(t[28]); if (tac == "" || tac == 0) tac = f(t[29])
+                # 0,0,6 carries the LTE PHY: token 2 = SINR (centi-dB), 3/4 = the UL/DL MCS
+                # histograms (the dominant index is the live MCS), 5/6 = BLER. Layout per
+                # ufi_tools, range-guarded: an idle or absent reading is all zeros, which means
+                # "no reading", not "0 dB".
+                psinr = pmcs = pumcs = publer = pdbler = ""
+                if (phy != "") {
+                    np = norm(phy, u)
+                    s2 = f(u[2])
+                    if (s2 != "" && s2 >= -2000 && s2 <= 4000) psinr = sprintf("%.1f", s2 / 100)
+                    publer = c1(f(u[5])); pdbler = c1(f(u[6]))
+                    for (dir = 3; dir <= 4; dir++) {
+                        m2 = split(u[dir], h, ","); best = -1; bestn = 0; total = 0
+                        for (i = 1; i <= m2; i++) { hv = h[i] + 0; total += hv
+                            if (hv > bestn) { bestn = hv; best = i - 1 } }
+                        if (total > 0 && best >= 0) {
+                            if (dir == 4) pmcs = best; else pumcs = best
+                        }
+                    }
+                }
+                printf "{\"rat\":\"lte\",\"band\":%d,\"earfcn\":%d,\"pci\":%d,\"rsrp\":%s,\"rsrq\":%s,\"bw\":\"%s\",\"enb\":%s,\"cid\":%s,\"tac\":%s,\"ca\":\"%s\",\"sinr\":%s,\"dl_mcs\":%s,\"ul_mcs\":%s,\"dl_bler\":%s,\"ul_bler\":%s}",
+                    band, earfcn, pci, c1(f(t[3])), c1(f(t[4])), bw, num(enb), num(cidl),
+                    (tac == "") ? "null" : sprintf("\"%x\"", tac),
+                    (index(t[13], "DL_CA") ? "DL_CA" : ""),
+                    (psinr == "" ? "null" : psinr),
+                    (pmcs == "" ? "null" : pmcs), (pumcs == "" ? "null" : pumcs),
+                    (pdbler == "" ? "null" : pdbler), (publer == "" ? "null" : publer)
+            } else if (mode == "nr") {
+                band = f(t[0]); arfcn = f(t[1]); pci = f(t[2])
+                if ((band == 0 || band == "") && arfcn == 0 && pci == 0) { print "null"; exit }
+                bw = f(t[7])
+                printf "{\"rat\":\"nr\",\"band\":%d,\"arfcn\":%d,\"pci\":%d,\"rsrp\":%s,\"rsrq\":%s,\"sinr\":%s,\"bw_mhz\":%s,\"gnb\":%s,\"cid\":%s,\"ul_mcs\":%s,\"dl_mcs\":%s,\"ul_bler\":%s,\"dl_bler\":%s}",
+                    band, arfcn, pci, c1(f(t[3])), c1(f(t[4])), c1(f(t[15])), num(bw),
+                    fs(t[8]), fs(t[9]),
+                    num(f(t[16])), num(f(t[17])), c1(f(t[18])), c1(f(t[19]))
+            } else {   # ltenb: eight 12-field slots, first four are EARFCN/PCI/RSRP/RSRQ
+                out = ""
+                for (s = 0; s < 8; s++) {
+                    b = s * 12; if (b + 3 >= n) break
+                    earfcn = f(t[b]); pci = f(t[b+1])
+                    if (earfcn == 0 && pci == 0) continue
+                    out = out sprintf("{\"rat\":\"lte\",\"band\":%d,\"arfcn\":%d,\"pci\":%d,\"rsrp\":%s,\"rsrq\":%s},",
+                        lteband(earfcn), earfcn, pci, c1(f(t[b+2])), c1(f(t[b+3])))
+                }
+                sub(/,$/, "", out); print out
+            }
+        }'
+}
+
+# nrnb_json LINE: the NR neighbour table (AT+SPQ5GNCELLEX, CSV): an 8-tuple serving header, the
+# neighbour count at index 9, then one 8-tuple per cell (ARFCN, PCI, RSRP, RSRQ, SINR centi-dB).
+# Valueless fields become null, not 0. Prints the comma-joined cells, no brackets.
+nrnb_json() {
+    [ -n "$1" ] || { echo ""; return; }
+    printf '%s\n' "$1" | awk -F',' '
+        function nrband(fr,   a, b, r, i, n) {
+            n = split("1:422000-434000 3:361000-376000 5:173800-178800 8:185000-192000 28:151600-160600 40:460000-480000 41:499200-537999 78:620000-653333 77:620000-680000 79:693334-733333", a, " ")
+            for (i = 1; i <= n; i++) { split(a[i], b, ":"); split(b[2], r, "-")
+                if (fr >= r[1] && fr <= r[2]) return b[1] }
+            return 0
+        }
+        function cn(x,   v) { v = x; gsub(/[ \t]/, "", v)
+            if (v ~ /^[0-9]+$/) return sprintf("%.1f", v / 100)
+            if (v ~ /^-[0-9]+$/) { v = substr(v, 2); return sprintf("-%.1f", v / 100) }
+            return "null" }
+        {   cnt = $9 + 0
+            out = ""
+            for (i = 0; i < cnt && i < 8; i++) {
+                b = 9 + i * 8; if (b + 5 > NF) break
+                fr = $(b + 1) + 0; pci = $(b + 2) + 0
+                if (fr == 0 && pci == 0) continue
+                out = out sprintf("{\"rat\":\"nr\",\"band\":%d,\"arfcn\":%d,\"pci\":%d,\"rsrp\":%s,\"rsrq\":%s,\"sinr\":%s},",
+                    nrband(fr), fr, pci, cn($(b + 3)), cn($(b + 4)), cn($(b + 5)))
+            }
+            sub(/,$/, "", out); print out
+        }'
+}
+
+# statv FILE: the number in a sysfs statistics file, or empty (the caller's null).
+statv() {
+    [ -r "$1" ] || return 0
+    tr -cd '0-9' <"$1" 2>/dev/null
+}
+
+# The whole round runs against a deadline: a modem that stopped answering must cost the deadline
+# once, not the answer timeout once per command (the failure the upstream cell collector documents,
+# and fixes the same way). Past it every remaining call fails at once.
+case ${CHANGXING60_NET_STATUS_DEADLINE:-} in
+    ''|*[!0-9]*) [ "$FAST" = 1 ] && DEADLINE_S=15 || DEADLINE_S=30 ;;
+    *) DEADLINE_S=$CHANGXING60_NET_STATUS_DEADLINE ;;
+esac
+DEADLINE=$(( $(date +%s) + DEADLINE_S ))
+
+# --------------------------------------------------------------------- AT round
+# One command each. Every answer is reduced to the JSON fragment it contributes; a command the
+# modem did not answer contributes null for each of its fields, which is what "unknown" must look
+# like here. The variables hold the raw answers so that the human form and the JSON form are the
+# same round, never two.
+
+AT_BUSY=0; AT_DEAD=0; AT_SILENT=0
+at 'AT+CFUN?' 3; CFUN=$AT_OUT
+at 'AT+CEREG?' 3; CEREG=$AT_OUT
+at 'AT+C5GREG?' 3; C5GREG=$AT_OUT
+at 'AT+COPS?' 3; COPS=$AT_OUT
+at 'AT+CSQ' 3; CSQ=$AT_OUT
+at 'AT+CESQ' 3; CESQ=$AT_OUT
+
+ANY_ANSWERED=0
+[ -n "$CFUN$CEREG$C5GREG$COPS$CSQ$CESQ" ] && ANY_ANSWERED=1
+
+# The engineering reads have no useful answer while the modem is searching or without service --
+# skipping them avoids a chain of AT timeouts (the mu300 collector does the same).
+R4=$(reg_stat "$CEREG"); R5=$(reg_stat "$C5GREG")
+REGISTERED=0
+case "$R4:$R5" in 1:*|5:*|10:*|*:1|*:5|*:10) REGISTERED=1 ;; esac
+
+SP_LTE=; SP_LTEPHY=; SP_NR=; SP_LN=; SP_NRNB=
+# Why the engineering reads are missing, when they are. The two reasons are not the same thing, and
+# saying "the modem did not report" for either would be a claim about the modem that it was never given
+# the chance to make -- the same fabricated answer as a 0 for an unanswered read, one level up. Empty
+# means the reads were made, and a serving cell that is then null really is the modem's answer.
+SP_SKIP=
+if [ "$FAST" = 1 ]; then
+    SP_SKIP=fast
+elif [ "$ANY_ANSWERED" != 1 ] || [ "$REGISTERED" != 1 ]; then
+    SP_SKIP=unregistered
+fi
+if [ -z "$SP_SKIP" ]; then
+    at 'AT+SPENGMD=0,6,0' 3; SP_LTE=$(sp_line "$AT_OUT")
+    at 'AT+SPENGMD=0,0,6' 3; SP_LTEPHY=$(sp_line "$AT_OUT")
+    at 'AT+SPENGMD=0,14,1' 3; SP_NR=$(sp_line "$AT_OUT")
+    at 'AT+SPENGMD=0,6,6' 3; SP_LN=$(sp_line "$AT_OUT")
+    at 'AT+SPQ5GNCELLEX' 3; SP_NRNB=$(printf '%s\n' "$AT_OUT" | sed -n 's/^+SPQ5GNCELLEX: *//p' | head -n1)
+fi
+
+TS=$(date +%s 2>/dev/null)
+TIME=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)
+
+# --------------------------------------------------------------------- fragments
+REGJ=$(reg_json "$CEREG")
+REG5J=$(reg_json "$C5GREG")
+OPSJ=$(ops_json "$COPS")
+CSQJ=$(csq_json "$CSQ")
+CESQJ=$(cesq_json "$CESQ")
+CFUNN=$(printf '%s' "$CFUN" | tr -d '\r' | sed -n 's/^+CFUN: *\([0-9][0-9]*\).*/\1/p' | head -n1)
+CFUNN=$(json_num "$CFUNN")
+
+# serving cells: "null" (unanswered, or all zeros = not on this RAT) reads as absent
+LTE_J=$(sp_bit lte "$SP_LTE" "$SP_LTEPHY")
+[ "$LTE_J" = null ] && LTE_J=
+NR_J=$(sp_bit nr "$SP_NR")
+[ "$NR_J" = null ] && NR_J=
+
+# neighbours: answered-but-empty is [], unanswered is null
+NB_LTE=null; NB_NR=null
+if [ -n "$SP_LN" ]; then
+    LNB=$(sp_bit ltenb "$SP_LN")
+    NB_LTE="[$LNB]"
+fi
+if [ -n "$SP_NRNB" ]; then
+    NNB=$(nrnb_json "$SP_NRNB")
+    NB_NR="[$NNB]"
+fi
+
+# traffic: kernel counters, not an AT command; a missing interface is
+# present false, not a table of zeroes. NET is the sysfs root, a test seam
+# (a host-side run has no /sys/class/net/sipa_eth0).
+NET=${CHANGXING60_NET_STATUS_SYS:-/sys/class/net}
+IF_PRES=0; OPER=; RX=; TX=; RXP=; TXP=
+if [ -d "$NET/$IFACE" ]; then
+    IF_PRES=1
+    OPER=$(cat "$NET/$IFACE/operstate" 2>/dev/null || true)
+    RX=$(statv "$NET/$IFACE/statistics/rx_bytes")
+    TX=$(statv "$NET/$IFACE/statistics/tx_bytes")
+    RXP=$(statv "$NET/$IFACE/statistics/rx_packets")
+    TXP=$(statv "$NET/$IFACE/statistics/tx_packets")
+fi
+
+# "no answer at all" is a modem or daemon problem, not "no signal": say which, keep the round's
+# failure out of the numbers.
+if [ "$ANY_ANSWERED" != 1 ]; then
+    if [ "$AT_BUSY" = 1 ]; then
+        msg='AT channel was busy the whole round (another client holds it)'
+        busy='"busy":1,'
+    elif [ "$AT_DEAD" = 1 ]; then
+        msg='changxing60-atd is not running (nothing reads the AT channel)'
+        busy=
+    elif [ "$(( DEADLINE - $(date +%s) ))" -le 0 ]; then
+        msg="nothing answered within the round's ${DEADLINE_S}s (radio off, modem restarting, or the adapter busy elsewhere)"
+        busy=
+    else
+        msg='AT backend did not answer (radio off, modem restarting, or adapter unavailable)'
+        busy=
+    fi
+    if [ "$MODE" = json ]; then
+        printf '{"ts":%s,"time":%s,%s"error":%s}\n' \
+            "$(json_num "$TS")" "$(json_str "$TIME")" "$busy" "$(json_str "$msg")"
+    else
+        printf '== changxing60 cell status %s ==\n' "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"
+        printf '  modem: no answer (%s)\n' "$msg"
+    fi
+    exit 1
+fi
+
+# the quality summary, preferred source first: the SPENGMD serving cells carry the real
+# engineering values, CESQ is the 27.007 fallback, CSQ the last resort
+SRC=none; SIG_RSRP=null; SIG_RSRQ=null; SIG_SINR=null; SIG_RSSI=null
+if [ -n "$NR_J" ]; then
+    SRC=nr
+    SIG_RSRP=$(jget "$NR_J" rsrp); SIG_RSRQ=$(jget "$NR_J" rsrq); SIG_SINR=$(jget "$NR_J" sinr)
+elif [ -n "$LTE_J" ]; then
+    SRC=lte
+    SIG_RSRP=$(jget "$LTE_J" rsrp); SIG_RSRQ=$(jget "$LTE_J" rsrq); SIG_SINR=$(jget "$LTE_J" sinr)
+elif [ "$CESQJ" != '{"rsrp":null,"rsrq":null}' ]; then
+    SRC=cesq
+    SIG_RSRP=$(jget "$CESQJ" rsrp); SIG_RSRQ=$(jget "$CESQJ" rsrq)
+elif [ "$CSQJ" != '{"rssi":null,"ber":null}' ]; then
+    SRC=csq
+    SIG_RSSI=$(jget "$CSQJ" rssi)
+fi
+
+# --------------------------------------------------------------------- reports
+# v VALUE: "-" for a null/empty field in the human form (a dash is what the JSON side makes null)
+v() { case $1 in ''|null) printf '%s' - ;; *) printf '%s' "$1" ;; esac; }
+# s STRINGVALUE: the same, for values json emitted in quotes
+s() { case $1 in ''|null) printf '%s' - ;; *) printf '%s' "$1" | tr -d '"' ;; esac; }
+# statw N: the stat field of a registration answer in words (27.007 8.18); anything else is shown
+# as its number, never hidden
+statw() {
+    case $1 in
+        1) echo home ;;
+        5) echo roaming ;;
+        ''|null) echo - ;;
+        *) echo "stat $1" ;;
+    esac
+}
+n_of() { printf '%s\n' "$1" | grep -o '"rat":"' 2>/dev/null | wc -l | tr -d ' '; }
+# sp_none WHAT: why an engineering read has no answer, in the words the reader needs. Only when the
+# reads were actually made is a missing cell the modem's own answer -- otherwise it says who decided
+# not to ask. WHAT is what should follow "the modem did not report".
+sp_none() {
+    case $SP_SKIP in
+        fast)         printf 'not asked (--fast)' ;;
+        unregistered) printf 'not asked (not registered)' ;;
+        *)            printf 'the modem did not report %s' "$1" ;;
+    esac
+}
+
+report_json() {
+    printf '{"ts":%s,"time":%s,"cfun":%s,"reg":%s,"reg5":%s,"ops":%s,"eng_skip":%s,"serving":{"lte":%s,"nr":%s},"sig":{"source":"%s","rsrp":%s,"rsrq":%s,"sinr":%s,"rssi":%s},"csq":%s,"cesq":%s,"neighbours":{"lte":%s,"nr":%s},"traffic":{"iface":%s,"present":%d,"operstate":%s,"rx_bytes":%s,"tx_bytes":%s,"rx_packets":%s,"tx_packets":%s}}\n' \
+        "$(json_num "$TS")" "$(json_str "$TIME")" "$(json_num "$CFUNN")" \
+        "$REGJ" "$REG5J" "$OPSJ" \
+        "$(json_str "$SP_SKIP")" \
+        "${LTE_J:-null}" "${NR_J:-null}" \
+        "$SRC" "$SIG_RSRP" "$SIG_RSRQ" "$SIG_SINR" "$SIG_RSSI" \
+        "$CSQJ" "$CESQJ" "$NB_LTE" "$NB_NR" \
+        "$(json_str "$IFACE")" "$IF_PRES" "$(json_str "$OPER")" \
+        "$(json_num "$RX")" "$(json_num "$TX")" "$(json_num "$RXP")" "$(json_num "$TXP")"
+}
+
+report_human() {
+    printf '== changxing60 cell status %s ==\n' "$(v "$TIME")"
+    printf '  radio      cfun %s\n' "$(v "$CFUNN")"
+    printf '  reg LTE    %s  tac %s  cid %s  act %s\n' \
+        "$(statw "$(jget "$REGJ" stat)")" "$(s "$(jget "$REGJ" tac)")" \
+        "$(s "$(jget "$REGJ" cid)")" "$(v "$(jget "$REGJ" act)")"
+    printf '  reg NR     %s  tac %s  cid %s  act %s\n' \
+        "$(statw "$(jget "$REG5J" stat)")" "$(s "$(jget "$REG5J" tac)")" \
+        "$(s "$(jget "$REG5J" cid)")" "$(v "$(jget "$REG5J" act)")"
+    # This network answers in numeric format (format 2), so there is no name to show and the PLMN is
+    # what identifies the operator. Fall back to it rather than print a bare "-" over an answer we do
+    # have -- measured on the device 2026-10-16: "+COPS: 0,2,\"46000\",11".
+    _opsname=$(s "$(jget "$OPSJ" name)")
+    [ "$_opsname" = - ] && _opsname=$(s "$(jget "$OPSJ" plmn)")
+    printf '  operator   %s  act %s\n' "$_opsname" "$(v "$(jget "$OPSJ" act)")"
+    printf '  serving LTE\n'
+    if [ -n "$LTE_J" ]; then
+        printf '    band %s earfcn %s pci %s  rsrp %s dBm  rsrq %s dB  bw %s  sinr %s dB  tac %s cid %s\n' \
+            "$(v "$(jget "$LTE_J" band)")" "$(v "$(jget "$LTE_J" earfcn)")" \
+            "$(v "$(jget "$LTE_J" pci)")" "$(v "$(jget "$LTE_J" rsrp)")" \
+            "$(v "$(jget "$LTE_J" rsrq)")" "$(s "$(jget "$LTE_J" bw)")" \
+            "$(v "$(jget "$LTE_J" sinr)")" "$(s "$(jget "$LTE_J" tac)")" \
+            "$(s "$(jget "$LTE_J" cid)")"
+    else
+        printf '    none (%s)\n' "$(sp_none 'an LTE serving cell')"
+    fi
+    printf '  serving NR\n'
+    if [ -n "$NR_J" ]; then
+        printf '    band %s arfcn %s pci %s  rsrp %s dBm  rsrq %s dB  sinr %s dB  bw %s MHz\n' \
+            "$(v "$(jget "$NR_J" band)")" "$(v "$(jget "$NR_J" arfcn)")" \
+            "$(v "$(jget "$NR_J" pci)")" "$(v "$(jget "$NR_J" rsrp)")" \
+            "$(v "$(jget "$NR_J" rsrq)")" "$(v "$(jget "$NR_J" sinr)")" \
+            "$(v "$(jget "$NR_J" bw_mhz)")"
+    else
+        printf '    none (%s)\n' "$(sp_none 'an NR serving cell')"
+    fi
+    printf '  signal     src %s  rsrp %s  rsrq %s  sinr %s  rssi %s dBm\n' \
+        "$SRC" "$(v "$SIG_RSRP")" "$(v "$SIG_RSRQ")" "$(v "$SIG_SINR")" "$(v "$SIG_RSSI")"
+    printf '  csq        rssi %s dBm  ber %s\n' \
+        "$(v "$(jget "$CSQJ" rssi)")" "$(v "$(jget "$CSQJ" ber)")"
+    printf '  cesq       rsrp %s  rsrq %s\n' \
+        "$(v "$(jget "$CESQJ" rsrp)")" "$(v "$(jget "$CESQJ" rsrq)")"
+    # null prints as -, never as 0: 0 would claim the modem looked and found none. Under --fast the
+    # reads were never made, so it says that instead -- "-" would read as "looked, found none".
+    if [ -n "$SP_SKIP" ]; then
+        printf '  neighbours %s\n' "$(sp_none 'any neighbour cell')"
+    else
+        printf '  neighbours lte %s  nr %s\n' \
+            "$(case $NB_LTE in null) printf -- -;; *) n_of "$NB_LTE";; esac)" \
+            "$(case $NB_NR in null) printf -- -;; *) n_of "$NB_NR";; esac)"
+    fi
+    if [ "$IF_PRES" = 1 ]; then
+        printf '  traffic    %s %s  rx %s B  tx %s B  pkt %s/%s\n' \
+            "$IFACE" "$(v "$OPER")" \
+            "$(v "$RX")" "$(v "$TX")" "$(v "$RXP")" "$(v "$TXP")"
+    else
+        printf '  traffic    interface %s not present\n' "$IFACE"
+    fi
+}
+
+case $MODE in
+    json) report_json ;;
+    *)    report_human ;;
+esac

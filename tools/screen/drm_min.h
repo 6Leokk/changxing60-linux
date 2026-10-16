@@ -4,8 +4,8 @@
  * without DRM_FBDEV_EMULATION), so the status page talks to /dev/dri/card0 with the raw ioctls
  * instead of linking a library. Layouts below are the stable kernel ABI (include/uapi/drm/drm_mode.h).
  */
-#ifndef MU300_DRM_MIN_H
-#define MU300_DRM_MIN_H
+#ifndef CHANGXING60_DRM_MIN_H
+#define CHANGXING60_DRM_MIN_H
 
 #include <stdint.h>
 #include <sys/ioctl.h>
@@ -71,7 +71,7 @@ struct drm_mode_crtc_page_flip {
 };
 
 /* Events come back through read() on the DRM fd as {type, length} + payload; the flip event's
- * payload is drm_event_vblank. Needed for the double buffering in mu300-screen.c. */
+ * payload is drm_event_vblank. Needed for the double buffering in changxing60-screen.c. */
 struct drm_event {
 	u32 type, length;
 };
@@ -104,4 +104,4 @@ struct drm_event_vblank {
 #define DRM_IOCTL_MODE_MAP_DUMB     DRM_IOWR(0xB3, struct drm_mode_map_dumb)
 #define DRM_IOCTL_MODE_DESTROY_DUMB DRM_IOWR(0xB4, struct drm_mode_create_dumb)
 
-#endif /* MU300_DRM_MIN_H */
+#endif /* CHANGXING60_DRM_MIN_H */

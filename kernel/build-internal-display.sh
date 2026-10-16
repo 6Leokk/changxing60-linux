@@ -17,12 +17,12 @@
 #                   both defer forever. See ext-vpu-pd/Makefile.
 #
 # Nothing here touches the kernel image, so the 109 boot modules keep their CRCs untouched.
-# Run inside mu300-kbuild with the mu300-kernel volume on /src and mu300-linux/kernel on /work.
+# Run inside changxing60-kbuild with the changxing60-kernel volume on /src and changxing60-linux/kernel on /work.
 set -e
 K=/src/zte-u30air
 OUT=/src/out-display
 # CROSS_COMPILE=aarch64-linux-gnu- is required when the host is x86_64 (route A of
-# docs/mu300/port-design.md), exactly as build-linux.sh does it -- without it clang tries to
+# docs/changxing60/port-design.md), exactly as build-linux.sh does it -- without it clang tries to
 # assemble the arm64 inline asm as x86_64 and dies on "unknown register name 'x0' in asm".
 M="make O=/src/out-linux ARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld ${CROSS_COMPILE:+CROSS_COMPILE=$CROSS_COMPILE} -j${JOBS:-$(nproc)}"
 mkdir -p $OUT

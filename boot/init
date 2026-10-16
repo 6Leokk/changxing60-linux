@@ -1,5 +1,5 @@
 #!/bin/busybox sh
-# MU300 standalone Linux initramfs v10 (switch_root to Ubuntu on the free eMMC region; comm fix; custom kernel + modem_control + node perms + slot a modem) (slot b, tries=2 one-shot trial).
+# changxing60 standalone Linux initramfs v10 (switch_root to Ubuntu on the free eMMC region; comm fix; custom kernel + modem_control + node perms + slot a modem) (slot b, tries=2 one-shot trial).
 # Every stage is written to /dev/kmsg at KERN_ERR so it survives in
 # /sys/fs/pstore/console-ramoops-0 after the fallback boot into Android.
 /bin/busybox mkdir -p /bin /sbin /proc /sys /dev /run /tmp /root /etc /config
@@ -21,8 +21,8 @@ pmsg_major=$(awk '$2=="pmsg"{print $1}' /proc/devices)
 [ -n "$pmsg_major" ] && [ ! -e /dev/pmsg0 ] && mknod /dev/pmsg0 c "$pmsg_major" 0
 
 log() {
-    echo "<3>MU300-LINUX: $*" > /dev/kmsg
-    [ -c /dev/pmsg0 ] && echo "MU300-LINUX: $*" > /dev/pmsg0
+    echo "<3>CHANGXING60-LINUX: $*" > /dev/kmsg
+    [ -c /dev/pmsg0 ] && echo "CHANGXING60-LINUX: $*" > /dev/pmsg0
     [ -d /run ] && echo "$(cut -d' ' -f1 /proc/uptime) $*" >> /run/stages
 }
 
@@ -47,7 +47,7 @@ persist() {
     # the periodic loop and the reboot timer both call this
     mkdir /run/persist.lock 2>/dev/null || return
     {
-        echo "MU300-PERSIST-BEGIN uptime=$(cut -d' ' -f1 /proc/uptime)"
+        echo "CHANGXING60-PERSIST-BEGIN uptime=$(cut -d' ' -f1 /proc/uptime)"
         cat /run/stages
         echo "--- lsmod"
         cat /proc/modules
@@ -61,7 +61,7 @@ persist() {
         cat /sys/kernel/debug/devices_deferred 2>&1
         echo "--- dmesg"
         dmesg | tail -c 6000000
-        echo "MU300-PERSIST-END"
+        echo "CHANGXING60-PERSIST-END"
     } > /run/persist.txt 2>&1
     head -c 65536 /dev/zero >> /run/persist.txt
     dd if=/run/persist.txt of="$bootb" bs=4096 seek=14336 count=1024 conv=notrunc 2>/dev/null
@@ -177,7 +177,7 @@ log "stage=persist-target dev=${bootb:-none} rootdisk=$rootdisk"
 persist
 (while :; do sleep 15; persist; done) &
 
-hostname mu300-linux
+hostname changxing60-linux
 # One-line state of the USB chain, written to the persist window: which phys registered,
 # whether the glue's phy device is bound, and what is still deferred.
 log "stage=usb-phy-state dummyphy_dev=[$(ls -d /sys/bus/platform/devices/*dummyphy* 2>/dev/null | tr '\n' ',')] dummyphy_drv=[$(readlink /sys/bus/platform/devices/*dummyphy*/driver 2>/dev/null | tr '\n' ',')] phyclass=[$(ls /sys/class/phy 2>/dev/null | tr '\n' ',')] udc=[$(ls /sys/class/udc 2>/dev/null | tr '\n' ',')] deferred=[$(cat /sys/kernel/debug/devices_deferred 2>/dev/null | tr '\n' ' ')]"
@@ -202,9 +202,9 @@ echo 0xa4a3 > "$g/idProduct"   # PID must change whenever the descriptor set cha
                                 # Windows caches descriptors+OS-desc probe per VID/PID/serial
                                 # (a4a1=trials 4/5 ACM+empty, a4a2=trial-6 RNDIS, a4a3=NCM)
 echo 0x0200 > "$g/bcdUSB"
-echo MU300LINUX > "$g/strings/0x409/serialnumber"
+echo CHANGXING60LINUX > "$g/strings/0x409/serialnumber"
 echo Linux > "$g/strings/0x409/manufacturer"
-echo "MU300 Linux USB Ethernet" > "$g/strings/0x409/product"
+echo "changxing60 Linux USB Ethernet" > "$g/strings/0x409/product"
 echo "Linux NET + ACM console" > "$g/configs/c.1/strings/0x409/configuration"
 echo 250 > "$g/configs/c.1/MaxPower"
 if [ -n "$netfn" ]; then
@@ -257,17 +257,17 @@ persist
 for n in $(seq 1 10); do [ -e /sys/class/net/usb0 ] && break; sleep 1; done
 ifconfig usb0 up
 log "stage=usb0-netdevs $(ls /sys/class/net | tr '\n' ',')"
-ROOT_OFFSET=77858865152   # 7552N: mu300root region after the shrunk userdata (design S3.2);
+ROOT_OFFSET=77858865152   # 7552N: changxing60root region after the shrunk userdata (design S3.2);
                           # before Phase 3 repartition this offset is inside f2fs userdata, the
                           # ext4 magic check fails and init takes the rescue path (by design).
 mkdir -p /newroot
 # busybox mount only sets up a loop for regular files; for a block device the loop options would
 # be handed to ext4 (EINVAL), so attach the loop explicitly and verify its offset
-# The ext4 area holds one or more systems: /ubuntu, /openwrt (selected by /.mu300/boot-os), or a single
+# The ext4 area holds one or more systems: /ubuntu, /openwrt (selected by /.changxing60/boot-os), or a single
 # Ubuntu directly in its root (first installs). Pick one and remember how to start it.
 has_init() { [ -x "$1/lib/systemd/systemd" ] || [ -x "$1/sbin/init" ]; }
 pick_root() {
-    want=$(cat /disk/.mu300/boot-os 2>/dev/null)
+    want=$(cat /disk/.changxing60/boot-os 2>/dev/null)
     for os in $want ubuntu openwrt; do
         [ -d "/disk/$os" ] && has_init "/disk/$os" && { echo "/disk/$os"; return; }
         # legacy layout: Ubuntu in the filesystem root
@@ -286,18 +286,18 @@ if [ -n "$rootloop" ] && losetup -o $ROOT_OFFSET "$rootloop" /dev/$rootdisk 2>>/
     else
         mount --bind "$rootdir" /newroot
         # keep the whole disk reachable from inside (switching systems, editing the other one)
-        mkdir -p /newroot/mnt/mu300-disk && mount --move /disk /newroot/mnt/mu300-disk
+        mkdir -p /newroot/mnt/changxing60-disk && mount --move /disk /newroot/mnt/changxing60-disk
     fi
     # Default-Linux mode: leave LK's decremented tries (b: tries 1, not successful). Userspace re-arms slot b
     # (tries 2) once the system is up; if it never gets there, LK falls back to Android on the next boot.
-    if [ "$(cat /newroot/etc/mu300/default-boot 2>/dev/null)" = linux ]; then
+    if [ "$(cat /newroot/etc/changxing60/default-boot 2>/dev/null)" = linux ]; then
         log "stage=default-boot-linux (slot a restore skipped)"
     else
         restore_slot_a
     fi
-    mkdir -p /run/mu300 && cp /etc/misc-bc-slot-a.bin /etc/misc-bc-slot-b-trial.bin /run/mu300/
-    [ -n "$misc" ] && echo "$misc" > /run/mu300/misc-dev
-    echo "$rootloop" > /run/mu300/disk-dev
+    mkdir -p /run/changxing60 && cp /etc/misc-bc-slot-a.bin /etc/misc-bc-slot-b-trial.bin /run/changxing60/
+    [ -n "$misc" ] && echo "$misc" > /run/changxing60/misc-dev
+    echo "$rootloop" > /run/changxing60/disk-dev
     # Bring the modem CP up BEFORE switch_root. This is the proven 5.4 sequence (persist
     # log of the live 5.4 boot: ext4-modem_control-started pid=2540 -> "Modem Alive" at
     # +7 s, from this same block in the v10 ramdisk init). The rootfs S11 chroot start of
@@ -403,7 +403,7 @@ touch /run/udhcpd.leases
 udhcpd /etc/udhcpd.conf
 telnetd -b 192.168.77.1 -p 23 -l /bin/sh
 mkdir -p /run/www
-echo "MU300 standalone Linux v9 (NCM+ACM): telnet/http 192.168.77.1; serial console ttyGS0; auto reboot to Android after 300s unless /run/stay exists" > /run/www/index.html
+echo "changxing60 standalone Linux v9 (NCM+ACM): telnet/http 192.168.77.1; serial console ttyGS0; auto reboot to Android after 300s unless /run/stay exists" > /run/www/index.html
 # E23: the boot-time daemonized httpd came up BOTH in trial-7 and trial-8 as a socketless
 # 100%-CPU spinner (fd table = 0,1,2 only, no listen socket, poll() busy-looping on
 # POLLNVAL; utime+stime == process lifetime), while telnetd/udhcpd started fine and the
@@ -423,7 +423,7 @@ echo "MU300 standalone Linux v9 (NCM+ACM): telnet/http 192.168.77.1; serial cons
 if [ -e /dev/ttyGS0 ]; then
     ( stty raw -echo < /dev/ttyGS0 2>/dev/null
       while :; do
-          echo "mu300-linux rescue console (type Enter)" > /dev/ttyGS0
+          echo "changxing60-linux rescue console (type Enter)" > /dev/ttyGS0
           /bin/sh -i < /dev/ttyGS0 > /dev/ttyGS0 2>&1
       done ) &
     log "stage=ttyGS0-console on"

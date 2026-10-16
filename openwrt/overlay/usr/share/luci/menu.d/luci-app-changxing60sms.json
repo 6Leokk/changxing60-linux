@@ -1,0 +1,1 @@
+{"admin/services/changxing60sms": {"title": "SMS", "order": 60, "action": {"type": "view", "path": "changxing60sms/sms"}, "depends": {"acl": ["luci-app-changxing60sms"]}}, "admin/services/changxing60fwd": {"title": "SMS forwarding", "order": 62, "action": {"type": "view", "path": "changxing60fwd/fwd"}, "depends": {"acl": ["luci-app-changxing60sms"]}}}

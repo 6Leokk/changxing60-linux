@@ -70,9 +70,9 @@ soft lockup panic in dele-4-5 (seen at a 6.18 shutdown on the U30 Air).
 @@ -177,10 +186,16 @@
  	s_cp_delegator->delegator.pd_get_flag = false;
  	s_cp_delegator->delegator.smsg_cnt = 0;
- 	/* MU300: its result used to be ignored, so a PROD_CP it had deleted again went unnoticed */
+ 	/* changxing60: its result used to be ignored, so a PROD_CP it had deleted again went unnoticed */
 +	/*
-+	 * MU300: runtime PM before the start: the connection thread starts in there and can be handed an ENABLE at
++	 * changxing60: runtime PM before the start: the connection thread starts in there and can be handed an ENABLE at
 +	 * once, which now fails on a device whose runtime PM is still off (-EACCES) instead of spinning until it is on
 +	 */
 +	pm_runtime_enable(s_cp_delegator->delegator.pdev);
@@ -85,4 +85,4 @@ soft lockup panic in dele-4-5 (seen at a 6.18 shutdown on the U30 Air).
 +	}
  
  	/*
- 	 * MU300: the Wi-Fi offload path, which this device does not use (the CONS_WIFI resources stay released): a
+ 	 * changxing60: the Wi-Fi offload path, which this device does not use (the CONS_WIFI resources stay released): a

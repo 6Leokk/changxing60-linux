@@ -1,0 +1,122 @@
+#!/bin/sh
+# The detached half of a send from the control panel (the rpcd backend is /usr/share/rpcd/ucode/changxing60sms).
+#
+# A send waits for the modem's +CMGS, and changxing60-sms's whole transaction can take longer than rpcd allows a call
+# (rpcd ends a call at 30 s; changxing60-at's own lock wait is 90 s), so the send runs here, detached, and the page asks
+# after it through the plugin's job method. Without this a slow send was killed with the call, its result lost,
+# and the message gone out - or not - behind the page's back.
+#
+# The job directory is the claim, and taking it is atomic: mkdir without -p succeeds for exactly one caller. Two
+# sends at once therefore never write their number and text into the same directory, where one caller's text could
+# have gone to the other's number. One send at a time, and nothing is ever submitted twice by itself.
+#
+#   changxing60-sms-job claim            take the claim for a send (exit 1 = another send holds it)
+#   changxing60-sms-job start NUMBER     hand the claimed job to a detached run: it reads the text from the job
+#                                  directory, sends it, and writes how it went back there
+#   changxing60-sms-job state            "none", or "running SECONDS LIMIT", or "done SECONDS ENDED"
+#   changxing60-sms-job reply            what changxing60-sms printed (exit 1 = there is none)
+#   changxing60-sms-job run JOBDIR       the detached half itself
+#
+# Between claim and start the caller writes the two files the job is made of: $ROOT/job/num is start's argument,
+# and $ROOT/job/text is the message, written by the caller under the claim it holds. That is the whole contract
+# between this and the plugin (rpcd plugin dir /usr/share/rpcd/ucode/changxing60sms.uc).
+#
+# The number and the text are read from files in the job directory, never from the command line: argv is world
+# readable through ps, and the text is a private message. The directory is 0700 under a runtime directory of the
+# same, so nothing but root reads either.
+set -u
+export PATH="$PATH:/opt/changxing60/bin:/opt/changxing60/busybox-bin:/usr/sbin:/sbin"
+
+SMS=${CHANGXING60_SMS_BIN:-/opt/changxing60/bin/changxing60-sms}
+ROOT=${CHANGXING60_SMS_JOB_DIR:-/var/run/changxing60sms}
+JOB=$ROOT/job
+LIMIT=${CHANGXING60_SMS_JOB_T:-200}
+# changxing60-sms waits this long for changxing60-at's lock; a send that finds the channel busy should say so in seconds
+: "${CHANGXING60_AT_LOCK_WAIT:=12}"
+export CHANGXING60_AT_LOCK_WAIT
+
+now() { date +%s; }
+
+# A job that has not written its pid yet is allowed this long to do so, so that a caller cannot mistake a live
+# send for a dead one. The same ten seconds the plugin allows a claim to be started.
+STARTUP_GRACE=10
+
+# private_dir DIR: the runtime directory must be ours, a directory, and not writable by group or others - it holds
+# a message before it is sent. Refusing is the safe answer: without it a send is not started at all.
+private_dir() {
+    (umask 077; mkdir -p "$1") 2>/dev/null
+    if [ -L "$1" ] || [ ! -d "$1" ] || [ ! -O "$1" ]; then
+        return 1
+    fi
+    case $(ls -ld "$1" 2>/dev/null) in
+        d????w*|d???????w*) return 1 ;;   # writable by group or others
+        d*) ;;
+        *) return 1 ;;
+    esac
+    chmod 700 "$1"
+}
+
+# running: a start is there and no end, and either the process is alive or it was started a moment ago
+running() {
+    [ -f "$JOB/start" ] && [ ! -f "$JOB/end" ] || return 1
+    _p=$(cat "$JOB/pid" 2>/dev/null)
+    if [ -n "${_p:-}" ]; then
+        [ -d "/proc/$_p" ] || return 1
+        # a recycled pid: the process there has to be this script
+        tr '\0' ' ' < "/proc/$_p/cmdline" 2>/dev/null | grep -q 'changxing60-sms-job' || return 1
+        return 0
+    fi
+    [ $(( $(now) - $(cat "$JOB/start" 2>/dev/null || echo 0) )) -lt "$STARTUP_GRACE" ]
+}
+
+case ${1:-} in
+claim)
+    private_dir "$ROOT" || { echo "changxing60-sms-job: refusing the runtime directory $ROOT" >&2; exit 1; }
+    # the last job's directory - finished, or a send that died - is moved aside by whichever caller gets here
+    # first and removed, and then mkdir succeeds for exactly one caller; the other finds it and is told busy.
+    # A send that is still running holds it and is never moved aside: its reply is what the page is waiting for,
+    # and it reads its text out of that very directory. Nor is one taken from a caller that has claimed and has
+    # not called start yet - within the grace period that is a live send too.
+    if [ -d "$JOB" ] && ! running; then
+        if [ -f "$JOB/start" ] || [ $(( $(now) - $(date -r "$JOB" +%s 2>/dev/null || echo 0) )) -ge $STARTUP_GRACE ]; then
+            mv "$JOB" "$JOB.old.$$" 2>/dev/null && rm -rf "$JOB.old.$$"
+        fi
+    fi
+    (umask 077; mkdir "$JOB") 2>/dev/null || exit 1
+    ;;
+start)
+    [ -d "$JOB" ] || { echo "changxing60-sms-job: no claim" >&2; exit 1; }
+    printf '%s\n' "${2:?start needs the number}" > "$JOB/num"
+    now > "$JOB/start"
+    # detached: setsid so it outlives this call, its own output thrown away, and the plugin's popen returns at once
+    setsid "$0" run "$JOB" >/dev/null 2>&1 &
+    ;;
+run)
+    _d=${2:?run needs the job directory}
+    # the pid is what tells a live send from one that died under it (see running)
+    echo $$ > "$_d/pid"
+    _rc=0
+    _out=$("$SMS" send --stdin "$(cat "$_d/num" 2>/dev/null)" < "$_d/text" 2>&1) || _rc=$?
+    # written whole or not at all, so the page never reads half an answer
+    printf '%s\n' "$_out" > "$_d/reply.part" && mv "$_d/reply.part" "$_d/reply"
+    echo "$_rc" > "$_d/rc"
+    now > "$_d/end"
+    # the message is in the pool now (or was refused): nothing keeps a copy of it here any longer than it must
+    rm -f "$_d/text" "$_d/num"
+    ;;
+state)
+    [ -f "$JOB/start" ] || { echo none; exit 0; }
+    _start=$(cat "$JOB/start" 2>/dev/null); case $_start in ''|*[!0-9]*) _start=$(now) ;; esac
+    if running; then echo "running $(( $(now) - _start )) $LIMIT"; exit 0; fi
+    _end=$(cat "$JOB/end" 2>/dev/null); case $_end in ''|*[!0-9]*) _end=$(now) ;; esac
+    echo "done $(( _end - _start )) $_end"
+    ;;
+reply)
+    [ -f "$JOB/reply" ] || exit 1
+    cat "$JOB/reply"
+    ;;
+*)
+    echo "usage: changxing60-sms-job claim|start NUMBER|state|reply|run JOBDIR" >&2
+    exit 2
+    ;;
+esac

@@ -1,4 +1,4 @@
-# Ubuntu 26.04 LTS arm64 root filesystem for the MU300 (exported with `docker export`, not run as a container)
+# Ubuntu 26.04 LTS arm64 root filesystem for the changxing60 (exported with `docker export`, not run as a container)
 FROM ubuntu:26.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -11,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && rm -rf /var/lib/apt/lists/*
 RUN sed -i 's/^# *\(en_US.UTF-8\|tr_TR.UTF-8\)/\1/' /etc/locale.gen && locale-gen \
  && ln -sf /usr/share/zoneinfo/Europe/Istanbul /etc/localtime && echo Europe/Istanbul > /etc/timezone \
- && echo mu300 > /etc/hostname \
+ && echo changxing60 > /etc/hostname \
  && (id ubuntu >/dev/null 2>&1 || useradd -m -s /bin/bash ubuntu) \
  && usermod -aG sudo ubuntu && echo 'ubuntu:ubuntu' | chpasswd \
- && printf 'LABEL=mu300root / ext4 defaults,noatime 0 1\n' > /etc/fstab
+ && printf 'LABEL=changxing60root / ext4 defaults,noatime 0 1\n' > /etc/fstab

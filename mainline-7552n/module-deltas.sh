@@ -1,5 +1,5 @@
 #!/bin/bash
-# 7552N deltas for upstream's *out-of-tree* modules.  Runs inside the mu300-cross container,
+# 7552N deltas for upstream's *out-of-tree* modules.  Runs inside the changxing60-cross container,
 # right after upstream's build-modules.sh, and rebuilds only the modules it touches.
 #
 # Same rule as patches/: upstream/ is never edited, so a re-sync of upstream/ cannot lose this.

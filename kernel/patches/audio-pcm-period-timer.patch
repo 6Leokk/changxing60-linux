@@ -1,0 +1,252 @@
+sprd-dmaengine-pcm: period events from an hrtimer, not the DMA interrupt that never comes
+
+Based on kanoqwq/e5-linux@13b485c (kernel/patches/0013-pcm-period-timer.patch), the same driver in the
+Rongyue E5's 5.15 tree, ported to the 5.4 audio_driver tree this project builds.
+
+The AGCP DMA completion interrupt never reaches the GIC on these boards: both sprd_dma lines in
+/proc/interrupts stay at 0 for a whole stream (docs/FINDINGS.md 24, "Where it actually stops"), so
+sprd_pcm_dma_buf_done() never runs and nothing calls snd_pcm_period_elapsed(). Every ordinary ALSA client -
+aplay, arecord, mu300-voice's tone and echo - then blocks on its first full buffer and gives up with EIO,
+which is exactly the hw_ptr-stuck-after-one-burst picture measured here. The E5 has the same SoC family and
+the same symptom, with or without the AGDSP running.
+
+The position needs no interrupt - sprd_pcm_pointer() reads the live DMA address - so streams that want
+period wakeups get them from an hrtimer at the period rate, and the DMA is always programmed without
+interrupts, like the NO_PERIOD_WAKEUP streams Android's HAL opens. period_timer=0 (module parameter of
+sprd-dmaengine-pcm) restores the interrupt path.
+
+pm_splk_dma_prot becomes irqsave: sprd_pcm_pointer() takes it, and the tick reaches it from hardirq context
+through snd_pcm_period_elapsed(); with a plain spin_lock() a tick landing on a CPU inside one of these
+sections spins for ever (the soft lockup the E5's first ticker attempt died of). The tick is stopped with
+hrtimer_try_to_cancel() in trigger (which can run inside the tick via xrun -> snd_pcm_stop) and
+synchronously in hw_free and close, which release the DMA channels and free rtd.
+
+Hostless scenes (FE_VOICE, the call itself) have no DMA and are not affected.
+
+--- a/sprd/platform/dmaengine_pcm/sprd-dmaengine-pcm.c
++++ b/sprd/platform/dmaengine_pcm/sprd-dmaengine-pcm.c
+@@ -19,6 +19,7 @@
+ 
+ #include <linux/delay.h>
+ #include <linux/device.h>
++#include <linux/hrtimer.h>
+ #include <linux/dma-mapping.h>
+ #include <linux/init.h>
+ #include <linux/kernel.h>
+@@ -124,8 +125,71 @@
+ 	struct snd_info_entry *proc_info_entry;
+ #endif
+ 	bool is_access_enabled;
++	/* see sprd_pcm_period_tick() */
++	struct hrtimer period_timer;
++	struct snd_pcm_substream *tick_substream;
++	u64 tick_ns;
++	bool ticking;
+ };
++
++/*
++ * Period events from a timer instead of the DMA completion interrupt.
++ *
++ * On the UMS9620 boards the AGCP DMA completion never reaches the GIC: both
++ * sprd_dma lines in /proc/interrupts stay at 0 for a whole stream, so
++ * sprd_pcm_dma_buf_done() never runs and nothing calls
++ * snd_pcm_period_elapsed() - aplay, arecord and every other ordinary ALSA
++ * client blocks on its first full buffer (hw_ptr stuck after one burst). The
++ * position itself needs no interrupt: sprd_pcm_pointer() reads the live DMA
++ * address. So streams that want period wakeups get them from an hrtimer at
++ * the period rate, and the DMA is always programmed without interrupts, like
++ * the NO_PERIOD_WAKEUP streams Android's HAL opens. period_timer=0 restores
++ * the interrupt path.
++ *
++ * Based on kanoqwq/e5-linux@13b485c (kernel/patches/0013-pcm-period-timer.patch).
++ */
++static bool period_timer = true;
++module_param(period_timer, bool, 0644);
++MODULE_PARM_DESC(period_timer, "period events from an hrtimer (no DMA irq)");
++
++static enum hrtimer_restart sprd_pcm_period_tick(struct hrtimer *t)
++{
++	struct sprd_runtime_data *rtd =
++		container_of(t, struct sprd_runtime_data, period_timer);
++
++	if (!READ_ONCE(rtd->ticking))
++		return HRTIMER_NORESTART;
++	/* takes the stream lock; a no-op once the stream has stopped */
++	snd_pcm_period_elapsed(rtd->tick_substream);
++	if (!READ_ONCE(rtd->ticking))
++		return HRTIMER_NORESTART;
++	hrtimer_forward_now(t, ns_to_ktime(rtd->tick_ns));
++	return HRTIMER_RESTART;
++}
++
++/* trigger context: stream lock held, possibly called from the tick itself */
++static void sprd_pcm_tick_start(struct sprd_runtime_data *rtd)
++{
++	if (!rtd->tick_ns)
++		return;
++	WRITE_ONCE(rtd->ticking, true);
++	hrtimer_start(&rtd->period_timer, ns_to_ktime(rtd->tick_ns),
++		      HRTIMER_MODE_REL);
++}
++
++static void sprd_pcm_tick_stop(struct sprd_runtime_data *rtd)
++{
++	WRITE_ONCE(rtd->ticking, false);
++	hrtimer_try_to_cancel(&rtd->period_timer);
++}
+ 
++/* hw_free/close: no stream lock held, so waiting for a running tick is safe */
++static void sprd_pcm_tick_stop_sync(struct sprd_runtime_data *rtd)
++{
++	WRITE_ONCE(rtd->ticking, false);
++	hrtimer_cancel(&rtd->period_timer);
++}
++
+ struct dma_chan_index_name {
+ 	int index;
+ 	const char *name;
+@@ -224,16 +288,26 @@
+ 
+ static struct audio_pm_dma *get_pm_dma(void);
+ 
++/*
++ * irqsave, not plain spin_lock: sprd_pcm_pointer() takes this lock, and the
++ * period timer above reaches it from hardirq context through
++ * snd_pcm_period_elapsed(). With interrupts left on, a timer landing on a CPU
++ * already inside one of these sections spins forever. The flags live in
++ * pm_dma and are only read or written by the current holder.
++ */
+ static void normal_dma_protect_spin_lock(
+ 	struct snd_pcm_substream *substream)
+ {
+ 	struct snd_soc_pcm_runtime *srtd = substream->private_data;
+ 	struct audio_pm_dma *pm_dma;
++	unsigned long flags;
+ 
+ 	pm_dma = get_pm_dma();
+ 	if (sprd_is_normal_playback(srtd->cpu_dai->id,
+-		substream->stream))
+-		spin_lock(&pm_dma->pm_splk_dma_prot);
++		substream->stream)) {
++		spin_lock_irqsave(&pm_dma->pm_splk_dma_prot, flags);
++		pm_dma->pm_splk_flags = flags;
++	}
+ }
+ 
+ static void normal_dma_protect_spin_unlock(
+@@ -245,7 +319,8 @@
+ 	pm_dma = get_pm_dma();
+ 	if (sprd_is_normal_playback(srtd->cpu_dai->id,
+ 		substream->stream))
+-		spin_unlock(&pm_dma->pm_splk_dma_prot);
++		spin_unlock_irqrestore(&pm_dma->pm_splk_dma_prot,
++				       pm_dma->pm_splk_flags);
+ }
+ 
+ static void normal_dma_protect_mutex_lock(
+@@ -378,6 +453,9 @@
+ 	rtd = devm_kzalloc(dev, sizeof(*rtd), GFP_KERNEL);
+ 	if (!rtd)
+ 		goto out;
++	hrtimer_init(&rtd->period_timer, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
++	rtd->period_timer.function = sprd_pcm_period_tick;
++	rtd->tick_substream = substream;
+ 	runtime->private_data = rtd;
+ 	mutex_lock(&pm_dma->pm_mtx_cnt);
+ 	/* dma related need to access auio dsp sys */
+@@ -585,6 +663,8 @@
+ 			PCM_DIR_NAME(substream->stream));
+ 	if (!rtd)
+ 		return -EINVAL;
++	/* rtd is freed below: the tick must be gone first */
++	sprd_pcm_tick_stop_sync(rtd);
+ 
+ 	mutex_lock(&pm_dma->pm_mtx_cnt);
+ 	if (!sprd_is_normal_playback(srtd->cpu_dai->id,
+@@ -979,7 +1059,7 @@
+ 			cfg->config.direction = DMA_DEV_TO_MEM;
+ 		}
+ 
+-		if (p_wakeup)
++		if (p_wakeup && !period_timer)
+ 			cfg->dma_config_flag = SPRD_DMA_FLAGS(0,
+ 				0, SPRD_DMA_FRAG_REQ, SPRD_DMA_TRANS_INT);
+ 		else
+@@ -1212,7 +1292,8 @@
+ 		normal_dma_protect_spin_lock(substream);
+ 		rtd->dma_tx_des[i] = tmp_tx_des;
+ 		normal_dma_protect_spin_unlock(substream);
+-		if (!(params->flags & SNDRV_PCM_HW_PARAMS_NO_PERIOD_WAKEUP)) {
++		if (!(params->flags & SNDRV_PCM_HW_PARAMS_NO_PERIOD_WAKEUP) &&
++		    !period_timer) {
+ 			pr_info("%s, Register Callback func for DMA chan ID %d\n",
+ 				__func__, rtd->dma_chn[i]->chan_id);
+ 			rtd->dma_tx_des[i]->callback = sprd_pcm_dma_buf_done;
+@@ -1223,6 +1304,11 @@
+ 	}
+ 	normal_dma_protect_mutex_unlock(substream);
+ 
++	rtd->tick_ns = 0;
++	if (period_timer &&
++	    !(params->flags & SNDRV_PCM_HW_PARAMS_NO_PERIOD_WAKEUP))
++		rtd->tick_ns = div_u64((u64)params_period_size(params) *
++				       NSEC_PER_SEC, params_rate(params));
+ 	goto ok_go_out;
+ 
+ no_dma:
+@@ -1253,6 +1339,9 @@
+ 		sprd_dai_pcm_name(srtd->cpu_dai), srtd->cpu_dai->id,
+ 		PCM_DIR_NAME(substream->stream));
+ 	pm_dma = get_pm_dma();
++	/* the channels are released below: stop the tick that reads them */
++	sprd_pcm_tick_stop_sync(rtd);
++	rtd->tick_ns = 0;
+ 	snd_pcm_set_runtime_buffer(substream, NULL);
+ 
+ 	if (dma) {
+@@ -1332,6 +1421,8 @@
+ 	case SNDRV_PCM_TRIGGER_STOP:
+ 	case SNDRV_PCM_TRIGGER_SUSPEND:
+ 	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
++		/* may run inside the tick (xrun -> snd_pcm_stop): no sync cancel */
++		sprd_pcm_tick_stop(rtd);
+ 		normal_dma_protect_spin_lock(substream);
+ 		pr_info("pcm Stop\n");
+ 		if (rtd->dma_chn[0] == NULL) {
+@@ -1351,6 +1442,11 @@
+ 	default:
+ 		ret = -EINVAL;
+ 	}
++
++	if (!ret && (cmd == SNDRV_PCM_TRIGGER_START ||
++		     cmd == SNDRV_PCM_TRIGGER_RESUME ||
++		     cmd == SNDRV_PCM_TRIGGER_PAUSE_RELEASE))
++		sprd_pcm_tick_start(rtd);
+ 
+ 	return ret;
+ }
+@@ -1660,11 +1756,11 @@
+ 			pr_info("%s, release chan_id %d\n",
+ 				__func__, rtd->dma_chn[i]->chan_id);
+ 			temp_dma_chan = rtd->dma_chn[i];
+-			spin_lock(&pm_dma->pm_splk_dma_prot);
++			spin_lock_irq(&pm_dma->pm_splk_dma_prot);
+ 			rtd->dma_chn[i] = NULL;
+ 			rtd->dma_tx_des[i] = NULL;
+ 			rtd->cookie[i] = 0;
+-			spin_unlock(&pm_dma->pm_splk_dma_prot);
++			spin_unlock_irq(&pm_dma->pm_splk_dma_prot);
+ 			dma_release_channel(temp_dma_chan);
+ 		} else
+ 			pr_info("%s i=%d has released\n", __func__, i);
+--- a/sprd/platform/dmaengine_pcm/sprd-dmaengine-pcm.h
++++ b/sprd/platform/dmaengine_pcm/sprd-dmaengine-pcm.h
+@@ -53,6 +53,8 @@
+ 	struct notifier_block pm_nb;
+ 	/* protect rtd->dma_chn */
+ 	spinlock_t pm_splk_dma_prot;
++	/* irq flags of the pm_splk_dma_prot holder; only valid under the lock */
++	unsigned long pm_splk_flags;
+ 	/* protect rtd->dma_chn */
+ 	struct mutex pm_mtx_dma_prot;
+ 	/* protect no_pm_cnt */

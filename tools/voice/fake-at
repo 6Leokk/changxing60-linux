@@ -1,0 +1,81 @@
+#!/bin/sh
+# Host-side stand-in for /opt/changxing60/bin/changxing60-at, so the voice CLI and the call page's backend can be
+# driven without a modem. The real one takes "-t SECONDS" and then the command; this does the same, answers from
+# the knobs below instead of a tty, and appends every command it was handed to $FAKE_AT_DIALED - which is how a
+# test can tell a refusal that happened before the modem from one the modem made.
+#
+#   FAKE_AT_DIALED      where the raw commands are appended (optional)
+#   FAKE_AT_DIAL        what ATD gets: unset/OK (default), ERROR (the modem refuses the call),
+#                       noresp (the modem says nothing at all - a wedged modem), busy (another client holds
+#                       the channel, the AT client's own words and exit code)
+#   FAKE_AT_DIAL_DELAY  seconds the modem keeps ATD waiting before answering - a dial that takes its time, for
+#                       the detachment test. The pause comes before any output, so the caller really waits.
+#   FAKE_AT_ANSWER_DELAY / FAKE_AT_HANGUP_DELAY
+#                       the same for ATA / AT+CHUP: the answer and hang-up buttons must come back without
+#                       waiting for the modem either, and a test needs a modem that is slow to prove it.
+#   FAKE_AT_ANSWER_DELAY / FAKE_AT_HANGUP_DELAY
+#                       the same for ATA / AT+CHUP: the answer and hang-up buttons must come back without
+#                       waiting for the modem either, and a test needs a modem that is slow to prove it.
+#   FAKE_AT_ANSWER      ERROR when set: ATA is refused, and the page must show the call still ringing
+#   FAKE_AT_HANGUP      ERROR when set: AT+CHUP is refused
+#   FAKE_AT_MUTE        ERROR when set: AT+CMUT is refused
+#
+# Replies carry the trailing CR a modem puts on its lines - ok_or_error() in voice.sh strips it, and that is
+# part of what the tests confirm. Not part of the device build.
+set -u
+
+[ "${1:-}" = -t ] && shift 2
+cmd=${1:-}
+
+dialed=${FAKE_AT_DIALED:-}
+[ -n "$dialed" ] && printf '%s\n' "$cmd" >> "$dialed"
+
+# the slow modem: it holds ATD before answering (the pause is before any output, or the caller would read the
+# answer at once and no one would be waiting for anything)
+case $cmd in
+    'ATD'*';')
+        [ "${FAKE_AT_DIAL_DELAY:-0}" != 0 ] && sleep "$FAKE_AT_DIAL_DELAY"
+        ;;
+    ATA)
+        [ "${FAKE_AT_ANSWER_DELAY:-0}" != 0 ] && sleep "$FAKE_AT_ANSWER_DELAY"
+        ;;
+    'AT+CHUP')
+        [ "${FAKE_AT_HANGUP_DELAY:-0}" != 0 ] && sleep "$FAKE_AT_HANGUP_DELAY"
+        ;;
+esac
+
+# dial_result KNOB DEFAULT: the modem's answer, from its knob. "busy" and "noresp" are not the modem's words at
+# all but the AT client's - it prints them itself, in its own words, and fails, which is what voice.sh sees.
+dial_result() {  # $1 = knob value, $2 = the modem's answer on success
+    case $1 in
+        ERROR)  printf 'ERROR\r\n' ;;
+        noresp) printf 'changxing60-at: modem returned no final response\n'; exit 1 ;;
+        busy)   printf 'changxing60-at: busy\n'; exit 1 ;;
+        *)      printf '\r%b\r\n' "$2" ;;
+    esac
+}
+
+case $cmd in
+    'ATD'*';')
+        dial_result "${FAKE_AT_DIAL:-}" 'OK'
+        ;;
+    ATA)
+        if [ "${FAKE_AT_ANSWER:-}" = ERROR ]; then printf 'ERROR\r\n'; else printf '\rOK\r\n'; fi
+        ;;
+    'AT+CHUP')
+        if [ "${FAKE_AT_HANGUP:-}" = ERROR ]; then printf 'ERROR\r\n'; else printf '\rOK\r\n'; fi
+        ;;
+    'AT+VTS='*)
+        echo OK
+        ;;
+    'AT+CMUT='*)
+        if [ "${FAKE_AT_MUTE:-}" = ERROR ]; then printf 'ERROR\r\n'; else printf '\rOK\r\n'; fi
+        ;;
+    'AT+CLCC')
+        # no call is ever up for the fake: the daemon (not under test here) is the one that asks
+        echo OK
+        ;;
+    *)
+        echo OK
+        ;;
+esac

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Downlink throughput of the MU300's links, measured on the WAN interface counters (that is what the
+# Downlink throughput of the changxing60's links, measured on the WAN interface counters (that is what the
 # far side actually delivered, so it does not depend on the client's own TCP stack).
 #
 #   net-down-test.sh wan     the device's own cellular downlink
@@ -92,4 +92,4 @@ air)
 	;;
 *) echo "usage: $0 wan|lan|air [flows] [seconds]" >&2; exit 2 ;;
 esac
-echo "  wan health: $(cat /tmp/mu300-wan-health 2>/dev/null)"
+echo "  wan health: $(cat /tmp/changxing60-wan-health 2>/dev/null)"

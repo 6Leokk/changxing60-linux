@@ -1,0 +1,1704 @@
+#!/usr/bin/env python3
+"""changxing60-voice-audio -- the audio half of a phone call on the ZTE 7552N (changxing60).
+
+WHAT THIS IS. A call has two halves. The control half -- ATD/ATA/AT+CHUP, the ringing state, the
+caller's number -- is changxing60-voiced and changxing60-voice, and it works. The audio half is the
+AGDSP: the modem's voice stream goes into the VBC block, gets its parameters from a profile the
+kernel holds, and comes out of the codec into the earpiece or the speaker. Nothing drives that
+today, which is why a call connects and neither side hears anything. This program drives it.
+
+changxing60-voiced calls `changxing60-voice-audio start` when a call comes up and `... stop` when it
+ends, and ignores the exit status (a call with no audio is still a call the panel can show). So
+`start` forks a monitor that holds the PCM open and returns immediately, and `stop` signals it.
+
+HOW THE VOICE PATH WORKS, in the order it has to be done:
+
+  1. FE_ST_VOICE (hw:0,5) is a HOSTLESS PCM pair: no audio is copied through userspace. The AP side
+     opens it only so the routing and the DSP scene exist; the samples themselves go straight between
+     the modem DSP and the codec inside the AGDSP. Opening playback is not enough to start it --
+     ALSA refuses to start an empty playback stream, so the application pointer is pushed forward
+     with SNDRV_PCM_IOCTL_FORWARD and no samples are ever written. Writing samples would be wrong,
+     not just unnecessary.
+  2. The profile Select controls pick which parameter set the DSP runs. Their 32-bit word is
+     (mode_offset << 24) | (param_id << 16) | dsp_case. Only the top byte selects data; the rest is
+     opaque to the driver and travels to the DSP. See MODES below -- the mode numbers are the one
+     number in this file that belongs to this machine's parameter table and not to the driver.
+  3. The routes (S_VOICE_P_CODEC SWITCH etc.) connect FE_ST_VOICE to the codec, and the output tables
+     connect the codec to the earpiece or the speaker.
+  4. The vendor applies the parameters AGAIN after both PCMs start, so the Select sequence runs
+     twice. It also resets gain, so the volume is reapplied before the downlink mute is released.
+  5. The downlink stays muted (VBC_DL_MUTE) for every route change and is released only when the new
+     route is fully up. A cached "already unmuted" is not evidence that the DSP is unmuted.
+
+WHY RAW IOCTLS FOR THE MIXER. The Select controls declare max 0x0fffffff, and a Select word is
+(mode << 24) | (mode << 16) | 5, so the mode number has to fit in the top byte. For the handset and
+handsfree modes, all below 16, the word fits under that maximum and amixer would pass it through --
+but for the Bluetooth modes, 28 and up, it does not, and then amixer clamps SILENTLY. Measured on
+this board: writing 0x1C1C0005 through amixer reads back 0x0FFFFFFF, while the raw ioctl carries
+0x1C1C0005, 0x10100005 and 0x07070005 all through unchanged. A clamped word is not a rejected
+write, it is a different mode applied without a word of complaint, so the mixer is driven directly
+(SNDRV_CTL_IOCTL_ELEM_INFO/READ/WRITE) and never through amixer or the alsa-lib simple-mixer layer.
+libasound is still used for the PCM, where it is the only sane way to negotiate hw_params.
+
+WHY NOTHING HERE TOUCHES THE MODEM. This program does not open /dev/stty_nr1 or any AT channel, does
+not create, answer or end calls, and does not know a call's state. It is told to start and to stop.
+Everything it writes goes to the sound card, /dev/audio_pipe_voice and /dev/vbc_turningN.
+
+Ported from e5-linux's e5-call-audio.py (VIPME M8, same UMS9620/SC2730 family, verified working
+there); the mixer layer is e5's e5-ctl-raw ABI reimplemented, and the route tables are e5's. See
+docs/changxing60/telephony.md and docs/changxing60/vbc-profile.md.
+"""
+import ctypes
+import errno
+import fcntl
+import math
+import os
+import re
+import select
+import signal
+import struct
+import sys
+import threading
+import time
+
+# --------------------------------------------------------------------------------------------
+# CALIBRATION: the one table in this file that is this machine's and not the driver's.
+#
+# A profile Select word is (mode_offset << 24) | (param_id << 16) | dsp_case, where mode_offset
+# indexes a mode inside the audio_structure profile blob and dsp_case is VBC_DAI_ID_VOICE = 5.
+# The mode numbering is a property of the parameter table, so it is per-machine and cannot be read
+# out of the driver.
+#
+# These numbers are e5's (M8) table, which is the same SoC family. The supporting evidence, measured
+# on this box rather than assumed: our /lib/firmware/audio_structure is 67 modes of 730 bytes, the
+# same layout e5 reads, and the 7-entry gain curve at +0x244 has a sensible loudness ordering at
+# exactly these indices -- handset (0,2,4,5) peaks at 917, 817, 5157, 8173; handsfree (7,9,11,12)
+# at 1631, 2053, 2584, 32536; bluetooth (28,30,32,33) flat at 8173. That is what a per-band table
+# should look like, and `selftest` prints it so the next person can see the same numbers.
+#
+# It is still not proof, and one number is actively suspicious: handset mode 2 peaks slightly BELOW
+# mode 0, so the narrowband/wideband pair does not separate the way the other two groups do. What
+# would settle the table is listening to a real call at each index and comparing. Until then these
+# are overridable from the config file (see MODE_KEYS) and every Select is logged with its index.
+MODES = {
+    'handset':   (0, 2, 4, 5),      # narrowband, wideband, super-wideband, fullband
+    'handsfree': (7, 9, 11, 12),
+    'bluetooth': (28, 30, 32, 33),
+}
+MODE_KEYS = {
+    'mode-handset-nb': ('handset', 0), 'mode-handset-wb': ('handset', 1),
+    'mode-handset-swb': ('handset', 2), 'mode-handset-fb': ('handset', 3),
+    'mode-handsfree-nb': ('handsfree', 0), 'mode-handsfree-wb': ('handsfree', 1),
+    'mode-handsfree-swb': ('handsfree', 2), 'mode-handsfree-fb': ('handsfree', 3),
+    'mode-bluetooth-nb': ('bluetooth', 0), 'mode-bluetooth-wb': ('bluetooth', 1),
+    'mode-bluetooth-swb': ('bluetooth', 2), 'mode-bluetooth-fb': ('bluetooth', 3),
+}
+DAI_ID_VOICE = 5
+BAND_NAMES = ('narrowband', 'wideband', 'super-wideband', 'fullband')
+
+# The analog codec gains. e5 reads these per scene out of the Android parameter XML
+# (/odm/etc/audio_params/sprd/codec.xml); we have no XML here and nothing has set them on this
+# board, so these are e5's fallback values, clamped to whatever the card declares. They are a
+# starting point, not a calibration -- an analog stage that is too loud clips before the DSP ever
+# gets a chance to attenuate, and one that is too quiet cannot be recovered in the DSP either.
+# Overridable per key from the config file.
+GAIN_DEFAULTS = {
+    'gain-dac-receiver': 3, 'gain-dac-speaker': 3,
+    'gain-ao-receiver': 6, 'gain-ao-speaker': 4,
+    'gain-ear-nb': 2, 'gain-ear-wb': 2, 'gain-ear-swb': 2, 'gain-ear-fb': 4,
+}
+# Byte offset of the 7-entry u16 gain curve inside one audio_structure mode (e5's layout; our blob
+# is the same len_mode=0x2da and the curve is monotonic in all 67 modes, so it reads correctly).
+VOLUME_CURVE_OFFSET = 0x244
+VOLUME_CURVE_ENTRIES = 7
+
+# --------------------------------------------------------------------------------------------
+# Paths. Every one is overridable so the host-side tests can run without a sound card.
+RUN = os.environ.get('CHANGXING60_VOICE_AUDIO_RUN', '/run/changxing60-voice-audio')
+CONF = os.environ.get('CHANGXING60_VOICE_AUDIO_CONF', '/etc/changxing60/voice-audio.conf')
+LOG = os.environ.get('CHANGXING60_VOICE_AUDIO_LOG', '/root/voice-audio.log')
+FIRMWARE = os.environ.get('CHANGXING60_VOICE_AUDIO_FIRMWARE', '/lib/firmware')
+PCM_STATUS = os.environ.get('CHANGXING60_VOICE_AUDIO_PROC', '/proc/asound')
+PIPE_VOICE = os.environ.get('CHANGXING60_VOICE_AUDIO_PIPE', '/dev/audio_pipe_voice')
+TURNING = os.environ.get('CHANGXING60_VOICE_AUDIO_TURNING', '/dev/vbc_turning%d')
+
+PIDFILE = os.path.join(RUN, 'pid')
+STATEFILE = os.path.join(RUN, 'state')
+CTLFIFO = os.path.join(RUN, 'ctl')
+
+# A call is 8000 Hz S16 mono, and the FE is a 640-frame period in a 1280-frame buffer.
+VOICE_RATE = 8000
+VOICE_PERIOD = 640
+VOICE_BUFFER = 1280
+
+AUDIO_PIPE_WAKEUP = 0x40044100          # _IOW('A', 0, int), audio-pipe.c AUDIO_PIPE_WAKEUP
+AUD_SMSG = struct.Struct('<HH4I')       # struct aud_smsg, audio-smsg.h
+AUD_SMSG_SIZE = AUD_SMSG.size           # 20
+# 20-byte messages on the voice pipe, from the AGDSP.
+MSG_BANDWIDTH = (0x00, 2)               # command, channel: parameter1 = 0..3 = NB/WB/SWB/FB
+MSG_CP_VOICE = (0x35, 2)                # command, channel: CP voice enabled, parameter0 = mask
+
+CARD_NAME = 'sprdphone-sc2730'
+
+# --------------------------------------------------------------------------------------------
+# The controls this program uses, by name. All of them were confirmed present on this card
+# (`amixer -c 0 controls` lists 319 controls, and every name below is in it); selftest re-checks
+# them on the device rather than trusting this list.
+
+# Shared voice routes. VBC_DL_MUTE is held enabled across every route change (see start/set_route).
+ROUTES = {
+    'S_VOICE_P_CODEC SWITCH': 'on', 'S_VOICE_C_CODEC SWITCH': 'on',
+    'VBC_MUX_DAC1_IIS_PORT_SEL': 'VBC_IIS_PORT_IIS0',
+    'VBC_MUX_IIS0_PORT_DO_SEL': 'IIS_DO_VAL_DAC0',
+    'VBC_MUX_ADC2': 'ADC_IN_IIS1_ADC',
+    'VBC_MUX_ADC2_IIS_PORT_SEL': 'VBC_IIS_PORT_IIS1',
+    'VBC DAC1 DG Set': '24,24', 'VBC DAC1 DSP MDG Set': '1,1024',
+    'VBC_DL_MUTE': 'enable',
+    'VBC ADC2 DG Set': '24,24',
+    'VBC_VOLUME': '7',
+    'Speaker Mute': 'off', 'Earpiece Mute': 'off', 'Mic Function': 'on',
+}
+# Earpiece: the codec drives EAR_HPL, not the alternative EAR_AOL path.
+RECEIVER = {
+    'Speaker Function': 'off',
+    'AO Mixer AOL Switch': 'off', 'AO Mixer AOR Switch': 'off',
+    'DA AOR Switch': 'off', 'AOL EAR Sel': 'EAR',
+    'EAR_AOL Mixer DACAOL Switch': 'off',
+    'DAHP OS D': '5', 'EAR_HPL Mixer DACHPL Switch': 'on',
+    'HPL EAR Sel': 'EAR', 'VBC_MIXER1_DAC0': 'HALF_ADD',
+    'Earpiece Function': 'on',
+}
+# Speaker. On this board the speaker is behind the AW87xxx amplifier, whose driver has no source in
+# any tree we hold (docs/changxing60/telephony.md section 9.5), so this path is wired but the
+# amplifier is not switched on by anything: expect the earpiece to work and the speaker to stay
+# silent until that driver exists.
+SPEAKER = {
+    'Earpiece Function': 'off',
+    'EAR_HPL Mixer DACHPL Switch': 'off', 'HPL EAR Sel': 'HPL',
+    'EAR_AOL Mixer DACAOL Switch': 'off', 'VBC_MIXER1_DAC0': 'NOT_MIX',
+    'AOL EAR Sel': 'AOL', 'AO Mixer AOL Switch': 'on',
+    'AO Mixer AOR Switch': 'on', 'DA AOR Switch': 'on',
+    'Speaker Function': 'on',
+}
+ANALOG_GAINS = ('DAC Gain DAC Playback Volume', 'AO Gain AO Playback Volume',
+                'EAR Gain EAR Playback Volume')
+# The vendor's CVS selector kept the old NXP label; it is profile 2 either way.
+PROFILES = ('DSP VBC Profile Select', 'Audio Structure Profile Select', 'NXP Profile Select')
+BT_SRC = ('VBC_SRC_BT_DAC', 'VBC_SRC_BT_ADC')
+# CP voice goes directly between the modem DSP and the codec over IIS3; this is only used when the
+# call is handed to a Bluetooth headset (HFP), which is not wired up on this board yet. Two things
+# stop it working as written, both measured, neither a blocker today: SYS_IIS0 rejects every write
+# with EINVAL while the IIS clock is idle (so the mux cannot be moved from here at all), and the BT
+# source rate controls read 0. Treat this table as the shape of the route, not as a tested one.
+BLUETOOTH = {
+    'SYS_IIS0': 'vbc_iis3',
+    'VBC_MUX_DAC0_IIS_PORT_SEL': 'VBC_IIS_PORT_IIS0',
+    'VBC_MUX_DAC1_IIS_PORT_SEL': 'VBC_IIS_PORT_IIS3',
+    'VBC_MUX_IIS3_PORT_DO_SEL': 'IIS_DO_VAL_DAC1',
+    'VBC_MUX_MST_IIS0_PORT_DO_SEL': 'IIS_DO_VAL_DAC0',
+    'VBC_MUX_IIS0_PORT_DO_SEL': 'IIS_DO_VAL_DAC2',
+    'VBC_MUX_IIS2_PORT_DO_SEL': 'IIS_DO_VAL_DAC2',
+    'VBC_MUX_ADC2': 'ADC_IN_IIS0_ADC',
+    'VBC_MUX_ADC0_IIS_PORT_SEL': 'VBC_IIS_PORT_IIS3',
+    'VBC_MUX_ADC1_IIS_PORT_SEL': 'VBC_IIS_PORT_IIS3',
+    'VBC_MUX_ADC2_IIS_PORT_SEL': 'VBC_IIS_PORT_IIS3',
+    'VBC_IIS_TX0_WD_SEL': 'WD_16BIT', 'VBC_IIS_TX1_WD_SEL': 'WD_16BIT',
+    'VBC_IIS_RX0_WD_SEL': 'WD_16BIT', 'VBC_IIS_RX1_WD_SEL': 'WD_16BIT',
+    'VBC_IIS_RX2_WD_SEL': 'WD_16BIT',
+    'VBC_IIS_MASTER_ENALBE': 'enable',
+    'VBC_IIS_MST_SEL_0_TYPE': 'VBC_MASTER_INTERNAL',
+    'Speaker Function': 'off', 'Earpiece Function': 'off',
+    # Make before break: both back ends share one DSP voice scene, so closing the old one first
+    # shuts CP voice down in the middle of the call.
+    'S_VOICE_P_BT SWITCH': 'on', 'S_VOICE_C_BT SWITCH': 'on',
+    'S_VOICE_P_CODEC SWITCH': 'off', 'S_VOICE_C_CODEC SWITCH': 'off',
+}
+CODEC_IIS = {
+    # FE_ST_VOICE is S16, but the physical codec link is 24-bit slots, right-high DAC0 framing.
+    'VBC_IIS_TX0_WD_SEL': 'WD_24BIT', 'VBC_IIS_TX1_WD_SEL': 'WD_24BIT',
+    'VBC_IIS_RX0_WD_SEL': 'WD_24BIT', 'VBC_IIS_RX1_WD_SEL': 'WD_24BIT',
+    'VBC_IIS_RX2_WD_SEL': 'WD_24BIT',
+    'DSP_DAC0_LR_EXCHANGE': 'enable', 'VBC_IIS_TX0_LRMOD_SEL': 'RIGHT_HIGH',
+    'VBC_MUX_DAC0_IIS_PORT_SEL': 'VBC_IIS_PORT_IIS0',
+    'VBC_MUX_DAC1_IIS_PORT_SEL': 'VBC_IIS_PORT_IIS0',
+    'VBC_MUX_IIS0_PORT_DO_SEL': 'IIS_DO_VAL_DAC0',
+    'VBC_MUX_IIS2_PORT_DO_SEL': 'IIS_DO_VAL_DAC2',
+    'VBC_MUX_IIS3_PORT_DO_SEL': 'IIS_DO_VAL_DAC2',
+}
+# The profile blobs, and the nodes they are loaded through. The kernel must hold them before a
+# Select can mean anything; changxing60-vbc-load puts them there at boot from /lib/firmware.
+PROFILE_BLOBS = (('audio_structure', 0), ('dsp_vbc', 1), ('cvs', 2), ('dsp_smartamp', 3))
+FW_HEADER = struct.Struct('<16sII')
+FW_MAGIC = b'audio_profile'
+
+VOICE_CONTROLS = tuple(dict.fromkeys(
+    (*ROUTES, *RECEIVER, *SPEAKER, *ANALOG_GAINS, *PROFILES, *BLUETOOTH, *BT_SRC, *CODEC_IIS)))
+
+
+class Failure(RuntimeError):
+    """Anything that should stop a start/stop sequence and be reported, not traced back."""
+
+
+def log(message):
+    """One line to the log, and to stderr when there is no log to write to."""
+    line = '%s changxing60-voice-audio: %s\n' % (time.strftime('%Y-%m-%d %H:%M:%S'), message)
+    try:
+        with open(LOG, 'a') as handle:
+            handle.write(line)
+    except OSError:
+        sys.stderr.write(line)
+        sys.stderr.flush()
+
+
+# ============================================================================================
+# The mixer: /dev/snd/controlC0 by raw ioctl.
+#
+# The structs are the kernel's uapi ones (include/uapi/sound/asound.h) at the sizes this kernel
+# compiles them to. SNDRV_CTL_ELEM_ID_NAME_MAXLEN is 44 here, which is what makes snd_ctl_elem_value
+# 1224 bytes -- the size the ioctl number encodes, so getting it wrong fails the ioctl rather than
+# corrupting anything. Both sizes are asserted below rather than assumed.
+
+class ElemId(ctypes.Structure):
+    _fields_ = [('numid', ctypes.c_uint), ('iface', ctypes.c_int),
+                ('device', ctypes.c_uint), ('subdevice', ctypes.c_uint),
+                ('name', ctypes.c_char * 44), ('index', ctypes.c_uint)]
+
+
+class ElemValue(ctypes.Structure):
+    _fields_ = [('id', ElemId), ('indirect', ctypes.c_uint), ('pad', ctypes.c_uint),
+                ('value', ctypes.c_long * 128),
+                ('tstamp', ctypes.c_long * 2), ('reserved', ctypes.c_ubyte * 112)]
+
+
+class _InfoInteger(ctypes.Structure):
+    _fields_ = [('min', ctypes.c_long), ('max', ctypes.c_long), ('step', ctypes.c_long)]
+
+
+class _InfoEnum(ctypes.Structure):
+    _fields_ = [('items', ctypes.c_uint), ('item', ctypes.c_uint),
+                ('name', ctypes.c_char * 64), ('names_ptr', ctypes.c_uint64),
+                ('names_length', ctypes.c_uint)]
+
+
+class _InfoValue(ctypes.Union):
+    _fields_ = [('integer', _InfoInteger), ('enumerated', _InfoEnum),
+                ('reserved', ctypes.c_ubyte * 128)]
+
+
+class ElemInfo(ctypes.Structure):
+    _fields_ = [('id', ElemId), ('type', ctypes.c_int), ('access', ctypes.c_uint),
+                ('count', ctypes.c_uint), ('owner', ctypes.c_int), ('value', _InfoValue),
+                ('dimen', ctypes.c_ubyte * 8), ('reserved', ctypes.c_ubyte * 56)]
+
+
+class ElemList(ctypes.Structure):
+    _fields_ = [('offset', ctypes.c_uint), ('space', ctypes.c_uint), ('used', ctypes.c_uint),
+                ('count', ctypes.c_uint), ('pids', ctypes.c_void_p),
+                ('reserved', ctypes.c_ubyte * 50)]
+
+
+assert ctypes.sizeof(ElemValue) == 1224, ctypes.sizeof(ElemValue)
+assert ctypes.sizeof(ElemInfo) == 272, ctypes.sizeof(ElemInfo)
+assert ctypes.sizeof(ElemList) == 80, ctypes.sizeof(ElemList)
+
+IFACE_MIXER = 2
+TYPE_BOOLEAN, TYPE_INTEGER, TYPE_ENUMERATED = 1, 2, 3
+# _IOWR('U', nr, struct): dir 3, size 'U' = 0x55. Computed, then checked against the two numbers
+# e5-ctl-raw is known to work with.
+def _iowr(nr, size):
+    return (3 << 30) | (size << 16) | (ord('U') << 8) | nr
+
+
+ELEM_LIST = _iowr(0x10, ctypes.sizeof(ElemList))
+ELEM_INFO = _iowr(0x11, ctypes.sizeof(ElemInfo))
+ELEM_READ = _iowr(0x12, ctypes.sizeof(ElemValue))
+ELEM_WRITE = _iowr(0x13, ctypes.sizeof(ElemValue))
+assert ELEM_READ == 0xC4C85512 and ELEM_WRITE == 0xC4C85513
+
+
+class Element:
+    __slots__ = ('name', 'kind', 'count', 'items', 'numid', 'minimum', 'maximum')
+
+    def __init__(self, name, kind, count, items, numid, minimum, maximum):
+        self.name, self.kind, self.count = name, kind, count
+        self.items, self.numid = items, numid
+        self.minimum, self.maximum = minimum, maximum
+
+
+class Mixer:
+    """Element read/write by name, with no clamping and no alsa-lib.
+
+    The values are held as the strings a human would write ('on', 'enable', 'VBC_IIS_PORT_IIS0', or
+    a comma-separated list of integers), the same spelling e5's tables use, so the tables above can
+    be read against amixer's output directly.
+    """
+
+    def __init__(self, card=0):
+        self.path = '/dev/snd/controlC%d' % card
+        try:
+            self.fd = os.open(self.path, os.O_RDWR)
+        except OSError as error:
+            raise Failure('cannot open %s: %s' % (self.path, error.strerror))
+        self.cache = {}
+
+    def close(self):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+    def _elem_id(self, name, numid=0):
+        """Fill an ElemId field by field. The name is never truncated: a name that does not fit
+        would silently address a different control, which is exactly the kind of failure that
+        looks like "the DSP ignores me"."""
+        encoded = name.encode()
+        if len(encoded) >= 44:
+            raise Failure('control name %r is longer than the 44 bytes the kernel accepts' % name)
+        ident = ElemId()
+        ident.numid = numid
+        ident.iface = IFACE_MIXER
+        ident.device = 0
+        ident.subdevice = 0
+        ident.name = encoded
+        ident.index = 0
+        return ident
+
+    def _fill(self, structure, name, numid=0):
+        source = self._elem_id(name, numid)
+        ctypes.memmove(ctypes.byref(structure.id), ctypes.byref(source),
+                       ctypes.sizeof(ElemId))
+        return structure
+
+    def info(self, name):
+        if name in self.cache:
+            return self.cache[name]
+        info = self._fill(ElemInfo(), name)
+        try:
+            fcntl.ioctl(self.fd, ELEM_INFO, info, True)
+        except OSError as error:
+            raise Failure('no control named %r (%s)' % (name, error.strerror))
+        items = []
+        if info.type == TYPE_ENUMERATED:
+            for index in range(info.value.enumerated.items):
+                probe = self._fill(ElemInfo(), name)
+                probe.value.enumerated.item = index
+                try:
+                    fcntl.ioctl(self.fd, ELEM_INFO, probe, True)
+                except OSError:
+                    break
+                items.append(probe.value.enumerated.name.decode('utf-8', 'replace'))
+        minimum, maximum = None, None
+        if info.type in (TYPE_BOOLEAN, TYPE_INTEGER):
+            minimum = info.value.integer.min
+            maximum = info.value.integer.max
+        element = Element(name, info.type, info.count, tuple(items), info.id.numid,
+                          minimum, maximum)
+        self.cache[name] = element
+        return element
+
+    def get(self, name):
+        element = self.info(name)
+        value = self._fill(ElemValue(), name, element.numid)
+        try:
+            fcntl.ioctl(self.fd, ELEM_READ, value, True)
+        except OSError as error:
+            raise Failure('cannot read %r (%s)' % (name, error.strerror))
+        fields = []
+        for index in range(element.count):
+            if element.kind == TYPE_BOOLEAN:
+                fields.append('on' if value.value[index] else 'off')
+            elif element.kind == TYPE_ENUMERATED:
+                number = value.value[index]
+                fields.append(element.items[number] if 0 <= number < len(element.items)
+                              else str(number))
+            else:
+                fields.append(str(value.value[index]))
+        return ','.join(fields)
+
+    def put(self, name, setting):
+        element = self.info(name)
+        fields = str(setting).split(',')
+        if len(fields) == 1:
+            fields *= element.count
+        if len(fields) != element.count:
+            raise Failure('%r takes %d values, got %d' % (name, element.count, len(fields)))
+        value = self._fill(ElemValue(), name, element.numid)
+        for index, field in enumerate(fields):
+            if element.kind == TYPE_ENUMERATED:
+                if field not in element.items:
+                    raise Failure('%r has no item %r' % (name, field))
+                number = element.items.index(field)
+            elif element.kind == TYPE_BOOLEAN:
+                if field not in ('on', 'off'):
+                    raise Failure('%r takes on/off, got %r' % (name, field))
+                number = int(field == 'on')
+            else:
+                try:
+                    number = int(field, 0)
+                except ValueError:
+                    raise Failure('%r takes an integer, got %r' % (name, field))
+                # Not clamped: a Select word is legitimately larger than the declared maximum.
+                # Only the ranges of the controls whose values we choose ourselves are checked,
+                # and that is done in codec_gain() where the choice is made.
+            value.value[index] = number
+        try:
+            fcntl.ioctl(self.fd, ELEM_WRITE, value, True)
+        except OSError as error:
+            raise Failure('cannot write %r (%s)' % (name, error.strerror))
+
+    def names(self):
+        """Every control on the card, straight from ELEM_LIST (no amixer needed)."""
+        listing = ElemList()
+        fcntl.ioctl(self.fd, ELEM_LIST, listing, True)
+        total = listing.count
+        if not total:
+            return []
+        ids = (ElemId * total)()
+        listing.offset, listing.space = 0, total
+        listing.pids = ctypes.cast(ids, ctypes.c_void_p).value
+        fcntl.ioctl(self.fd, ELEM_LIST, listing, True)
+        return [ids[i].name.decode('utf-8', 'replace') for i in range(listing.used)]
+
+
+# ============================================================================================
+# The PCM: libasound through ctypes, because there is no other sane way to negotiate hw_params.
+# libasound is a real package on this rootfs (alsa-lib from the OpenWrt feed, musl, matching the
+# rootfs's own libc); see tools/build-alsa.sh for why it must come from the feed and not from the
+# cross toolchain.
+
+class VoicePcm:
+    """One direction of the hostless FE_ST_VOICE pair. No samples ever pass through here."""
+
+    _lib = None
+
+    @classmethod
+    def libasound(cls):
+        if cls._lib is None:
+            try:
+                cls._lib = ctypes.CDLL('libasound.so.2')
+            except OSError as error:
+                raise Failure('libasound.so.2 is not installed (%s); '
+                              'see tools/build-alsa.sh' % error)
+            lib, pointer = cls._lib, ctypes.c_void_p
+            for name, args in {
+                'open': [ctypes.POINTER(pointer), ctypes.c_char_p, ctypes.c_int, ctypes.c_int],
+                'close': [pointer], 'prepare': [pointer], 'start': [pointer],
+                'drop': [pointer],
+                'hw_params_malloc': [ctypes.POINTER(pointer)],
+                'hw_params_any': [pointer, pointer],
+                'hw_params_set_access': [pointer, pointer, ctypes.c_int],
+                'hw_params_set_format': [pointer, pointer, ctypes.c_int],
+                'hw_params_set_channels': [pointer, pointer, ctypes.c_uint],
+                'hw_params_set_rate': [pointer, pointer, ctypes.c_uint, ctypes.c_int],
+                'hw_params_set_period_size_near':
+                    [pointer, pointer, ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_int)],
+                'hw_params_set_buffer_size_near':
+                    [pointer, pointer, ctypes.POINTER(ctypes.c_ulong)],
+                'hw_params': [pointer, pointer],
+            }.items():
+                func = getattr(lib, 'snd_pcm_' + name)
+                func.argtypes, func.restype = args, ctypes.c_int
+            lib.snd_pcm_forward.argtypes = [pointer, ctypes.c_ulong]
+            lib.snd_pcm_forward.restype = ctypes.c_long
+            lib.snd_pcm_hw_params_free.argtypes = [pointer]
+            lib.snd_pcm_hw_params_free.restype = None
+            lib.snd_strerror.argtypes = [ctypes.c_int]
+            lib.snd_strerror.restype = ctypes.c_char_p
+        return cls._lib
+
+    def __init__(self, card, device, direction):
+        lib, pointer = self.libasound(), ctypes.c_void_p
+        self.lib, self.handle, self.direction = lib, pointer(), direction
+        params = pointer()
+        try:
+            self.check(lib.snd_pcm_open(ctypes.byref(self.handle),
+                                        ('hw:%d,%d' % (card, device)).encode(), direction, 1),
+                       'open hw:%d,%d' % (card, device))
+            self.check(lib.snd_pcm_hw_params_malloc(ctypes.byref(params)), 'allocate parameters')
+            for name, args in (('any', ()), ('set_access', (3,)), ('set_format', (2,)),
+                               ('set_channels', (1,)), ('set_rate', (VOICE_RATE, 0))):
+                self.check(getattr(lib, 'snd_pcm_hw_params_' + name)(self.handle, params, *args),
+                           name)
+            period, buffer, rounding = (ctypes.c_ulong(VOICE_PERIOD),
+                                        ctypes.c_ulong(VOICE_BUFFER), ctypes.c_int(0))
+            self.check(lib.snd_pcm_hw_params_set_period_size_near(
+                self.handle, params, ctypes.byref(period), ctypes.byref(rounding)), 'period size')
+            self.check(lib.snd_pcm_hw_params_set_buffer_size_near(
+                self.handle, params, ctypes.byref(buffer)), 'buffer size')
+            self.check(lib.snd_pcm_hw_params(self.handle, params), 'hw_params')
+            self.check(lib.snd_pcm_prepare(self.handle), 'prepare')
+            # ALSA refuses to start an empty playback stream, and FE_ST_VOICE has no AP DMA to fill
+            # one. Move the application pointer forward instead of writing samples.
+            if direction == 0:
+                moved = lib.snd_pcm_forward(self.handle, buffer.value)
+                if moved < 0:
+                    self.check(moved, 'hostless forward')
+                if not moved:
+                    raise Failure('hostless playback pointer did not advance')
+        except Exception:
+            self.close()
+            raise
+        finally:
+            if params:
+                lib.snd_pcm_hw_params_free(params)
+
+    def check(self, result, operation):
+        if result < 0:
+            text = self.lib.snd_strerror(result)
+            raise Failure('%s: %s' % (operation, text.decode() if text else result))
+
+    def start(self):
+        self.check(self.lib.snd_pcm_start(self.handle), 'start')
+
+    def close(self):
+        if self.handle:
+            self.lib.snd_pcm_close(self.handle)
+            self.handle = ctypes.c_void_p()
+
+
+# ============================================================================================
+
+def find_voice_pcm():
+    """The FE_ST_VOICE pair as (card, device), or None. Read from /proc, so no device is opened."""
+    try:
+        with open(os.path.join(PCM_STATUS, 'pcm')) as handle:
+            text = handle.read()
+    except OSError as error:
+        raise Failure('cannot read %s/pcm: %s' % (PCM_STATUS, error.strerror))
+    match = re.search(r'^(\d+)-(\d+): FE_ST_VOICE \(', text, re.M)
+    return (int(match.group(1)), int(match.group(2))) if match else None
+
+
+def card_name(card=0):
+    try:
+        with open(os.path.join(PCM_STATUS, 'cards')) as handle:
+            for line in handle:
+                if line.lstrip().startswith('%d [' % card):
+                    return line.split(':', 1)[1].strip() if ':' in line else line.strip()
+    except OSError:
+        pass
+    return ''
+
+
+def pcm_open_state(card, device):
+    """'closed'/'RUNNING'/... for both directions of the pair, for before/after checks."""
+    states = []
+    for kind in ('p', 'c'):
+        path = os.path.join(PCM_STATUS, 'card%d' % card, 'pcm%dp' % device, 'sub0', 'status')
+        if kind == 'c':
+            path = os.path.join(PCM_STATUS, 'card%d' % card, 'pcm%dc' % device, 'sub0', 'status')
+        try:
+            with open(path) as handle:
+                states.append(handle.read().split('\n', 1)[0].strip())
+        except OSError:
+            states.append('absent')
+    return states
+
+
+def read_profile_header(path):
+    try:
+        with open(path, 'rb') as handle:
+            head = handle.read(FW_HEADER.size)
+    except OSError:
+        return None
+    if len(head) < FW_HEADER.size:
+        return None
+    magic, modes, length = FW_HEADER.unpack(head)
+    if magic.rstrip(b'\0') != FW_MAGIC:
+        return None
+    return modes, length
+
+
+def load_volume_curves():
+    """Per-mode 7-step gain curves out of audio_structure, keyed by mode index."""
+    path = os.path.join(FIRMWARE, 'audio_structure')
+    header = read_profile_header(path)
+    if not header:
+        return {}
+    modes, length = header
+    if length < VOLUME_CURVE_OFFSET + 2 * VOLUME_CURVE_ENTRIES:
+        return {}
+    curves = {}
+    try:
+        with open(path, 'rb') as handle:
+            data = handle.read()
+        for mode in range(modes):
+            start = FW_HEADER.size + mode * length + VOLUME_CURVE_OFFSET
+            if start + 2 * VOLUME_CURVE_ENTRIES > len(data):
+                break
+            curves[mode] = struct.unpack_from('<%dH' % VOLUME_CURVE_ENTRIES, data, start)
+    except OSError:
+        return {}
+    return curves
+
+
+def read_config(path=None):
+    """key=value lines, '#' comments. A missing file is not an error: the defaults are the defaults."""
+    values = {}
+    path = path or CONF
+    try:
+        with open(path) as handle:
+            lines = handle.readlines()
+    except FileNotFoundError:
+        return values
+    except OSError as error:
+        raise Failure('cannot read %s: %s' % (path, error.strerror))
+    for number, line in enumerate(lines, 1):
+        line = line.split('#', 1)[0].strip()
+        if not line:
+            continue
+        if '=' not in line:
+            raise Failure('%s:%d: expected key = value' % (path, number))
+        key, value = line.split('=', 1)
+        values[key.strip()] = value.strip()
+    return values
+
+
+# ============================================================================================
+
+class VoiceAudio:
+    """The voice path itself: snapshot, route, select, open, start, and the exact reverse."""
+
+    def __init__(self, config=None):
+        self.config = read_config() if config is None else config
+        self.card = 0
+        self.device = None
+        self.mixer = None
+        self.handles = []
+        self.saved = {}
+        self.band = 0
+        self.speaker = self.config.get('output', 'receiver') == 'speaker'
+        self.bluetooth = False
+        self.bt_rate = VOICE_RATE
+        self.volume = 7
+        self.muted = False
+        self.curves = load_volume_curves()
+        self.applied_volume = None
+        self.modes = {name: list(bands) for name, bands in MODES.items()}
+        self.gains = dict(GAIN_DEFAULTS)
+        self._apply_config()
+
+    def _apply_config(self):
+        for key, (group, index) in MODE_KEYS.items():
+            if key in self.config:
+                try:
+                    self.modes[group][index] = int(self.config[key], 0)
+                except ValueError:
+                    raise Failure('%s: not a number: %r' % (key, self.config[key]))
+        for key in GAIN_DEFAULTS:
+            if key in self.config:
+                try:
+                    self.gains[key] = int(self.config[key], 0)
+                except ValueError:
+                    raise Failure('%s: not a number: %r' % (key, self.config[key]))
+
+    # -- profile Select ------------------------------------------------------------------------
+    def profile_word(self, band, speaker=False, bluetooth=False):
+        """(mode << 24) | (param_id << 16) | dsp_case. param_id is the mode's own number and the low
+        half is VBC_DAI_ID_VOICE; only the top byte is used by the driver to pick the data."""
+        group = 'bluetooth' if bluetooth else 'handsfree' if speaker else 'handset'
+        mode = self.modes[group][band]
+        return (mode << 24) | (mode << 16) | DAI_ID_VOICE
+
+    def dsp_volume(self):
+        """The DSP volume step (1..7) for the current UI volume, through the machine's own curve."""
+        if self.bluetooth:
+            return 7
+        if not self.volume:
+            return 1
+        level = self.volume
+        if level == 15:
+            return 7
+        mode = self.profile_word(self.band, self.speaker) >> 24
+        gains = self.curves.get(mode, ())
+        if len(gains) == VOLUME_CURVE_ENTRIES and gains[-1] > 0:
+            points = [(i + 1, math.log(g)) for i, g in enumerate(gains) if 0 < g <= gains[-1]]
+            if points:
+                low, high = min(g for _, g in points), math.log(gains[-1])
+                target = low + (high - low) * (level - 1) / 14
+                return min(points, key=lambda p: (abs(p[1] - target), p[0]))[0]
+        return 1 + int((level - 1) * 6 // 14)
+
+    def codec_gain(self, name, wanted):
+        """Clamp a chosen analog gain to what the card actually declares, and say so when it bites."""
+        element = self.mixer.info(name)
+        if element.maximum is None:
+            return wanted
+        if wanted > element.maximum:
+            log('%s: %d is above the card maximum %d, using %d'
+                % (name, wanted, element.maximum, element.maximum))
+            return element.maximum
+        if wanted < element.minimum:
+            return element.minimum
+        return wanted
+
+    def controls(self):
+        return VOICE_CONTROLS
+
+    def get(self, name):
+        return self.mixer.get(name)
+
+    def put(self, name, value):
+        self.mixer.put(name, value)
+
+    def profiles(self):
+        word = self.profile_word(self.band, self.speaker, self.bluetooth)
+        for name in PROFILES:
+            self.put(name, word)
+        self.put('VBC_VOLUME', self.dsp_volume())
+        if self.bluetooth:
+            for name in BT_SRC:
+                self.put(name, str(self.bt_rate))
+            return
+        for name, value in CODEC_IIS.items():
+            self.put(name, value)
+        speaker = self.speaker
+        self.put('DAC Gain DAC Playback Volume',
+                 self.codec_gain('DAC Gain DAC Playback Volume',
+                                 self.gains['gain-dac-speaker' if speaker else 'gain-dac-receiver']))
+        self.put('AO Gain AO Playback Volume',
+                 self.codec_gain('AO Gain AO Playback Volume',
+                                 self.gains['gain-ao-speaker' if speaker else 'gain-ao-receiver']))
+        if not speaker:
+            self.put('EAR Gain EAR Playback Volume',
+                     self.codec_gain('EAR Gain EAR Playback Volume',
+                                     self.gains['gain-ear-%s' % ('nb', 'wb', 'swb', 'fb')[self.band]]))
+        log('profiles: select=%#x band=%s output=%s VBC_VOLUME=%d'
+            % (word, BAND_NAMES[self.band], 'speaker' if speaker else 'receiver',
+               self.dsp_volume()))
+
+    def output(self):
+        # The old endpoint is switched off before the new one is wired; never feed both.
+        self.put('Speaker Function', 'off')
+        self.put('Earpiece Function', 'off')
+        if self.bluetooth:
+            for name, value in BLUETOOTH.items():
+                self.put(name, value)
+            return
+        for name, value in (SPEAKER if self.speaker else RECEIVER).items():
+            self.put(name, value)
+
+    def apply_volume(self, force=False):
+        """The DSP volume step, and the downlink mute that volume 0 implies.
+
+        VBC DAC1 DG Set is deliberately left at the route table's 24,24. This machine's volume law
+        lives in the DSP curve that VBC_VOLUME indexes -- dsp_volume() reads the real 7-step table
+        out of the audio_structure blob -- and stacking an invented digital gain on top of a curve
+        nobody has listened to yet would be guesswork dressed up as calibration.
+        """
+        step = self.dsp_volume()
+        muted = not self.volume
+        previous = self.applied_volume
+        if force or previous is None or previous[0] != step:
+            self.put('VBC_VOLUME', step)
+        if force or previous is None or previous[1] != muted:
+            self.put('VBC DAC1 DSP MDG Set', '1,1024' if muted else '0,1024')
+            self.put('VBC_DL_MUTE', 'enable' if muted else 'disable')
+        self.applied_volume = step, muted
+
+    def unmute_downlink(self):
+        # The Select sequence and the PCM start both reset gain; reapply before releasing the mute.
+        self.apply_volume(force=True)
+
+    # -- the sequence --------------------------------------------------------------------------
+    def start(self):
+        if self.handles:
+            return
+        pcm = find_voice_pcm()
+        if not pcm:
+            raise Failure('no FE_ST_VOICE PCM on card %d' % self.card)
+        self.card, self.device = pcm
+        self.mixer = Mixer(self.card)
+        # Snapshot everything before changing anything: a start that fails half way has to be able
+        # to put back what it found, and the caller has no other copy of the mixer state.
+        self.saved = {name: self.get(name) for name in self.controls()}
+        try:
+            self.profiles()
+            for name, value in ROUTES.items():
+                self.put(name, value)
+            self.output()
+            for direction in (0, 1):
+                self.handles.append(VoicePcm(self.card, self.device, direction))
+            # Both directions are prepared before either is started, as the vendor's HAL does.
+            for handle in self.handles:
+                handle.start()
+            # The vendor applies the parameters again once both PCMs are running.
+            self.profiles()
+            self.unmute_downlink()
+            log('VOICE-RUNNING hw:%d,%d playback/capture, %s, %d Hz, band=%s'
+                % (self.card, self.device, 'speaker' if self.speaker else 'receiver',
+                   VOICE_RATE, BAND_NAMES[self.band]))
+        except Exception:
+            self.stop()
+            raise
+
+    def stop(self):
+        for handle in reversed(self.handles):
+            handle.close()
+        self.handles = []
+        saved, self.saved = self.saved, {}
+        self.speaker = self.config.get('output', 'receiver') == 'speaker'
+        self.bluetooth = False
+        self.bt_rate = VOICE_RATE
+        self.applied_volume = None
+        try:
+            if saved:
+                restored, skipped, errors = self.restore(saved)
+                log('VOICE-STOPPED; mixer restored (%d written, %d already correct)'
+                    % (restored, skipped))
+                for error in errors:
+                    log('mixer restore: %s' % error)
+        finally:
+            # In a finally because the mixer has to close even if the restore went badly: the
+            # monitor is on its way out and a held-open control fd would outlive the call.
+            if self.mixer:
+                self.mixer.close()
+                self.mixer = None
+
+    def restore(self, values):
+        """Put the card back and report what would not go back. Never raises: a stop that partly
+        fails still has to close the PCM and let the monitor exit.
+
+        A control that already reads back its snapshot value is skipped rather than rewritten. That
+        is not only an optimisation -- SYS_IIS0 on this board rejects every write with EINVAL while
+        the IIS clock is idle, so a redundant write turns a perfect restore into a reported failure.
+        (Measured: 319 of 319 controls come back identical across a start/stop cycle.)
+        """
+        restored = skipped = 0
+        errors = []
+        # Make before break on the way out too: restoring in reverse order alone would close the
+        # new back end before reopening the original, and both share one DSP voice scene.
+        enabled = {name for name, value in values.items()
+                   if name.startswith('S_VOICE_') and str(value) in ('on', '1')}
+        order = list(enabled) + [name for name in reversed(tuple(values)) if name not in enabled]
+        for name in order:
+            value = str(values[name])
+            try:
+                if self.get(name) == value:
+                    skipped += 1
+                    continue
+                self.put(name, value)
+                restored += 1
+            except Failure as error:
+                errors.append(str(error))
+        return restored, skipped, errors
+
+    def set_speaker(self, enabled):
+        return self.set_route('speaker' if enabled else 'receiver')
+
+    def set_route(self, route, rate=VOICE_RATE):
+        if route not in ('receiver', 'speaker', 'bluetooth'):
+            raise Failure('unsupported route %r' % route)
+        enabled, bluetooth = route == 'speaker', route == 'bluetooth'
+        if enabled == self.speaker and bluetooth == self.bluetooth:
+            return
+        if not self.handles:
+            self.speaker, self.bluetooth, self.bt_rate = enabled, bluetooth, rate
+            return
+        names = self.controls()
+        before = {name: self.get(name) for name in names}
+        previous = self.speaker, self.bluetooth, self.bt_rate
+        try:
+            self.put('VBC_DL_MUTE', 'enable')
+            self.put('VBC DAC1 DSP MDG Set', '1,1024')
+            self.speaker, self.bluetooth, self.bt_rate = enabled, bluetooth, rate
+            if previous[1] and not bluetooth:
+                for name in (*BLUETOOTH, *BT_SRC):
+                    if not name.startswith('S_VOICE_') and name in self.saved:
+                        self.put(name, self.saved[name])
+                for name, value in ROUTES.items():
+                    if name != 'VBC ADC2 DG Set':
+                        self.put(name, value)
+                self.put('S_VOICE_P_BT SWITCH', 'off')
+                self.put('S_VOICE_C_BT SWITCH', 'off')
+            self.output()
+            self.profiles()
+            self.put('VBC ADC2 DG Set', before['VBC ADC2 DG Set'])
+            self.unmute_downlink()
+        except Exception:
+            self.speaker, self.bluetooth, self.bt_rate = previous
+            _, _, errors = self.restore(before)
+            for error in errors:
+                log('route rollback: %s' % error)
+            raise
+
+    def mute(self, muted):
+        if self.handles:
+            self.put('VBC ADC2 DG Set', '0,0' if muted else '24,24')
+        self.muted = bool(muted)
+
+    def network(self, command, parameter0, parameter1, source='DSP'):
+        """A bandwidth change: the DSP has renegotiated, so re-select and unmute."""
+        if not 0 <= parameter1 <= 3:
+            log('%s bandwidth %r is not NB/WB/SWB/FB, ignored' % (source, parameter1))
+            return
+        if self.band == parameter1:
+            return  # a duplicate notification must not re-mute a call that is already up
+        self.band = parameter1
+        log('%s bandwidth change net=%#x band=%s' % (source, parameter0, BAND_NAMES[self.band]))
+        if self.handles:
+            self.profiles()
+            self.unmute_downlink()
+
+    def status(self):
+        return {
+            'running': bool(self.handles),
+            'card': self.card,
+            'device': self.device,
+            'output': 'speaker' if self.speaker else 'receiver',
+            'band': BAND_NAMES[self.band],
+            'volume': self.volume,
+            'profile': '%#010x' % self.profile_word(self.band, self.speaker, self.bluetooth),
+            'pcm': '%s,%s' % (self.card, self.device) if self.device is not None else '',
+        }
+
+
+# ============================================================================================
+# The monitor. It owns the PCM pair and the mixer for as long as the call lasts, because closing
+# this process closes the PCM and takes the voice path with it.
+
+class Monitor:
+    def __init__(self, audio):
+        self.audio = audio
+        self.stopping = threading.Event()
+        self.wake = [-1, -1]          # self-pipe, so a signal handler can wake the main loop
+        self.pipe_fd = None
+        self.ctl_fd = None
+        self.thread = None
+        self.sequence = 0
+        self.started_at = time.time()
+        self.speaker = audio.speaker
+        self.muted = False
+
+    def open_channels(self):
+        try:
+            self.pipe_fd = os.open(PIPE_VOICE, os.O_RDWR)
+        except OSError as error:
+            raise Failure('cannot open %s: %s' % (PIPE_VOICE, error.strerror))
+        os.makedirs(RUN, mode=0o700, exist_ok=True)
+        try:
+            os.unlink(CTLFIFO)
+        except FileNotFoundError:
+            pass
+        os.mkfifo(CTLFIFO, 0o600)
+        self.ctl_fd = os.open(CTLFIFO, os.O_RDWR | os.O_NONBLOCK)
+        self.wake = os.pipe()
+        os.set_blocking(self.wake[0], False)
+
+    def notifications(self):
+        """Blocking reads of 20-byte aud_smsg messages. There is no poll() on this device, so this
+        is a blocking read on its own thread, released by AUDIO_PIPE_WAKEUP at shutdown."""
+        log('voice notification listener started on %s' % PIPE_VOICE)
+        while not self.stopping.is_set():
+            try:
+                data = os.read(self.pipe_fd, AUD_SMSG_SIZE)
+            except OSError:
+                if self.stopping.is_set():
+                    return
+                log('voice notification read failed: %s' % sys.exc_info()[1])
+                return
+            if self.stopping.is_set():
+                return
+            if len(data) != AUD_SMSG_SIZE:
+                log('short voice notification (%d bytes), listener stopping' % len(data))
+                return
+            command, channel, parameter0, parameter1, parameter2, parameter3 = AUD_SMSG.unpack(data)
+            log('DSP notification cmd=%#x channel=%d params=%#x,%#x,%#x,%#x'
+                % (command, channel, parameter0, parameter1, parameter2, parameter3))
+            try:
+                if (command, channel) == MSG_BANDWIDTH:
+                    self.audio.network(command, parameter0, parameter1, source='DSP')
+                elif (command, channel) == MSG_CP_VOICE:
+                    log('CP voice enabled=%s (mask=%#x)' % (bool(parameter0), parameter0))
+            except Failure as error:
+                log('handling a DSP notification failed: %s' % error)
+
+    def command(self, line):
+        words = line.split()
+        if not words:
+            return
+        verb = words[0]
+        try:
+            if verb == 'speaker' and len(words) == 2 and words[1] in ('on', 'off'):
+                self.audio.set_speaker(words[1] == 'on')
+                self.speaker = self.audio.speaker
+            elif verb == 'mute' and len(words) == 2 and words[1] in ('on', 'off'):
+                self.audio.mute(words[1] == 'on')
+                self.muted = words[1] == 'on'
+            elif verb == 'volume' and len(words) == 2:
+                level = max(0, min(15, int(words[1])))
+                self.audio.volume = level
+                self.audio.apply_volume()
+            elif verb == 'band' and len(words) == 2:
+                self.audio.network(0, 0, int(words[1]), source='CLI')
+            elif verb == 'stop':
+                self.stopping.set()
+            else:
+                log('ignoring unknown command %r' % line)
+        except (Failure, ValueError) as error:
+            log('command %r failed: %s' % (line, error))
+        self.sequence += 1
+        self.write_state()
+
+    def write_state(self):
+        fields = self.audio.status()
+        fields.update({'pid': os.getpid(), 'seq': self.sequence,
+                       'speaker': int(self.speaker), 'muted': int(self.muted),
+                       'uptime': int(time.time() - self.started_at)})
+        try:
+            tmp = STATEFILE + '.new'
+            with open(tmp, 'w') as handle:
+                for key, value in fields.items():
+                    handle.write('%s=%s\n' % (key, value))
+            os.replace(tmp, STATEFILE)
+        except OSError as error:
+            log('cannot write %s: %s' % (STATEFILE, error))
+
+    def prepare(self):
+        """Everything that must be true before `start` is allowed to say it worked: the control
+        fifo, the signal handlers, the notification thread, and the first state file. Split out so
+        the parent only ever sees 'ok' once the monitor is genuinely ready to be commanded."""
+        if self.ctl_fd is not None:
+            return
+        self.open_channels()
+        signal.signal(signal.SIGTERM, self.signal)
+        signal.signal(signal.SIGINT, self.signal)
+        signal.signal(signal.SIGHUP, self.signal)
+        self.thread = threading.Thread(target=self.notifications, daemon=True)
+        self.thread.start()
+        self.write_state()
+
+    def run(self):
+        self.prepare()
+        complained = False
+        while not self.stopping.is_set():
+            if not self.thread.is_alive() and not complained:
+                # The listener is what turns a DSP bandwidth renegotiation into a re-select. If it
+                # dies the call keeps running and then goes silent the first time the network
+                # changes band, which is a failure that would otherwise look like the network.
+                log('the voice notification listener has stopped; bandwidth changes will be missed')
+                complained = True
+            try:
+                ready, _, _ = select.select([self.wake[0], self.ctl_fd], [], [], 5.0)
+            except OSError as error:
+                if error.errno != errno.EINTR:
+                    raise
+                continue
+            for fd in ready:
+                if fd == self.wake[0]:
+                    try:
+                        os.read(self.wake[0], 64)
+                    except OSError:
+                        pass
+                else:
+                    try:
+                        data = os.read(self.ctl_fd, 4096)
+                    except OSError:
+                        continue
+                    for line in data.decode('utf-8', 'replace').splitlines():
+                        self.command(line)
+        self.shutdown()
+
+    def signal(self, number, frame):
+        self.stopping.set()
+        try:
+            os.write(self.wake[1], b'x')
+        except OSError:
+            pass
+
+    def shutdown(self):
+        # Release the blocking read before joining, or the thread never comes back. Whether this
+        # ioctl actually worked is worth a log line: without it the join would sit out its timeout
+        # and the process would still exit, so a silent success and a silent failure look the same.
+        if self.pipe_fd is not None:
+            try:
+                fcntl.ioctl(self.pipe_fd, AUDIO_PIPE_WAKEUP, struct.pack('i', 1))
+            except OSError as error:
+                log('AUDIO_PIPE_WAKEUP failed (%s); waiting out the listener timeout' % error)
+        if self.thread is not None:
+            self.thread.join(timeout=3)
+            if self.thread.is_alive():
+                log('the voice notification listener did not come back within 3s')
+        try:
+            self.audio.stop()
+        except Failure as error:
+            log('restoring the mixer on stop failed: %s' % error)
+        for fd in (self.ctl_fd, self.pipe_fd, self.wake[0], self.wake[1]):
+            if fd is not None and fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+        for path in (STATEFILE, PIDFILE, CTLFIFO):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        log('monitor stopped')
+
+
+# ============================================================================================
+# CLI
+
+USAGE = """\
+changxing60-voice-audio -- call audio for the ZTE 7552N (changxing60)
+
+  start [--output receiver|speaker] [--band NB|WB|SWB|FB] [--volume 0-15]
+  stop
+  status
+  speaker on|off
+  mute on|off
+  volume 0-15
+  band NB|WB|SWB|FB
+  selftest              what this box has and what it is missing (safe: reads only)
+  controls              every control name on the card
+  check                 read every control this program uses, and its type
+  select [word]         read the three profile Select words in hex, or write one to all three
+  dump                  every control and its value, for diffing before against after
+
+start brings the voice path up and forks a monitor that holds it; it returns as soon as the path is
+running. stop ends it and puts the mixer back the way it was found. Neither one touches the modem.
+"""
+
+
+def daemon_pid():
+    try:
+        with open(PIDFILE) as handle:
+            pid = int(handle.read().strip())
+    except (OSError, ValueError):
+        return None
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return None
+    return pid
+
+
+def read_state():
+    values = {}
+    try:
+        with open(STATEFILE) as handle:
+            for line in handle:
+                if '=' in line:
+                    key, value = line.rstrip('\n').split('=', 1)
+                    values[key] = value
+    except OSError:
+        pass
+    return values
+
+
+def send_command(line, timeout=5.0):
+    """Write one command to the monitor's fifo and wait for the state file to move on."""
+    pid = daemon_pid()
+    if pid is None:
+        print('changxing60-voice-audio: no call audio is running', file=sys.stderr)
+        return 1
+    before = read_state().get('seq')
+    try:
+        fd = os.open(CTLFIFO, os.O_WRONLY | os.O_NONBLOCK)
+    except OSError as error:
+        print('changxing60-voice-audio: cannot reach the monitor: %s' % error.strerror,
+              file=sys.stderr)
+        return 1
+    try:
+        os.write(fd, (line + '\n').encode())
+    finally:
+        os.close(fd)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        state = read_state()
+        if state.get('seq') not in (None, before):
+            print_status(state)
+            return 0
+        time.sleep(0.05)
+    print('changxing60-voice-audio: the monitor did not answer %r' % line, file=sys.stderr)
+    return 1
+
+
+def print_status(state=None):
+    state = read_state() if state is None else state
+    if not state:
+        print('idle (no call audio running)')
+        return 0
+    print('state=%s' % ('running' if state.get('running') == 'True' else 'idle'))
+    for key in ('pid', 'output', 'band', 'volume', 'profile', 'pcm', 'speaker', 'muted', 'uptime'):
+        if key in state:
+            print('%s=%s' % (key, state[key]))
+    return 0
+
+
+def cmd_start(argv):
+    options = {'output': None, 'band': None, 'volume': None}
+    while argv:
+        word = argv.pop(0)
+        if word in ('--output', '--band', '--volume') and argv:
+            options[word[2:]] = argv.pop(0)
+        elif word in ('-h', '--help'):
+            print(USAGE)
+            return 0
+        else:
+            print('changxing60-voice-audio: unknown option %r' % word, file=sys.stderr)
+            return 2
+    if daemon_pid() is not None:
+        print_status()
+        return 0
+    config = read_config()
+    if options['output']:
+        if options['output'] not in ('receiver', 'speaker'):
+            print('changxing60-voice-audio: --output takes receiver or speaker', file=sys.stderr)
+            return 2
+        config['output'] = options['output']
+    if options['band']:
+        if options['band'].upper() not in ('NB', 'WB', 'SWB', 'FB'):
+            print('changxing60-voice-audio: --band takes NB, WB, SWB or FB', file=sys.stderr)
+            return 2
+        config['band'] = str(('NB', 'WB', 'SWB', 'FB').index(options['band'].upper()))
+    if options['volume'] is not None:
+        config['volume'] = options['volume']
+
+    os.makedirs(RUN, mode=0o700, exist_ok=True)
+    read_end, write_end = os.pipe()
+    pid = os.fork()
+    if pid:
+        os.close(write_end)
+        message = b''
+        while True:
+            try:
+                chunk = os.read(read_end, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            message += chunk
+        os.close(read_end)
+        text = message.decode('utf-8', 'replace').strip()
+        if text.startswith('ok'):
+            print_status()
+            return 0
+        print('changxing60-voice-audio: %s' % (text or 'the monitor did not start'),
+              file=sys.stderr)
+        return 1
+
+    # The monitor. Detach from whatever started us -- the caller may be a daemon whose stdout is a
+    # pipe that must close -- then do the sequence and report through the pipe the parent is on.
+    os.close(read_end)
+    try:
+        os.setsid()
+    except OSError:
+        pass
+    try:
+        os.chdir('/')
+    except OSError:
+        pass
+    null = os.open('/dev/null', os.O_RDONLY)
+    os.dup2(null, 0)
+    os.close(null)
+    sink = os.open(LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    os.dup2(sink, 1)
+    os.dup2(sink, 2)
+    os.close(sink)
+
+    def report(text):
+        try:
+            os.write(write_end, (text + '\n').encode())
+            os.close(write_end)
+        except OSError:
+            pass
+
+    audio = VoiceAudio(config)
+    if 'band' in config:
+        try:
+            audio.band = int(config['band'])
+        except ValueError:
+            report('band: not a number')
+            os._exit(1)
+    if 'volume' in config:
+        try:
+            audio.volume = max(0, min(15, int(config['volume'])))
+        except ValueError:
+            report('volume: not a number')
+            os._exit(1)
+    try:
+        with open(PIDFILE, 'w') as handle:
+            handle.write('%d\n' % os.getpid())
+        audio.start()
+    except Failure as error:
+        report('error: %s' % error)
+        try:
+            audio.stop()
+        except Failure:
+            pass
+        try:
+            os.unlink(PIDFILE)
+        except OSError:
+            pass
+        os._exit(1)
+    monitor = Monitor(audio)
+    try:
+        monitor.prepare()
+    except Failure as error:
+        report('error: %s' % error)
+        try:
+            audio.stop()
+        except Failure:
+            pass
+        try:
+            os.unlink(PIDFILE)
+        except OSError:
+            pass
+        os._exit(1)
+    report('ok')
+    try:
+        monitor.run()
+    except Exception as error:                                   # noqa: BLE001 - last line of defence
+        log('monitor failed: %r' % (error,))
+        try:
+            audio.stop()
+        except Failure:
+            pass
+    finally:
+        for path in (PIDFILE, STATEFILE, CTLFIFO):
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+    os._exit(0)
+
+
+def cmd_stop(argv):
+    pid = daemon_pid()
+    if pid is None:
+        print('idle (no call audio was running)')
+        return 0
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError as error:
+        print('changxing60-voice-audio: cannot signal the monitor: %s' % error.strerror,
+              file=sys.stderr)
+        return 1
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if daemon_pid() is None:
+            print('stopped')
+            return 0
+        time.sleep(0.1)
+    print('changxing60-voice-audio: the monitor did not stop within 10s (pid %d)' % pid,
+          file=sys.stderr)
+    return 1
+
+
+# -- selftest ---------------------------------------------------------------------------------
+
+def cmd_selftest(argv):
+    """Everything this program needs, checked without opening the PCM and without touching the modem.
+
+    The mixer is opened read-only (well, O_RDWR, but nothing is written) and every control is read.
+    The PCM is only looked at in /proc, never opened, so this is safe with a call in progress and
+    safe with no call at all.
+    """
+    problems, notes = [], []
+
+    def ok(fmt, *args):
+        print('  ok    ' + (fmt % args if args else fmt))
+
+    def bad(fmt, *args):
+        print('  MISSING ' + (fmt % args if args else fmt))
+        problems.append(fmt % args if args else fmt)
+
+    def note(fmt, *args):
+        print('  note  ' + (fmt % args if args else fmt))
+        notes.append(fmt % args if args else fmt)
+
+    print('changxing60-voice-audio selftest')
+
+    print('\n[python and libasound]')
+    ok('python %s' % sys.version.split()[0])
+    try:
+        VoicePcm.libasound()
+        ok('libasound.so.2 loads, PCM ioctls are reachable')
+    except Failure as error:
+        bad('%s' % error)
+
+    print('\n[the card]')
+    name = card_name(0)
+    if not name:
+        bad('card 0 is not present (%s/cards)' % PCM_STATUS)
+    elif CARD_NAME not in name:
+        note('card 0 is %r, expected it to mention %r' % (name, CARD_NAME))
+    else:
+        ok('card 0 is %s' % name)
+
+    mixer = None
+    try:
+        mixer = Mixer(0)
+        ok('opened /dev/snd/controlC0')
+        names = mixer.names()
+        ok('%d controls on the card' % len(names))
+    except Failure as error:
+        bad('%s' % error)
+        print('\n  (without the mixer nothing else here can be checked)')
+        return 1
+
+    print('\n[the PCM pair]')
+    pcm = find_voice_pcm()
+    if pcm is None:
+        bad('no FE_ST_VOICE in %s/pcm' % PCM_STATUS)
+    else:
+        ok('FE_ST_VOICE is hw:%d,%d' % pcm)
+        states = pcm_open_state(*pcm)
+        if states == ['closed', 'closed']:
+            ok('playback and capture are both closed, so no call is up')
+        else:
+            note('playback/capture are %s; a call may be up right now' % '/'.join(states))
+
+    print('\n[the voice devices]')
+    for path in (PIPE_VOICE, TURNING % 0, TURNING % 1, TURNING % 2, TURNING % 3):
+        if os.path.exists(path):
+            ok('%s' % path)
+        else:
+            bad('%s is not there' % path)
+
+    print('\n[the profile blobs]')
+    for name, index in PROFILE_BLOBS:
+        path = os.path.join(FIRMWARE, name)
+        header = read_profile_header(path)
+        if header is None:
+            if index == 3:
+                note('%s: absent (the smart-PA profile; not needed without the AW87xxx driver)' % name)
+            else:
+                bad('%s: absent or not an audio_profile blob' % name)
+            continue
+        modes, length = header
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            size = -1
+        if size == FW_HEADER.size + modes * length:
+            ok('%s: %d modes of %d bytes' % (name, modes, length))
+        else:
+            bad('%s: %d bytes, but the header says %d modes x %d = %d'
+                % (name, size, modes, length, FW_HEADER.size + modes * length))
+        node = TURNING % index
+        try:
+            with open(node, 'rb') as handle:
+                live = handle.read(FW_HEADER.size)
+            live_header = FW_HEADER.unpack(live) if len(live) == FW_HEADER.size else None
+            if live_header and live_header[0].rstrip(b'\0') == FW_MAGIC:
+                ok('%s: the kernel is holding a profile (%d modes of %d)'
+                   % (node, live_header[1], live_header[2]))
+            else:
+                bad('%s: the kernel is holding nothing, so no Select can apply' % node)
+        except OSError as error:
+            bad('%s: %s' % (node, error.strerror))
+
+    print('\n[the mode table, against the audio_structure blob]')
+    modes, length = (read_profile_header(os.path.join(FIRMWARE, 'audio_structure'))
+                     or (None, None))
+    curves = load_volume_curves()
+    if modes is None:
+        note('no audio_structure blob, so the mode numbers cannot be checked')
+    else:
+        for group, bands in MODES.items():
+            for index, mode in enumerate(bands):
+                if mode >= modes:
+                    bad('%s %s is mode %d but the blob has %d modes'
+                        % (group, BAND_NAMES[index], mode, modes))
+        if curves:
+            ok('read %d per-mode gain curves at +%#x, %d entries each'
+               % (len(curves), VOLUME_CURVE_OFFSET, VOLUME_CURVE_ENTRIES))
+            for group, bands in MODES.items():
+                values = [curves.get(mode, ()) for mode in bands]
+                if all(v and v[-1] > 0 for v in values):
+                    loudness = [v[-1] for v in values]
+                    order = 'rising' if all(a <= b for a, b in zip(loudness, loudness[1:])) \
+                        else 'NOT rising'
+                    note('%s: loudest gain per band %s (%s, NB<WB<SWB<FB is what to expect)'
+                         % (group, loudness, order))
+                else:
+                    note('%s: no gain curve at +%#x for modes %s' % (group, VOLUME_CURVE_OFFSET, bands))
+
+    print('\n[the controls this program uses]')
+    present, missing, wrong = [], [], []
+    for control in VOICE_CONTROLS:
+        try:
+            element = mixer.info(control)
+        except Failure:
+            missing.append(control)
+            continue
+        kind = {TYPE_BOOLEAN: 'bool', TYPE_INTEGER: 'int', TYPE_ENUMERATED: 'enum'}.get(
+            element.kind, 'type%d' % element.kind)
+        detail = 'x%d %s' % (element.count, kind)
+        if element.kind == TYPE_ENUMERATED:
+            wanted = []
+            for table in (ROUTES, RECEIVER, SPEAKER, BLUETOOTH, BT_SRC, CODEC_IIS):
+                if control in table:
+                    wanted.append(table[control])
+            absent = [value for value in wanted if value not in element.items]
+            if absent:
+                wrong.append('%s has no item %s' % (control, ','.join(absent)))
+                bad('%s: %s, but not the items we need: %s'
+                    % (control, detail, ', '.join(absent)))
+                continue
+            detail += ' items=%d' % len(element.items)
+        present.append(control)
+        print('  ok    %-34s %-18s = %s' % (control, detail, mixer.get(control)))
+
+    print('\n[summary]')
+    print('  %d controls used, %d present' % (len(VOICE_CONTROLS), len(present)))
+    if missing:
+        print('  %d MISSING:' % len(missing))
+        for control in missing:
+            print('    %s' % control)
+    if wrong:
+        print('  %d with the wrong items:' % len(wrong))
+        for item in wrong:
+            print('    %s' % item)
+    if notes:
+        print('  %d notes (not failures):' % len(notes))
+        for item in notes:
+            print('    %s' % item)
+    mixer.close()
+    print('\nselftest: %s' % ('FAILED' if problems else 'PASSED'))
+    return 1 if problems else 0
+
+
+def cmd_select(argv):
+    """Read the three profile Select words, or write one to all three, always in hex.
+
+    This is the calibration front door. The mode numbers in MODES cannot be read out of the driver
+    and cannot be proved from the blob, so the way to settle them is to put a word on the card and
+    listen to a call. It is also the only honest way to show what amixer does to a large word, so
+    the test script uses it for exactly that.
+    """
+    mixer = Mixer(0)
+    status = 0
+    if argv:
+        try:
+            word = int(argv[0], 0)
+        except ValueError:
+            print('changxing60-voice-audio: %r is not a number' % argv[0], file=sys.stderr)
+            mixer.close()
+            return 2
+        for name in PROFILES:
+            try:
+                mixer.put(name, word)
+            except Failure as error:
+                print('  %s' % error, file=sys.stderr)
+                status = 1
+    for name in PROFILES:
+        try:
+            print('%s\t%#010x' % (name, int(mixer.get(name))))
+        except Failure as error:
+            print('%s\t?%s' % (name, error))
+            status = 1
+    mixer.close()
+    return status
+
+
+def cmd_dump(argv):
+    """Every control and its current value, one per line, for diffing a before against an after.
+
+    This exists because "stop put the mixer back" is a claim that has to be checked, and the only
+    way to check it is to compare the whole card against a snapshot taken before the call. Values
+    come from the raw ioctl, so a Select word shows its full 32 bits rather than amixer's clamped
+    rendering of it.
+    """
+    mixer = Mixer(0)
+    for name in mixer.names():
+        try:
+            print('%s\t%s' % (name, mixer.get(name)))
+        except Failure as error:
+            print('%s\t?%s' % (name, error))
+    mixer.close()
+    return 0
+
+
+def cmd_controls(argv):
+    mixer = Mixer(0)
+    names = mixer.names()
+    if '--verbose' in argv or '-v' in argv:
+        for name in names:
+            element = mixer.info(name)
+            kind = {TYPE_BOOLEAN: 'bool', TYPE_INTEGER: 'int',
+                    TYPE_ENUMERATED: 'enum'}.get(element.kind, 'type%d' % element.kind)
+            limits = ''
+            if element.minimum is not None:
+                limits = ' %d..%d' % (element.minimum, element.maximum)
+            items = ' items=%s' % ','.join(element.items) if element.items else ''
+            print('%s\tx%d\t%s%s%s' % (name, element.count, kind, limits, items))
+    else:
+        for name in names:
+            print(name)
+    print('%d controls' % len(names), file=sys.stderr)
+    mixer.close()
+    return 0
+
+
+def cmd_check(argv):
+    """Read every control this program writes, and say what it is. Never writes anything."""
+    mixer = Mixer(0)
+    bad = 0
+    for control in VOICE_CONTROLS:
+        try:
+            element = mixer.info(control)
+            kind = {TYPE_BOOLEAN: 'bool', TYPE_INTEGER: 'int',
+                    TYPE_ENUMERATED: 'enum'}.get(element.kind, 'type%d' % element.kind)
+            items = ' items=%s' % ','.join(element.items) if element.items else ''
+            limits = ''
+            if element.minimum is not None:
+                limits = ' %d..%d' % (element.minimum, element.maximum)
+            print('%-34s x%d %-5s%s%s = %s'
+                  % (control, element.count, kind, limits, items, mixer.get(control)))
+        except Failure as error:
+            print('%-34s MISSING (%s)' % (control, error))
+            bad += 1
+    mixer.close()
+    print('%d of %d controls missing' % (bad, len(VOICE_CONTROLS)))
+    return 1 if bad else 0
+
+
+def main(argv):
+    if not argv:
+        print(USAGE, file=sys.stderr)
+        return 2
+    verb, rest = argv[0], argv[1:]
+    if verb in ('-h', '--help', 'help'):
+        print(USAGE)
+        return 0
+    try:
+        if verb == 'start':
+            return cmd_start(list(rest))
+        if verb == 'stop':
+            return cmd_stop(list(rest))
+        if verb == 'status':
+            return print_status()
+        if verb == 'selftest':
+            return cmd_selftest(list(rest))
+        if verb == 'controls':
+            return cmd_controls(list(rest))
+        if verb == 'dump':
+            return cmd_dump(list(rest))
+        if verb == 'select':
+            return cmd_select(list(rest))
+        if verb == 'check':
+            return cmd_check(list(rest))
+        if verb == 'speaker' and rest and rest[0] in ('on', 'off'):
+            return send_command('speaker %s' % rest[0])
+        if verb == 'mute' and rest and rest[0] in ('on', 'off'):
+            return send_command('mute %s' % rest[0])
+        if verb == 'volume' and rest:
+            return send_command('volume %s' % rest[0])
+        if verb == 'band' and rest:
+            band = rest[0].upper()
+            if band not in ('NB', 'WB', 'SWB', 'FB'):
+                print('changxing60-voice-audio: band takes NB, WB, SWB or FB', file=sys.stderr)
+                return 2
+            return send_command('band %d' % ('NB', 'WB', 'SWB', 'FB').index(band))
+    except Failure as error:
+        print('changxing60-voice-audio: %s' % error, file=sys.stderr)
+        return 1
+    print(USAGE, file=sys.stderr)
+    return 2
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))

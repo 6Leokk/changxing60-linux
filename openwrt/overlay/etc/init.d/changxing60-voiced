@@ -1,0 +1,25 @@
+#!/bin/sh /etc/rc.common
+# Follow the modem's calls and keep /run/changxing60-voice/state, which is what the panel paints, what the web page
+# polls, and what decides whether the volume keys are volume keys or answer and hang up.
+#
+# START=21: after init.d/changxing60-at (S19), which owns the AT channel this daemon asks, and after netifd (S20),
+# which is the one thing at boot that holds that channel for any length of time (AT+CGDATA blocks it for 10-20
+# seconds while the bearer comes up). Nothing here is on the boot critical path -- a call that arrives before
+# this starts is a call the panel shows a second late -- so a failure to start is logged and retried by procd
+# rather than allowed to hold anything up.
+#
+# The daemon does its own waiting: it will not touch the channel until /run/changxing60-at/cmd exists, because
+# changxing60-at falls back to opening /dev/stty_nr1 itself when the daemon is not there, and a second reader on an
+# SIPC channel leaves the modem silent until a reboot. See changxing60-voiced for that whole story.
+START=21
+USE_PROCD=1
+export PATH="$PATH:/opt/changxing60/busybox-bin"
+
+start_service() {
+	procd_open_instance voiced
+	procd_set_param command /opt/changxing60/bin/changxing60-voiced
+	procd_set_param respawn 3600 10 0
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}

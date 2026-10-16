@@ -1,0 +1,13 @@
+{
+	"admin/services/changxing60net": {
+		"title": "Cell status",
+		"order": 64,
+		"action": {
+			"type": "view",
+			"path": "changxing60net/net"
+		},
+		"depends": {
+			"acl": [ "luci-app-changxing60net" ]
+		}
+	}
+}

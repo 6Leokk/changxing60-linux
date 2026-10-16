@@ -1,0 +1,13 @@
+{
+	"admin/services/changxing60usb": {
+		"title": "USB link",
+		"order": 63,
+		"action": {
+			"type": "view",
+			"path": "changxing60usb/usb"
+		},
+		"depends": {
+			"acl": [ "luci-app-changxing60usb" ]
+		}
+	}
+}

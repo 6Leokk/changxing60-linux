@@ -1,0 +1,164 @@
+#!/bin/sh
+# Load the Unisoc ASoC / AGDSP audio modules for call audio, in dependency order.
+#
+# Why a list and not modprobe: this rootfs's modprobe is ubox kmodloader, which does not read
+# modules.dep, and the order below is not something it could work out anyway -- depends= cannot
+# pull a driver that nothing depends on (the codecs, the card, saudio, the dump and pipe drivers
+# are all leaves), which is why Android ships an explicit modules.load list and why this is one.
+# The order is topological over the depends= of the built set; tools/audio/test-built.sh proves
+# the set is closed (every import resolves to a matching CRC) before any of it reaches the device.
+#
+# Idempotent on purpose: this board reboots itself (a WAN self-heal, a watchdog) and a loader
+# caught half way through must be safe to run again. A module already in /proc/modules is left
+# alone, and a module whose dependencies are not all loaded yet is skipped and retried on the
+# next pass rather than forced in.
+#
+#   changxing60-audio-load            load them (quiet unless something goes wrong)
+#   changxing60-audio-load --check    say what would happen, load nothing
+#   changxing60-audio-load --verbose  name every module as it goes
+#
+# Exit 0 when every module of the set is loaded, 1 otherwise. Where it got to is written to
+# $LOG (default /root/audio-load.log) as well as to stderr, because the console only carries
+# ERR and above: without a file there is no record at all of what happened.
+set -u
+
+MODDIR=${CHANGXING60_MODDIR:-/lib/modules/$(uname -r)}
+LOG=${CHANGXING60_AUDIO_LOG:-/root/audio-load.log}
+CHECK=0
+VERBOSE=0
+for a in "$@"; do
+    case $a in
+        --check)   CHECK=1 ;;
+        --verbose|-v) VERBOSE=1 ;;
+        -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "changxing60-audio-load: unknown option $a" >&2; exit 2 ;;
+    esac
+done
+
+# The set, in load order. snd-soc-sprd-pa-ucp1301 is deliberately not here: this board has no
+# ucp1301 speaker amplifier in its device tree, so there is nothing for it to bind.
+MODULES="
+audio_mem
+agdsp_access
+mcdt_hw_r2p0
+saudio
+snd-soc-sprd-card
+snd-soc-sprd-codec-ump9620-power-dev
+snd-soc-sprd-dummy-codec
+snd-soc-unisoc-dp-codec
+sprd_apipe
+sprd-platform-pcm-routing
+voice_trigger_node
+snd-soc-sprd-codec-ump9620
+snd-soc-sprd-codec-ump9620-power
+snd-soc-sprd-tdm
+snd-soc-sprd-vaudio
+audio_sipc
+voice_trigger_irq
+snd-soc-sprd-dai
+snd-soc-sprd-pdm-r2p0
+snd-soc-sprd-vbc-v4
+sprd-dmaengine-pcm
+audio-dsp-dump
+audio-pipe
+sprd-compr-2stage-dma
+sprd_audcp_boot
+sprd_audcp_dvfs
+snd-soc-sprd-vbc-fe
+"
+
+# loaded NAME: is this module in the kernel?
+#
+# The name is normalised first, and that is not a detail: the kernel records a module under the
+# name in its own header, with every hyphen turned into an underscore, so the file
+# snd-soc-sprd-card.ko is snd_soc_sprd_card in /proc/modules. Grepping for the file's name finds
+# nothing -- which reads exactly like "not loaded yet", so the loader would insmod a module that
+# was already in, get EEXIST, and report the whole set as failed while every one of them was in
+# fact loaded. (This is how the first run on the device read: 10 loaded, 17 "failed", all 27 in.)
+loaded() {
+    _n=$(printf '%s' "$1" | tr '-' '_')
+    grep -q "^$_n " /proc/modules 2>/dev/null
+}
+
+# a dependency counts as satisfied if it is a module that is loaded, or a built-in (in which case
+# there is no .ko for it anywhere and nothing to wait for)
+dep_ok() {
+    loaded "$1" && return 0
+    [ -e "$MODDIR/$1.ko" ] && return 1
+    return 0
+}
+
+log() { [ "$CHECK" = 1 ] || printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG" 2>/dev/null; }
+
+[ "$CHECK" = 1 ] || : > "$LOG" 2>/dev/null
+
+todo=0
+for m in $MODULES; do
+    if loaded "$m"; then
+        [ "$VERBOSE" = 1 ] && echo "ok    $m (already loaded)"
+        log "already loaded: $m"
+        continue
+    fi
+    todo=$((todo + 1))
+done
+
+# One pass per module, repeating while a pass makes progress: a module skipped because something
+# it needs was not in yet gets its turn on the next pass. With a correct order the first pass
+# loads everything and the loop runs once.
+passes=0
+while [ "$todo" -gt 0 ] && [ "$passes" -lt 4 ]; do
+    passes=$((passes + 1))
+    progress=0
+    for m in $MODULES; do
+        loaded "$m" && continue
+        if [ ! -e "$MODDIR/$m.ko" ]; then
+            echo "changxing60-audio-load: $MODDIR/$m.ko is missing" >&2
+            log "MISSING: $m"
+            continue
+        fi
+        # depends= from the module itself, so this cannot drift from what was built. This is the
+        # belt to the order's braces, and it only tightens where modinfo understands -F: this
+        # rootfs's modinfo is kmodloader's, which prints nothing for it, so on the device the
+        # order above is what actually holds the load together. Both are checked host-side by
+        # tools/audio/test-built.sh, which is where the dependency graph is proved.
+        need=
+        for d in $(modinfo -F depends "$MODDIR/$m.ko" 2>/dev/null | tr ',' ' '); do
+            dep_ok "$d" || need="$need $d"
+        done
+        if [ -n "$need" ]; then
+            [ "$VERBOSE" = 1 ] && echo "wait  $m (needs$need)"
+            continue
+        fi
+        if [ "$CHECK" = 1 ]; then
+            echo "would insmod $m"
+            log "would insmod: $m"
+            progress=1
+            todo=$((todo - 1))
+            continue
+        fi
+        out=$(insmod "$MODDIR/$m.ko" 2>&1)
+        if [ $? -eq 0 ] && loaded "$m"; then
+            [ "$VERBOSE" = 1 ] && echo "load  $m"
+            log "loaded: $m"
+            progress=1
+            todo=$((todo - 1))
+        else
+            echo "changxing60-audio-load: insmod $m failed: $out" >&2
+            log "FAILED: $m: $out"
+        fi
+    done
+    [ "$progress" = 1 ] || break
+done
+
+missing=0
+for m in $MODULES; do
+    loaded "$m" || missing=$((missing + 1))
+done
+if [ "$missing" -gt 0 ]; then
+    [ "$CHECK" = 1 ] && echo "changxing60-audio-load: $missing of the set not loaded yet"
+    [ "$CHECK" = 0 ] && { echo "changxing60-audio-load: $missing module(s) of the set are not loaded" >&2; log "incomplete: $missing not loaded"; }
+    exit 1
+fi
+[ "$CHECK" = 1 ] && { echo "changxing60-audio-load: the whole set would load"; exit 0; }
+log "complete: $(echo $MODULES | wc -w) modules loaded"
+exit 0

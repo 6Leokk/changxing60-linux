@@ -1,0 +1,12 @@
+[Unit]
+Description=changxing60 extra vendor drivers (thermal cooling, LEDs, SAR, SIM tray, DVFS)
+After=changxing60-vendor.service systemd-modules-load.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/bin/sleep 20
+ExecStart=/opt/changxing60/bin/extra-modules
+
+[Install]
+WantedBy=multi-user.target

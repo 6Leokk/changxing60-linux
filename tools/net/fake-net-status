@@ -1,0 +1,30 @@
+#!/bin/sh
+# Host-side stand-in for /opt/changxing60/bin/changxing60-net-status, so the network page's rpcd
+# backend (openwrt/overlay/usr/share/rpcd/ucode/changxing60net.uc) can be driven without a modem and
+# without the real collector -- the same kind of seam tools/net/fake-at gives the collector's own
+# test (tools/net/test-status.sh), one level up: that one stubs the AT client, this one stubs the
+# collector.
+#
+# The reply is exactly the collector's --json contract: ONE JSON line on stdout. Which line, and
+# what exit code, come from files the test writes:
+#
+#   /work/case.json   the line to print (printed verbatim, no trailing CR -- the collector's lines
+#                     end in \n, not \r\n; stripping those is the *real* client's job, not the
+#                     backend's, and not this stub's either)
+#   /work/case.rc     the exit code (0 = the round ran; 1 = the collector's "nothing answered")
+#   /work/dialed      the full argument list this stub was handed, appended by the test's
+#                     expectations -- how "fast selects --fast" is proven rather than assumed
+#
+# Not part of the device build.
+set -u
+
+# the caller's argument list is the thing being checked, so record it before anything else
+printf '%s\n' "$*" > /work/dialed
+
+rc=0
+[ -r /work/case.rc ] && rc=$(cat /work/case.rc)
+
+if [ -r /work/case.json ]; then
+	cat /work/case.json
+fi
+exit "$rc"

@@ -2,7 +2,7 @@
 Search order approximates the vendor linker namespace: vendor, VNDK apex, system, bionic."""
 import struct, subprocess, sys, os
 from pathlib import Path
-ROOT=Path(os.environ.get('MU300_CLOSURE_ROOT','rootfs'))
+ROOT=Path(os.environ.get('CHANGXING60_CLOSURE_ROOT','rootfs'))
 SEARCH=['/vendor/lib64','/vendor/lib64/hw','/vendor/lib64/egl','/odm/lib64','/apex/com.android.vndk.v33/lib64',
         '/system/lib64','/apex/com.android.runtime/lib64/bionic','/apex/com.android.runtime/lib64',
         '/apex/com.android.i18n/lib64','/system_ext/lib64']

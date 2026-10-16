@@ -1,15 +1,15 @@
 #!/bin/sh
-# MU300 / ZTE F50 Linux installer. Run on a macOS/Linux host with the device booted in rooted Android (adb + su).
+# changxing60 / ZTE F50 (hardware MU300) Linux installer. Run on a macOS/Linux host with the device booted in rooted Android (adb + su).
 #
 #   ./install.sh                 interactive install of Ubuntu, OpenWrt or both
 #
-# Needs: adb, docker, python3, lz4, and the kernel build outputs in $MU300_KERNEL_OUT (default: out/):
+# Needs: adb, docker, python3, lz4, and the kernel build outputs in $CHANGXING60_KERNEL_OUT (default: out/):
 #   Image, modules/*.ko, modules.builtin, modules.builtin.modinfo   (see README "Build and run")
-# Proprietary vendor files are pulled from *your* device into $MU300_WORK (default: work/) and never leave the host.
+# Proprietary vendor files are pulled from *your* device into $CHANGXING60_WORK (default: work/) and never leave the host.
 set -eu
 TOP=$(cd "$(dirname "$0")" && pwd)
-KOUT=${MU300_KERNEL_OUT:-$TOP/out}
-WORK=${MU300_WORK:-$TOP/work}
+KOUT=${CHANGXING60_KERNEL_OUT:-$TOP/out}
+WORK=${CHANGXING60_WORK:-$TOP/work}
 OWRT_VER=25.12.5
 T=/data/local/tmp
 
@@ -35,14 +35,14 @@ case "$model" in *MU300*|*F50*|*mu300*|*7552N*|*P720S20*) ;; *) ask go "This doe
 # 7552N port (B2): fixed geometry from design S3.2 instead of the mmcblk0 free-space scan
 # (UFS LBA=4096, no tail free space until the Phase-3 GPT shrink of userdata).
 # Region lives between the shrunk userdata (new end LBA 19007999) and the backup GPT.
-say "Linux region (7552N fixed geometry; override with MU300_OFF/MU300_SIZE)"
-OFF=${MU300_OFF:-77858865152}; SIZE=${MU300_SIZE:-50096766976}
+say "Linux region (7552N fixed geometry; override with CHANGXING60_OFF/CHANGXING60_SIZE)"
+OFF=${CHANGXING60_OFF:-77858865152}; SIZE=${CHANGXING60_SIZE:-50096766976}
 # an existing installation defines the region (it may have been created with a slightly different size)
 existing=no
 for cand in $OFF; do
     m=$(su_do "dd if=/dev/block/sda bs=1 skip=$((cand + 1080)) count=2 2>/dev/null | od -An -tx1" | tr -d ' ')
     l=$(su_do "dd if=/dev/block/sda bs=1 skip=$((cand + 1144)) count=16 2>/dev/null" | tr -d '\000')
-    if [ "$m" = 53ef ] && [ "$l" = mu300root ]; then
+    if [ "$m" = 53ef ] && [ "$l" = changxing60root ]; then
         blocks=$(su_do "dd if=/dev/block/sda bs=1 skip=$((cand + 1028)) count=4 2>/dev/null | od -An -tu4" | tr -d ' ')
         OFF=$cand; SIZE=$((blocks * 4096)); existing=yes; break
     fi
@@ -53,13 +53,13 @@ disk=$(su_do 'cat /sys/block/sda/size')
 # before the backup GPT (5 LBAs of 4096B = 40 sectors of 512B at the disk tail)
 [ $((OFF / 512 + SIZE / 512)) -le $((disk - 40)) ] || die "region overlaps the backup GPT"
 echo "disk sda: $disk x512B sectors ($((disk / 2048)) MiB)"
-echo "Linux region: offset $OFF, $((SIZE / 1048576)) MiB, existing mu300root filesystem: $existing"
+echo "Linux region: offset $OFF, $((SIZE / 1048576)) MiB, existing changxing60root filesystem: $existing"
 
 # ---------------------------------------------------------------- choices
 say "What should be installed?"
 echo "  1) Ubuntu 26.04 LTS (full distribution, apt, ~500 MiB RAM in use)"
 echo "  2) OpenWrt $OWRT_VER (router, LuCI web UI, ~140 MiB RAM in use)"
-echo "  3) both (switch later with: mu300-os ubuntu|openwrt)"
+echo "  3) both (switch later with: changxing60-os ubuntu|openwrt)"
 ask choice "Choice" 3
 case $choice in 1) OSES=ubuntu ;; 2) OSES=openwrt ;; 3) OSES="ubuntu openwrt" ;; *) die "invalid choice" ;; esac
 BOOT_OS=${OSES%% *}
@@ -86,22 +86,22 @@ printf 'Password for the "ubuntu" user (Ubuntu) and "root" (OpenWrt): '
 mkdir -p "$WORK/dumps" "$WORK/firmware"
 say "Pulling device data into $WORK (stays on this computer)"
 # B3/A5: `adb exec-out` corrupts binary stdout through WSL interop -> device-side cp/dd + adb pull
-pull_bin() { # pull_bin "<device-side producer writing $T/mu300-pull.bin>" <host-out>
-    su_do "$1 && chmod 644 $T/mu300-pull.bin" >/dev/null
-    adb pull "$T/mu300-pull.bin" "$2" >/dev/null </dev/null || die "pull failed for $2"
-    su_do "rm -f $T/mu300-pull.bin" >/dev/null
+pull_bin() { # pull_bin "<device-side producer writing $T/changxing60-pull.bin>" <host-out>
+    su_do "$1 && chmod 644 $T/changxing60-pull.bin" >/dev/null
+    adb pull "$T/changxing60-pull.bin" "$2" >/dev/null </dev/null || die "pull failed for $2"
+    su_do "rm -f $T/changxing60-pull.bin" >/dev/null
     sz=$(wc -c < "$2"); echo "  pulled $2 ($sz bytes)"
 }
 # 7552N: boot_a on this device is APatch(KPatch)-patched (E24) - the boot image template must be
 # the STOCK image. Pre-place rescue/dumps/boot_ori.img (sha256 cfe593a3...) as work/dumps/boot_ori.img.
 [ -s "$WORK/dumps/boot_ori.img" ] || die "missing $WORK/dumps/boot_ori.img (stock boot template; do NOT use the patched boot_a on this device)"
-[ -s "$WORK/dumps/misc-head.bin" ] || pull_bin "dd if=/dev/block/by-name/misc bs=4096 count=1 of=$T/mu300-pull.bin" "$WORK/dumps/misc-head.bin"
+[ -s "$WORK/dumps/misc-head.bin" ] || pull_bin "dd if=/dev/block/by-name/misc bs=4096 count=1 of=$T/changxing60-pull.bin" "$WORK/dumps/misc-head.bin"
 [ -d "$WORK/android-subset" ] || sh "$TOP/android-vendor/extract-subset.sh" "$WORK/android-subset"
 # 7552N firmware variants are _aa/.xpe (F50 used _ab); pre-seeded files (rescue/firmware/fw/) are kept
 for f in wcnmodem.bin gnssmodem.bin wifi_board_config.ini wifi_board_config_aa.ini wifi_board_config_xpe.ini wifi_board_config_ab.ini bt_configure_pskey.ini bt_configure_rf.ini; do
     [ -s "$WORK/firmware/$f" ] && { echo "  firmware cached: $f"; continue; }
     for d in /odm/firmware /vendor/firmware /vendor/etc; do
-        if [ "$(su_do "[ -f $d/$f ] && echo y")" = y ]; then pull_bin "cp $d/$f $T/mu300-pull.bin" "$WORK/firmware/$f"; break; fi
+        if [ "$(su_do "[ -f $d/$f ] && echo y")" = y ]; then pull_bin "cp $d/$f $T/changxing60-pull.bin" "$WORK/firmware/$f"; break; fi
     done
 done
 if [ "$gpu" = yes ] && [ ! -d "$WORK/android-gpu-subset" ]; then
@@ -115,42 +115,42 @@ rm -rf "$WORK/out/modules" && cp -R "$KOUT/modules" "$WORK/out/modules"
 cp "$KOUT/modules.builtin" "$KOUT/modules.builtin.modinfo" "$WORK/out/" 2>/dev/null || true
 # B10 (x86 host): upstream builds these on an arm64 Mac where "native" == arm64; on x86_64 we must
 # pin --platform for the rootfs image and use the cross toolchain for the helper binaries
-docker build --platform linux/arm64 -q -t mu300-ubuntu:26.04 "$TOP/rootfs" >/dev/null
-docker run --rm mu300-ubuntu:26.04 cat /bin/busybox > "$WORK/busybox"; chmod +x "$WORK/busybox"
-docker run --rm -v "$TOP/tools":/src:ro -v "$WORK/tools":/o mu300-kbuild-cross sh -c '
+docker build --platform linux/arm64 -q -t changxing60-ubuntu:26.04 "$TOP/rootfs" >/dev/null
+docker run --rm changxing60-ubuntu:26.04 cat /bin/busybox > "$WORK/busybox"; chmod +x "$WORK/busybox"
+docker run --rm -v "$TOP/tools":/src:ro -v "$WORK/tools":/o changxing60-kbuild-cross sh -c '
   aarch64-linux-gnu-gcc -O2 -static -o /o/logdw/logdw /src/logdw/logdw.c &&
-  aarch64-linux-gnu-gcc -O2 -static -o /o/bt-init/mu300-bt-init /src/bt-init/mu300-bt-init.c'
-for b in "$WORK/busybox" "$WORK/tools/logdw/logdw" "$WORK/tools/bt-init/mu300-bt-init"; do
+  aarch64-linux-gnu-gcc -O2 -static -o /o/bt-init/changxing60-bt-init /src/bt-init/changxing60-bt-init.c'
+for b in "$WORK/busybox" "$WORK/tools/logdw/logdw" "$WORK/tools/bt-init/changxing60-bt-init"; do
     file "$b" | grep -qi aarch64 || die "$b is not arm64: $(file -b "$b")"
 done
 if [ -d "$WORK/android-gpu-subset" ]; then
     L=$(mktemp -d "$WORK/cllibs.XXXX")
     cp "$WORK/android-gpu-subset/vendor/lib64/libOpenCL.so" "$WORK/android-subset/apex/com.android.runtime/lib64/bionic/libc.so" \
        "$WORK/android-subset/apex/com.android.runtime/lib64/bionic/libdl.so" "$L/"
-    docker run --rm -v "$TOP/tools/gpu":/w -v "$L":/l:ro -v "$WORK/tools/gpu":/o mu300-kbuild sh -c \
+    docker run --rm -v "$TOP/tools/gpu":/w -v "$L":/l:ro -v "$WORK/tools/gpu":/o changxing60-kbuild sh -c \
       'ln -sf /usr/bin/clang-12 /usr/local/bin/clang; cp -r /w /tmp/gpu && sh /tmp/gpu/build.sh /l && cp /tmp/gpu/cltest /o/'
     rm -rf "$L"
 fi
 
-# MU300_REUSE_BUILD=1 keeps rootfs tarballs from an earlier run of this script
-reuse() { [ "${MU300_REUSE_BUILD:-0}" = 1 ] && [ -s "$WORK/mu300-$1.tar.gz" ] && echo "reusing $WORK/mu300-$1.tar.gz"; }
+# CHANGXING60_REUSE_BUILD=1 keeps rootfs tarballs from an earlier run of this script
+reuse() { [ "${CHANGXING60_REUSE_BUILD:-0}" = 1 ] && [ -s "$WORK/changxing60-$1.tar.gz" ] && echo "reusing $WORK/changxing60-$1.tar.gz"; }
 case " $OSES " in *" ubuntu "*) reuse ubuntu || {
     say "Building the Ubuntu root filesystem"
     B=$(mktemp -d "$WORK/ubuntu-build.XXXX")
     tar -C "$TOP/rootfs" --exclude ./base.tar --exclude './*.tar.gz' -cf - . | tar -xf - -C "$B"
-    cid=$(docker create mu300-ubuntu:26.04 /bin/true); docker export "$cid" > "$B/base.tar"; docker rm "$cid" >/dev/null
+    cid=$(docker create changxing60-ubuntu:26.04 /bin/true); docker export "$cid" > "$B/base.tar"; docker rm "$cid" >/dev/null
     gpuargs=""
     [ -d "$WORK/android-gpu-subset" ] && gpuargs="-v $WORK/android-gpu-subset:/android-gpu-subset:ro -v $WORK/tools/gpu/cltest:/cltest:ro"
     # shellcheck disable=SC2086
     docker run --rm -v "$B":/w -v "$WORK/out/modules":/kmods:ro -v "$WORK/out":/kout:ro -v "$WORK/firmware":/firmware:ro \
       -v "$WORK/android-subset":/android-subset:ro -v "$WORK/tools/logdw/logdw":/logdw:ro \
-      -v "$WORK/tools/bt-init/mu300-bt-init":/bt-init:ro $gpuargs mu300-ubuntu:26.04 bash /w/assemble.sh >/dev/null
-    mv "$B/mu300-ubuntu-26.04-rootfs.tar.gz" "$WORK/mu300-ubuntu.tar.gz"; rm -rf "$B"; } ;;
+      -v "$WORK/tools/bt-init/changxing60-bt-init":/bt-init:ro $gpuargs changxing60-ubuntu:26.04 bash /w/assemble.sh >/dev/null
+    mv "$B/changxing60-ubuntu-26.04-rootfs.tar.gz" "$WORK/changxing60-ubuntu.tar.gz"; rm -rf "$B"; } ;;
 esac
 case " $OSES " in *" openwrt "*) reuse openwrt || {
     say "Building the OpenWrt root filesystem"
-    MU300_INPUTS="$WORK" sh "$TOP/openwrt/build-rootfs.sh" mu300-openwrt-rootfs.tar.gz >/dev/null
-    mv "$TOP/openwrt/mu300-openwrt-rootfs.tar.gz" "$WORK/mu300-openwrt.tar.gz"; } ;;
+    CHANGXING60_INPUTS="$WORK" sh "$TOP/openwrt/build-rootfs.sh" changxing60-openwrt-rootfs.tar.gz >/dev/null
+    mv "$TOP/openwrt/changxing60-openwrt-rootfs.tar.gz" "$WORK/changxing60-openwrt.tar.gz"; } ;;
 esac
 
 say "Building the boot image"
@@ -162,7 +162,7 @@ python3 "$TOP/boot/build-boot-image.py" --stock-boot "$WORK/dumps/boot_ori.img" 
   --kernel "$KOUT/Image" --modules "$WORK/out/modules" --init "$WORK/init" --busybox "$WORK/busybox" \
   --logdw "$WORK/tools/logdw/logdw" --ueventd-perms "$UEV" \
   --android-subset "$WORK/android-subset" --out "$WORK/boot-linux-slotb.img" >/dev/null
-PWHASH=$(printf '%s' "$pw1" | docker run --rm -i mu300-ubuntu:26.04 openssl passwd -6 -stdin)
+PWHASH=$(printf '%s' "$pw1" | docker run --rm -i changxing60-ubuntu:26.04 openssl passwd -6 -stdin)
 
 # ---------------------------------------------------------------- confirm and install
 say "Ready to install"
@@ -175,25 +175,25 @@ ask confirm "Type INSTALL to continue" no
 [ "$confirm" = INSTALL ] || die "cancelled"
 
 say "Copying to the device"
-adb push "$TOP/tools/android-mount-mu300root.sh" "$TOP/tools/android-install.sh" $T/ >/dev/null
-for os in $OSES; do adb push "$WORK/mu300-$os.tar.gz" $T/mu300-$os.tar.gz >/dev/null; done
+adb push "$TOP/tools/android-mount-changxing60root.sh" "$TOP/tools/android-install.sh" $T/ >/dev/null
+for os in $OSES; do adb push "$WORK/changxing60-$os.tar.gz" $T/changxing60-$os.tar.gz >/dev/null; done
 env=$(mktemp)
 printf 'OFF=%s\nSIZE=%s\nOFF_S=%s\nSIZE_S=%s\nFORMAT=%s\nOSES="%s"\nWIPE_LEGACY=%s\nBOOT_OS=%s\nDEFAULT_LINUX=%s\nIMPORT_HOTSPOT=%s\nPWHASH='"'"'%s'"'"'\n' \
   "$OFF" "$SIZE" "$((OFF / 512))" "$((SIZE / 512))" "$FORMAT" "$OSES" "$WIPE_LEGACY" "$BOOT_OS" "$DEFAULT_LINUX" "$IMPORT_HOTSPOT" "$PWHASH" > "$env"
-adb push "$env" $T/mu300-install.env >/dev/null; rm -f "$env"
+adb push "$env" $T/changxing60-install.env >/dev/null; rm -f "$env"
 su_do "sh $T/android-install.sh" | tee "$WORK/device-install.log"
-grep -q MU300-INSTALL-OK "$WORK/device-install.log" || die "installation on the device failed; boot_b and misc were not changed"
+grep -q CHANGXING60-INSTALL-OK "$WORK/device-install.log" || die "installation on the device failed; boot_b and misc were not changed"
 
 say "Writing boot_b and arming slot b"
 EXP=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['sha256'])" "$WORK/boot-linux-slotb.json")
-adb push "$WORK/boot-linux-slotb.img" $T/mu300-boot.img >/dev/null
-adb push "$WORK/boot-linux-slotb.misc-slot-b-trial.bin" $T/mu300-bc-b.bin >/dev/null
-[ "$(su_do "sha256sum $T/mu300-boot.img" | cut -d' ' -f1)" = "$EXP" ] || die "pushed boot image hash mismatch"
-su_do "dd if=$T/mu300-boot.img of=/dev/block/by-name/boot_b bs=4M && sync"
+adb push "$WORK/boot-linux-slotb.img" $T/changxing60-boot.img >/dev/null
+adb push "$WORK/boot-linux-slotb.misc-slot-b-trial.bin" $T/changxing60-bc-b.bin >/dev/null
+[ "$(su_do "sha256sum $T/changxing60-boot.img" | cut -d' ' -f1)" = "$EXP" ] || die "pushed boot image hash mismatch"
+su_do "dd if=$T/changxing60-boot.img of=/dev/block/by-name/boot_b bs=4M && sync"
 [ "$(su_do 'sha256sum /dev/block/by-name/boot_b' | cut -d' ' -f1)" = "$EXP" ] || die "boot_b verify failed (slot a still active, Android keeps booting)"
-su_do "dd if=$T/mu300-bc-b.bin of=/dev/block/by-name/misc bs=1 seek=2048 conv=notrunc && sync && rm $T/mu300-boot.img $T/mu300-bc-b.bin"
+su_do "dd if=$T/changxing60-bc-b.bin of=/dev/block/by-name/misc bs=1 seek=2048 conv=notrunc && sync && rm $T/changxing60-boot.img $T/changxing60-bc-b.bin"
 
 say "Done. Rebooting into $BOOT_OS"
 echo "  USB network: 192.168.77.1   SSH: $([ "$BOOT_OS" = ubuntu ] && echo ubuntu@192.168.77.1 || echo root@192.168.77.1, LuCI http://192.168.77.1)"
-echo "  switch systems: mu300-os ubuntu|openwrt   back to Android: mu300-next-boot android"
+echo "  switch systems: changxing60-os ubuntu|openwrt   back to Android: changxing60-next-boot android"
 adb reboot </dev/null

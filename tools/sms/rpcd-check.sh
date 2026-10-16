@@ -1,6 +1,6 @@
 #!/bin/sh
-# The checks behind tools/sms/test-rpcd.sh: the SMS page's backend (rpcd ucode plugin mu300sms.uc) and the
-# detached sender it drives (mu300-sms-job), exercised against the fake AT and the real pool CLI.
+# The checks behind tools/sms/test-rpcd.sh: the SMS page's backend (rpcd ucode plugin changxing60sms.uc) and the
+# detached sender it drives (changxing60-sms-job), exercised against the fake AT and the real pool CLI.
 #
 # Nothing here reaches a modem: the AT channel is tools/sms/fake-at, the PDUs come from tools/sms/deliver.py (the
 # host side makes them and drops the SIM in /work/sim). What it covers is what a device could not tell us - the
@@ -9,10 +9,10 @@ set -u
 
 REPO=${REPO:-/repo}
 WORK=${WORK:-/work}
-PLUGIN=$REPO/openwrt/overlay/usr/share/rpcd/ucode/mu300sms.uc
-JOB=$REPO/openwrt/overlay/opt/mu300/bin/mu300-sms-job
-SMS=$REPO/rootfs/overlay/opt/mu300/bin/mu300-sms
-AWK=$REPO/rootfs/overlay/opt/mu300/lib/sms-pdu.awk
+PLUGIN=$REPO/openwrt/overlay/usr/share/rpcd/ucode/changxing60sms.uc
+JOB=$REPO/openwrt/overlay/opt/changxing60/bin/changxing60-sms-job
+SMS=$REPO/rootfs/overlay/opt/changxing60/bin/changxing60-sms
+AWK=$REPO/rootfs/overlay/opt/changxing60/lib/sms-pdu.awk
 HARNESS=$REPO/tools/sms/rpcd-harness.uc
 
 for f in "$PLUGIN" "$JOB" "$SMS" "$AWK" "$HARNESS"; do
@@ -36,25 +36,25 @@ has()  { case "$2" in *"$3"*) ok "$1" ;; *) bad "$1" "[$2] does not hold [$3]" ;
 lacks(){ case "$2" in *"$3"*) bad "$1" "[$2] holds [$3]" ;; *) ok "$1" ;; esac; }
 
 # --------------------------------------------------------------------- the modem side
-cp "$REPO/tools/sms/fake-at" "$tmp/bin/mu300-at"
-chmod 755 "$tmp/bin/mu300-at"
+cp "$REPO/tools/sms/fake-at" "$tmp/bin/changxing60-at"
+chmod 755 "$tmp/bin/changxing60-at"
 # the pool CLI sleeps fractions of a second, and the image's /bin/sleep rejects those
-printf '#!/bin/sh\nexec sleep "$@"\n' > "$tmp/bin/mu300busybox"
-chmod 755 "$tmp/bin/mu300busybox"
+printf '#!/bin/sh\nexec sleep "$@"\n' > "$tmp/bin/changxing60busybox"
+chmod 755 "$tmp/bin/changxing60busybox"
 # the CLI refuses to sync or send without the daemon's fifo, which is what it tests for
 mkfifo "$tmp/atdir/cmd"
 
 PATH="$tmp/bin:$PATH"; export PATH
-MU300_SMS_BIN=$SMS;              export MU300_SMS_BIN
-MU300_SMS_POOL=$tmp/pool;        export MU300_SMS_POOL
-MU300_AT_DIR=$tmp/atdir;         export MU300_AT_DIR
-MU300_SMS_AWK=$AWK;              export MU300_SMS_AWK
-MU300_SMS_RUN=$tmp/smsrun;       export MU300_SMS_RUN
-MU300_BUSYBOX=$tmp/bin/mu300busybox; export MU300_BUSYBOX
-MU300_SMS_HOOK=$tmp/no-hook;     export MU300_SMS_HOOK        # not executable: no hook runs
-MU300_SMS_FORWARD=$tmp/no-forward; export MU300_SMS_FORWARD
-MU300_SMS_JOB_BIN=$JOB;          export MU300_SMS_JOB_BIN
-MU300_SMS_JOB_DIR=$tmp/jobroot;  export MU300_SMS_JOB_DIR
+CHANGXING60_SMS_BIN=$SMS;              export CHANGXING60_SMS_BIN
+CHANGXING60_SMS_POOL=$tmp/pool;        export CHANGXING60_SMS_POOL
+CHANGXING60_AT_DIR=$tmp/atdir;         export CHANGXING60_AT_DIR
+CHANGXING60_SMS_AWK=$AWK;              export CHANGXING60_SMS_AWK
+CHANGXING60_SMS_RUN=$tmp/smsrun;       export CHANGXING60_SMS_RUN
+CHANGXING60_BUSYBOX=$tmp/bin/changxing60busybox; export CHANGXING60_BUSYBOX
+CHANGXING60_SMS_HOOK=$tmp/no-hook;     export CHANGXING60_SMS_HOOK        # not executable: no hook runs
+CHANGXING60_SMS_FORWARD=$tmp/no-forward; export CHANGXING60_SMS_FORWARD
+CHANGXING60_SMS_JOB_BIN=$JOB;          export CHANGXING60_SMS_JOB_BIN
+CHANGXING60_SMS_JOB_DIR=$tmp/jobroot;  export CHANGXING60_SMS_JOB_DIR
 FAKE_AT_SIM=$tmp/sim;            export FAKE_AT_SIM
 FAKE_AT_SENT=$tmp/sent;          export FAKE_AT_SENT
 
@@ -180,7 +180,7 @@ has "and it is marked as ours" "$(call list '{"args":{"page":1}}')" '"dir": "mo"
 echo
 echo "== a busy AT channel is not a message sent =="
 # the AT client says "busy" in its own words when another client holds the channel; that is not the modem's answer
-printf 'mu300-at: busy\n' > "$tmp/jobroot/job/reply"
+printf 'changxing60-at: busy\n' > "$tmp/jobroot/job/reply"
 out=$(call job '{}')
 has "the busy line is passed on as busy" "$out" '"busy": 1'
 lacks "and not as a send that worked" "$out" '"ok": 1'

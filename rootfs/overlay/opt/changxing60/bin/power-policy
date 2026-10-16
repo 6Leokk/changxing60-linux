@@ -1,0 +1,113 @@
+#!/bin/sh
+# Power policy for the always-on hotspot: pick the CPU governor, and report what is actually in
+# effect so the choices can be checked rather than assumed.
+#
+# What this does NOT do, on purpose:
+#   * No WiFi transmit-power backoff when the hotspot is idle. It looks like the obvious lever, but
+#     a client that is not associated yet is exactly the client that needs the full power to reach
+#     the AP, so backing off while idle trades range at join time for a saving that has never been
+#     measured here. Leaving it out is the honest call until there is a number.
+#   * Nothing that touches the modem, the data call or the hotspot: every wedge this device has had
+#     came from that path, and a power tweak is not worth a single one of them.
+#   * No CPU frequency pinning beyond the governor. The vendor kernel throttles itself (this SoC
+#     has trip points), and thermal-guard caps the top frequency on kernels that do not.
+#
+# The idle panel blank is the other half of the policy and lives in the screen program (it owns the
+# backlight and the keys): /etc/changxing60/panel-idle, see tools/screen/changxing60-screen.c.
+#
+#   power-policy apply    apply the configured governor (used at boot)
+#   power-policy status    what is in effect now (and what could be)
+#
+# Config: /etc/changxing60/power.conf, `governor=NAME`. Default schedutil: it scales with load instead of
+# pinning the top frequency, and unlike the old ondemand it has no sampling timer of its own.
+
+set -u
+CONF=${CHANGXING60_POWER_CONF:-/etc/changxing60/power.conf}
+DEFAULT_GOV=schedutil
+# The three paths below are overridable so tools/power/test-policy.sh can point them at a fake tree
+# and drive the real script instead of a copy of it.
+CPUFREQ=${CHANGXING60_POWER_CPUFREQ:-/sys/devices/system/cpu/cpufreq}
+THERMAL=${CHANGXING60_POWER_THERMAL:-/sys/class/thermal}
+BATT=${CHANGXING60_POWER_BATT:-/sys/class/power_supply/battery/capacity}
+IDLE_FILE=${CHANGXING60_PANEL_IDLE_FILE:-/etc/changxing60/panel-idle}
+NETDEV=${CHANGXING60_POWER_NETDEV:-/sys/class/net}
+
+read_config() {
+	GOV=$DEFAULT_GOV
+	[ -r "$CONF" ] || return 0
+	while IFS='=' read -r k v; do
+		case "$k" in
+		governor) [ -n "${v:-}" ] && GOV=$v ;;
+		esac
+	done < "$CONF"
+}
+
+policies() { ls -d "$CPUFREQ"/policy* 2>/dev/null; }
+
+governors_available() {
+	local p=$1
+	cat "$p/scaling_available_governors" 2>/dev/null
+}
+
+apply() {
+	read_config
+	local p n=0 skipped=0
+	for p in $(policies); do
+		if ! governors_available "$p" | tr ' ' '\n' | grep -qx "$GOV"; then
+			skipped=$((skipped + 1))
+			continue
+		fi
+		echo "$GOV" > "$p/scaling_governor" 2>/dev/null && n=$((n + 1))
+	done
+	if [ "$n" = 0 ]; then
+		logger -t changxing60-power "governor $GOV not applied (no policy accepted it)"
+		echo "power-policy: $GOV not applied"
+		return 1
+	fi
+	[ "$skipped" -gt 0 ] && logger -t changxing60-power \
+		"governor $GOV set on $n policy/ies, $skipped lack it"
+	logger -t changxing60-power "governor $GOV on $n policy/ies"
+	echo "power-policy: governor $GOV on $n policy/ies"
+}
+
+status() {
+	read_config
+	local p
+	echo "config      $CONF (governor=$GOV, default=$DEFAULT_GOV)"
+	for p in $(policies); do
+		printf 'policy %-28s gov=%-12s min=%-9s max=%-9s avail=%s\n' "$(basename "$p")" \
+			"$(cat "$p/scaling_governor" 2>/dev/null)" \
+			"$(cat "$p/scaling_min_freq" 2>/dev/null)" \
+			"$(cat "$p/scaling_max_freq" 2>/dev/null)" \
+			"$(cat "$p/cpuinfo_max_freq" 2>/dev/null)"
+	done
+	echo "thermal     hottest $(hottest_die 2>/dev/null || echo '-') mC"
+	# The three below are if/fi, not `[ ... ] && echo`: as the last statement of a function the
+	# short form makes the *condition* the return value, so `status` would exit 1 on any device
+	# where the battery or wlan0 is missing -- exactly the healthy case for the no-cpufreq kernel.
+	if [ -z "$(policies)" ]; then echo "policy      (none: no cpufreq on this kernel)"; fi
+	if [ -r "$IDLE_FILE" ]; then
+		echo "panel idle  $(cat "$IDLE_FILE") s (backlight dark after that; any key returns)"
+	else
+		echo "panel idle  off (no $IDLE_FILE)"
+	fi
+	if [ -r "$BATT" ]; then echo "battery     $(cat "$BATT")%"; fi
+	if [ -r "$NETDEV/wlan0/operstate" ]; then
+		echo "hotspot     wlan0 $(cat "$NETDEV/wlan0/operstate") clients=$(iw dev wlan0 station dump 2>/dev/null | grep -c '^Station')"
+	fi
+}
+
+hottest_die() {
+	local max=0 t
+	for z in "$THERMAL"/thermal_zone*/temp; do
+		read -r t < "$z" 2>/dev/null || continue
+		[ "$t" -gt "$max" ] 2>/dev/null && max=$t
+	done
+	echo "$max"
+}
+
+case "${1:-status}" in
+apply) apply ;;
+status) status ;;
+*) echo "usage: power-policy [apply|status]" >&2; exit 2 ;;
+esac

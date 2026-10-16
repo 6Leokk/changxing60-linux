@@ -1,0 +1,15 @@
+{
+	"luci-app-changxing60voice": {
+		"description": "Grant access to the call page",
+		"read": {
+			"ubus": {
+				"changxing60voice": [ "state", "dialjob", "log", "contacts" ]
+			}
+		},
+		"write": {
+			"ubus": {
+				"changxing60voice": [ "dial", "dialjob", "answer", "hangup", "dtmf", "mute", "logclear", "contact_add", "contact_del" ]
+			}
+		}
+	}
+}

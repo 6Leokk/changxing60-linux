@@ -11,11 +11,11 @@ set -u
 
 REPO=${REPO:-/repo}
 WORK=${WORK:-/work}
-PLUGIN=$REPO/openwrt/overlay/usr/share/rpcd/ucode/mu300sms.uc
-ACL=$REPO/openwrt/overlay/usr/share/rpcd/acl.d/luci-app-mu300sms.json
-JOB=$REPO/openwrt/overlay/opt/mu300/bin/mu300-sms-job
-SMS=$REPO/rootfs/overlay/opt/mu300/bin/mu300-sms
-AWK=$REPO/rootfs/overlay/opt/mu300/lib/sms-pdu.awk
+PLUGIN=$REPO/openwrt/overlay/usr/share/rpcd/ucode/changxing60sms.uc
+ACL=$REPO/openwrt/overlay/usr/share/rpcd/acl.d/luci-app-changxing60sms.json
+JOB=$REPO/openwrt/overlay/opt/changxing60/bin/changxing60-sms-job
+SMS=$REPO/rootfs/overlay/opt/changxing60/bin/changxing60-sms
+AWK=$REPO/rootfs/overlay/opt/changxing60/lib/sms-pdu.awk
 
 for f in "$PLUGIN" "$ACL" "$JOB" "$SMS" "$AWK"; do
     [ -e "$f" ] || { echo "missing $f" >&2; exit 2; }
@@ -29,29 +29,29 @@ cp "$WORK/sim" "$tmp/sim"
 # rpcd runs as root here, but the pool CLI's mktemp still needs a TMPDIR it owns - the image's /tmp is 0755 root
 TMPDIR=$tmp/tmpdir; export TMPDIR
 
-cp "$REPO/tools/sms/fake-at" "$tmp/bin/mu300-at"; chmod 755 "$tmp/bin/mu300-at"
-printf '#!/bin/sh\nexec sleep "$@"\n' > "$tmp/bin/mu300busybox"; chmod 755 "$tmp/bin/mu300busybox"
+cp "$REPO/tools/sms/fake-at" "$tmp/bin/changxing60-at"; chmod 755 "$tmp/bin/changxing60-at"
+printf '#!/bin/sh\nexec sleep "$@"\n' > "$tmp/bin/changxing60busybox"; chmod 755 "$tmp/bin/changxing60busybox"
 # the pool CLI refuses to sync or send without the daemon's fifo, which is what it tests for
 mkfifo "$tmp/atdir/cmd"
 
 PATH="$tmp/bin:$PATH";            export PATH
-MU300_SMS_BIN=$SMS;               export MU300_SMS_BIN
-MU300_SMS_POOL=$tmp/pool;         export MU300_SMS_POOL
-MU300_AT_DIR=$tmp/atdir;          export MU300_AT_DIR
-MU300_SMS_AWK=$AWK;               export MU300_SMS_AWK
-MU300_SMS_RUN=$tmp/smsrun;        export MU300_SMS_RUN
-MU300_BUSYBOX=$tmp/bin/mu300busybox; export MU300_BUSYBOX
-MU300_SMS_HOOK=$tmp/no-hook;      export MU300_SMS_HOOK
-MU300_SMS_FORWARD=$tmp/no-forward; export MU300_SMS_FORWARD
-MU300_SMS_JOB_BIN=$JOB;           export MU300_SMS_JOB_BIN
-MU300_SMS_JOB_DIR=$tmp/jobroot;   export MU300_SMS_JOB_DIR
+CHANGXING60_SMS_BIN=$SMS;               export CHANGXING60_SMS_BIN
+CHANGXING60_SMS_POOL=$tmp/pool;         export CHANGXING60_SMS_POOL
+CHANGXING60_AT_DIR=$tmp/atdir;          export CHANGXING60_AT_DIR
+CHANGXING60_SMS_AWK=$AWK;               export CHANGXING60_SMS_AWK
+CHANGXING60_SMS_RUN=$tmp/smsrun;        export CHANGXING60_SMS_RUN
+CHANGXING60_BUSYBOX=$tmp/bin/changxing60busybox; export CHANGXING60_BUSYBOX
+CHANGXING60_SMS_HOOK=$tmp/no-hook;      export CHANGXING60_SMS_HOOK
+CHANGXING60_SMS_FORWARD=$tmp/no-forward; export CHANGXING60_SMS_FORWARD
+CHANGXING60_SMS_JOB_BIN=$JOB;           export CHANGXING60_SMS_JOB_BIN
+CHANGXING60_SMS_JOB_DIR=$tmp/jobroot;   export CHANGXING60_SMS_JOB_DIR
 FAKE_AT_SIM=$tmp/sim;             export FAKE_AT_SIM
 FAKE_AT_SENT=$tmp/sent;           export FAKE_AT_SENT
 
 # the two places rpcd looks: the plugin, and the ACL that says who may call what
 mkdir -p /usr/share/rpcd/ucode /usr/share/rpcd/acl.d
-cp "$PLUGIN" /usr/share/rpcd/ucode/mu300sms.uc
-cp "$ACL" /usr/share/rpcd/acl.d/luci-app-mu300sms.json
+cp "$PLUGIN" /usr/share/rpcd/ucode/changxing60sms.uc
+cp "$ACL" /usr/share/rpcd/acl.d/luci-app-changxing60sms.json
 
 fails=0
 ok()  { printf 'ok   %s\n' "$1"; }
@@ -68,15 +68,15 @@ RPCD=$!
 sleep 2
 
 # call METHOD [JSON]: one ubus call, exactly as the LuCI page's rpc.declare would arrive
-call() { ubus -t 10 call mu300sms "$1" "${2:-{\}}"; }
+call() { ubus -t 10 call changxing60sms "$1" "${2:-{\}}"; }
 
 echo "== the plugin is registered where the page can reach it =="
-if ! ubus list 2>/dev/null | grep -qx 'mu300sms'; then
-    bad "rpcd did not register a mu300sms object" "$(cat /tmp/rpcd.log 2>/dev/null | head -3)"
+if ! ubus list 2>/dev/null | grep -qx 'changxing60sms'; then
+    bad "rpcd did not register a changxing60sms object" "$(cat /tmp/rpcd.log 2>/dev/null | head -3)"
 fi
-ok "rpcd registered mu300sms"
+ok "rpcd registered changxing60sms"
 
-out=$(ubus -v list mu300sms 2>&1)
+out=$(ubus -v list changxing60sms 2>&1)
 for m in list show send job sync delete; do
     has "the $m method is there" "$out" "\"$m\""
 done
@@ -119,7 +119,7 @@ has "the send validation survived the ubus layer" "$out" '"error"'
 
 echo
 echo "== the ACL is where rpcd reads it, and it names these methods =="
-acl=$(cat /usr/share/rpcd/acl.d/luci-app-mu300sms.json 2>/dev/null)
+acl=$(cat /usr/share/rpcd/acl.d/luci-app-changxing60sms.json 2>/dev/null)
 for m in list show job send sync delete; do
     has "the ACL mentions $m" "$acl" "\"$m\""
 done

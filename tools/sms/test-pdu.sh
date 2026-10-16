@@ -1,5 +1,5 @@
 #!/bin/bash
-# Host-side checks for the SMS PDU codec (rootfs/overlay/opt/mu300/lib/sms-pdu.awk).
+# Host-side checks for the SMS PDU codec (rootfs/overlay/opt/changxing60/lib/sms-pdu.awk).
 #
 # This is the one piece of the SMS stack that can be pinned down without the device, and it is the one
 # worth pinning down: a codec that is subtly wrong produces plausible text (the wrong letter, a long
@@ -11,7 +11,7 @@
 set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-AWK_FILE="$here/../../rootfs/overlay/opt/mu300/lib/sms-pdu.awk"
+AWK_FILE="$here/../../rootfs/overlay/opt/changxing60/lib/sms-pdu.awk"
 [ -f "$AWK_FILE" ] || { echo "missing $AWK_FILE" >&2; exit 2; }
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
@@ -47,7 +47,7 @@ case_decode() {  # WHAT NUMBER TEXT [ref total part]
     eq "$what (text)"   "$(field "$rec" 7)" "$txt"
 }
 
-case_decode "ascii"    "+8613800138000" "Hello MU300"
+case_decode "ascii"    "+8613800138000" "Hello changxing60"
 case_decode "digits"   "10086"          "balance: 12.50"
 case_decode "punct"    "+15551234567"   'a-b_c.d/e?f!g@h'
 case_decode "ext chars" "+8613800138000" 'a euro: € braces: {x}  euro'
@@ -109,9 +109,10 @@ echo
 echo "== encoding (hand-checked PDUs) =="
 enc() { awk -v mode=encode -v number="$1" -v text="$2" -f "$AWK_FILE"; }
 # SMS-SUBMIT, no service centre (00), 00 for the destination: +8613800138000, GSM alphabet, 4-day validity,
-# 11 septets. Spelled out in TS 23.040 9.2.3.
-eq "encode ASCII" "$(enc +8613800138000 'Hello MU300')" \
-   "25 0011000D91683108108300F00000AA0BC8329BFD0635AB33180C"
+# 17 septets. Spelled out in TS 23.040 9.2.3.
+# (the leading `30` is the TPDU length in *decimal octets*; everything after it is hex.)
+eq "encode ASCII" "$(enc +8613800138000 'Hello changxing60')" \
+   "30 0011000D91683108108300F00000AA11C8329BFD068DD161F7199F769F6D30"
 # UCS2 is chosen as soon as one character is outside the alphabet; 5 characters, 10 octets
 eq "encode chinese" "$(enc 10086 '你好，世界')" \
    "21 00110005810180F60008AA0A4F60597DFF0C4E16754C"

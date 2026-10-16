@@ -1,0 +1,83 @@
+sprd_card hook: drive the aw87xxx speaker PA over i2c, not over a gpio
+
+This board's sound@0 carries extral-iic-pa = <2> and has no sprd,spk-ext-pa-gpio
+and no sprd,spk-ext-pa-info at all. sprd_asoc_card_parse_hook takes the
+extral-iic-pa branch, registers hook_general_spk for BOARD_FUNC_SPK and returns
+early -- so when the Speaker DAPM widget powers up, the only live code is the
+gpio fallback, which dies at "gpio is invalid!" (-EINVAL) because
+hook_spk_priv.gpio[] was never filled. The amp is never switched out of its
+"Off" profile and the speaker stays silent.
+
+The vendor's own way out is compiled out behind an #if 0: it would look up
+aw87xxx_i2c_pa / aw87xxx_audio_scene_load with kallsyms_lookup_name, and
+neither this kernel nor any available aw87xxx driver exports those symbols
+(checked: kernel/kallsyms.c exports only sprint_symbol*; the aw87xxx module
+exports aw87xxx_set_profile et al). Re-enabling that block cannot work.
+
+What does work is the one thing the aw87xxx driver actually exports:
+aw87xxx_set_profile(dev_index, profile). Our firmware (aw87xxx_acf.bin,
+"P720F09"/ZTE) carries profiles "Music" (id 0) and "Off" (id 11) for both
+aw87390 and aw87391 - read out of the DDT at offset 80, stride 64, not
+assumed. So: when the DT selected the i2c PA, switch the amp between
+"Music" and "Off" and never touch a gpio.
+
+The import is declared __weak on purpose. The 5.4 loader accepts a weak
+undefined symbol (kernel/module.c simplify_symbols: "Ok if weak or ignored"),
+and modpost writes no __versions entry for an unresolved weak import, so
+check_version() lets it bind with only a "no symbol version" warning when the
+PA module is present, and the NULL guard keeps the hook harmless when it is
+not. That keeps snd-soc-sprd-card.ko loadable on its own, exactly as it is
+today: a missing PA module must not take the whole card - and every non-speaker
+path (earpiece, headset, mic, BT-SCO) - down with it.
+
+The vendor hook also sleeps 22 ms after switching the amp on ("the first time
+open speaker path and play a very short sound, the sound can't be heard"), so
+that delay is kept here too.
+
+--- a/sprd/machine/sprd_card/sprd-asoc-card-utils-hook.c
++++ b/sprd/machine/sprd_card/sprd-asoc-card-utils-hook.c
+@@ -20,6 +20,12 @@
+ #include <linux/spinlock.h>
+ #include <linux/kallsyms.h>
+
++/*
++ * Exported by the aw87xxx speaker amplifier driver (snd-soc-sprd-pa-aw87xxx).
++ * Weak on purpose: the card must load and every non-speaker path must work
++ * even when that driver is not loaded; the hook checks for NULL below.
++ */
++extern int __weak aw87xxx_set_profile(int dev_index, char *profile);
++
+ #include "sprd-asoc-card-utils.h"
+ #include "sprd-asoc-common.h"
+
+@@ -135,6 +141,30 @@ static void hook_gpio_pulse_control(unsigned int gpio, unsigned int mode)
+ static int hook_general_spk(int id, int on)
+ {
+ 	int gpio, mode;
++
++	/*
++	 * extral-iic-pa in the DT means the speaker PA sits on the i2c bus and
++	 * there is no gpio to pulse: this board's sound@0 has extral-iic-pa = <2>
++	 * and no sprd,spk-ext-pa-gpio at all, so the gpio path below has nothing
++	 * to drive and dies at "gpio is invalid!". Drive the amp through the one
++	 * interface it actually exports - aw87xxx_set_profile() - and switch it
++	 * between the profiles our aw87xxx_acf.bin carries ("Music" id 0,
++	 * "Off" id 11). The vendor block that would have done this is #if 0'd
++	 * out and looks up aw87xxx_i2c_pa/aw87xxx_audio_scene_load, which
++	 * nothing exports, so this is not that code re-enabled.
++	 */
++	if (extral_iic_pa_en) {
++		if (!aw87xxx_set_profile)
++			return HOOK_OK;
++		sp_asoc_pr_info("%s aw87xxx i2c pa, on %d\n", __func__, on);
++		if (aw87xxx_set_profile(0, on ? "Music" : "Off"))
++			pr_err("%s aw87xxx_set_profile failed, on %d\n",
++				__func__, on);
++		if (on)
++			msleep(22);
++		return HOOK_OK;
++	}
++
+ #if 0
+ 	sp_asoc_pr_info("%s enter\n", __func__);
+ 	if (extral_iic_pa_en == 1) {

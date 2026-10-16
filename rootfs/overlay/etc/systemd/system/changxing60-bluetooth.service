@@ -1,0 +1,15 @@
+[Unit]
+Description=changxing60 Bluetooth controller (SC2355/Marlin3 H4 over PCIe)
+After=changxing60-wifi.service
+Requires=changxing60-wifi.service
+Before=bluetooth.service
+
+[Service]
+Type=simple
+ExecStart=/opt/changxing60/bin/bluetooth-start
+ExecStopPost=-/usr/sbin/rfkill block bluetooth
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

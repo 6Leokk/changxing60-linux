@@ -1,0 +1,40 @@
+#!/bin/sh /etc/rc.common
+# Adopt the two runtime paths an old boot image creates, for a device whose boot_b has not been
+# rebuilt since the rename.
+#
+# boot_b used to carry a boot image whose initramfs created /run/mu300 and attached the disk area at
+# /mnt/mu300-disk, while every script in this rootfs uses the current names. This moves them -- once
+# per boot, before anything else runs (START=00, ahead of changxing60-hw at S12).
+#
+# As of 2026-10-16 boot_b *has* been rebuilt from boot/init, which creates /run/changxing60 and
+# mounts /mnt/changxing60-disk itself, so on this device both branches below are now no-ops and this
+# script can be deleted. It is kept because it is the only thing that makes the rootfs rename safe to
+# do *before* the boot image is rebuilt -- which is the order tools/rename-device.sh runs in, and the
+# order a re-run on a fresh device would run in. See docs/changxing60/rename.md.
+#
+# It is not cosmetic. changxing60-next-boot --rearm reads /run/changxing60/misc-bc-slot-b-trial.bin;
+# with the file absent, `set -eu` aborts the write and the slot-b re-arm that keeps Linux as the
+# default boot fails silently -- the device then rolls back to Android after two boots. The disk-area
+# move is what changxing60-os looks at to find the other system.
+START=00
+
+start() {
+	# /run is a tmpfs the initramfs fills before switch_root, so rcS is the first chance to rename it.
+	if [ -d /run/mu300 ] && [ ! -e /run/changxing60 ]; then
+		mv /run/mu300 /run/changxing60
+		logger -t changxing60-bootpaths "adopted /run/mu300 -> /run/changxing60 (boot image predates the rename)"
+	fi
+
+	# The disk area is a second mount of the root filesystem. A mount point is named by the path it is
+	# attached at, so this is a move rather than a rename, and the directory it lands on must exist.
+	# Tested through /proc/mounts and not with -d: the mkdir below leaves an empty directory behind, so
+	# on the second boot a -d test would find it, call the move done, and never move anything.
+	if grep -q " /mnt/mu300-disk " /proc/mounts && ! grep -q " /mnt/changxing60-disk " /proc/mounts; then
+		mkdir -p /mnt/changxing60-disk
+		if mount --move /mnt/mu300-disk /mnt/changxing60-disk 2>/dev/null; then
+			logger -t changxing60-bootpaths "adopted /mnt/mu300-disk -> /mnt/changxing60-disk"
+		else
+			logger -t changxing60-bootpaths "could not move the disk area to /mnt/changxing60-disk; changxing60-os will not find it"
+		fi
+	fi
+}

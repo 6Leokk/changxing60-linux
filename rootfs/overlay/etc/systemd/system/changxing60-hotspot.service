@@ -1,0 +1,17 @@
+[Unit]
+Description=changxing60 Wi-Fi hotspot (hostapd on wlan0, bridged into br-lan)
+After=changxing60-wifi.service changxing60-lan.service
+Requires=changxing60-wifi.service
+Wants=changxing60-lan.service
+# hostapd owns wlan0 in AP mode
+Conflicts=wpa_supplicant.service
+
+[Service]
+ExecStart=/opt/changxing60/bin/hotspot-start
+ExecStartPost=-/opt/changxing60/bin/hotspot-verify
+ExecStopPost=/opt/changxing60/bin/hotspot-stop
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

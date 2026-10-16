@@ -32,7 +32,7 @@ usage:
   vendor-dtb-status.py --image <in.img> --node dummyphy --set okay --prep work/dtbprep
       # ^ the one to use before a device-side fix: writes the patched image plus vb-patch.bin /
       #   vb-offset / vb-before.sha / vb-after.sha, which is exactly what
-      #   work/mu300-android-dtb-fix.sh reads.
+      #   work/changxing60-android-dtb-fix.sh reads.
   vendor-dtb-status.py --image <in.img> --node dummyphy --set okay --patch-at   # dd one-liner values
 
 --patch-at prints the absolute offset inside the image and the 9 bytes to write, so the device-side

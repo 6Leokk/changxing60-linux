@@ -1,0 +1,136 @@
+#!/bin/sh
+# Leave evidence for a boot that goes wrong *after* switch_root, and repair the one USB failure the
+# initramfs cannot.
+#
+# The initramfs' persist region (boot_b offset 56 MiB) stops at switch_root, so everything that
+# matters for "the box booted but I cannot reach it" -- WCN firmware download, hostapd, netifd, the
+# wedge watch -- leaves nothing behind unless somebody writes it to the ext4. This does that: one
+# dump per minute for the first few minutes, into /root/diag/, which survives on the rootfs.
+#
+# It also covers the dwc3-sprd bring-up race: when the glue probes before the usb2.0 phy provider is
+# registered, no UDC is ever created and the gadget is never bound. The initramfs now retries, but if
+# the UDC only shows up later, the gadget directory is still there unbound -- attach it and put usb0
+# back on the management bridge.
+#
+# Started from cron (every minute), so a wedged init sequence cannot stop it. It retires itself: no
+# dumps after MAXDUMPS *per boot* or MAXUPTIME, no USB poking after MAXUPTIME either, and $D keeps
+# only its newest MAXKEEP files so that boots accumulate a bounded amount of evidence.
+D=/root/diag
+MAXDUMPS=10
+MAXUPTIME=900
+MAXKEEP=30      # files kept in $D across boots (see the retire block below); ~10 MB
+G=/sys/kernel/config/usb_gadget/linux
+
+up() { cut -d. -f1 /proc/uptime; }
+log() { logger -t bootdiag "$*" 2>/dev/null; }
+
+# ---------------------------------------------------------------- USB: attach a late UDC
+# E19: the glue wants the sprd,usb-dummy-phy provider (live DT usb-phy = <&dummyphy &ssphy>), and
+# bails out of its probe without it -- no core child, no UDC. So the repair order is: make sure the
+# dummy phy is bound *first*, and only then re-probe the glue. Never touch the phy providers
+# themselves (unbinding them out from under a working glue is what broke a boot on 2026-10-16).
+usb_recover() {
+	grep -q " /sys/kernel/config configfs" /proc/mounts || mount -t configfs configfs /sys/kernel/config 2>/dev/null
+	[ -d "$G" ] || return 0
+	[ -n "$(cat $G/UDC 2>/dev/null)" ] && return 0
+
+	for d in /sys/bus/platform/devices/*dummyphy*; do
+		[ -e "$d" ] || continue
+		[ -e "$d/driver" ] && continue
+		bdev=$(basename "$d")
+		berr=$(echo "$bdev" > /sys/bus/platform/drivers/sprd-dummy-phy/bind 2>&1)
+		log "dummyphy bind dev=$bdev rc=$? err=[$berr]"
+	done
+
+	udc=$(ls /sys/class/udc 2>/dev/null | head -1)
+	if [ -z "$udc" ]; then
+		# Only worth a glue rebind once its phy provider is actually there, and only a few times:
+		# a boot that cannot get the phy will not get it by being kicked every minute.
+		[ -e /sys/bus/platform/devices/*dummyphy*/driver ] || return 0
+		kick=$(cat /tmp/changxing60-usb-kick 2>/dev/null || echo 0)
+		[ "$kick" -ge 3 ] && return 0
+		echo $((kick + 1)) > /tmp/changxing60-usb-kick
+		echo 25100000.usb3 > /sys/bus/platform/drivers/dwc3-sprd/unbind 2>/dev/null
+		sleep 1
+		echo 25100000.usb3 > /sys/bus/platform/drivers/dwc3-sprd/bind 2>/dev/null
+		sleep 2
+		udc=$(ls /sys/class/udc 2>/dev/null | head -1)
+		log "glue kick $((kick + 1))/3 -> udc=${udc:-none}"
+		[ -n "$udc" ] || return 0
+	fi
+	echo "$udc" > $G/UDC 2>/dev/null || return 0
+	log "attached UDC $udc late (uptime $(up)s)"
+	# the new netdev has to land on the management bridge the same way the boot path does
+	i=0
+	while [ $i -lt 10 ]; do
+		ip link show usb0 >/dev/null 2>&1 && break
+		sleep 1
+		i=$((i + 1))
+	done
+	ip link set usb0 master br-lan 2>/dev/null
+	ip link set usb0 up 2>/dev/null
+	log "usb0 on br-lan: $(ip -br addr show usb0 2>/dev/null)"
+}
+
+# ---------------------------------------------------------------- evidence
+dump() {
+	echo "=== bootdiag uptime=$(up)s date=$(date 2>/dev/null) kernel=$(uname -r) boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
+	echo "--- loadavg / mem"; cat /proc/loadavg; free 2>/dev/null || cat /proc/meminfo | head -4
+	echo "--- modules"; awk '{print $1}' /proc/modules | sort | tr '\n' ' '; echo
+	echo "--- udc"; ls /sys/class/udc 2>&1
+	echo "--- phys"; ls /sys/class/phy 2>&1 | tr '\n' ' '; echo
+	echo "--- dummyphy"; for d in /sys/bus/platform/devices/*dummyphy*; do echo "$d -> $(readlink -f "$d/driver" 2>/dev/null)"; done 2>&1
+	echo "--- deferred"; cat /sys/kernel/debug/devices_deferred 2>&1
+	echo "--- usb gadget"; cat $G/UDC 2>&1; ls $G 2>&1 | tr '\n' ' '; echo
+	echo "--- net"; ip -br addr 2>&1; ip route 2>&1
+	echo "--- wifi"; iw dev 2>&1 | head -30
+	echo "--- wireless status"; ubus call network.wireless status 2>&1 | head -60
+	echo "--- wifi iface"; ubus list 2>/dev/null | grep -i 'wifi\|hostapd\|wireless' | tr '\n' ' '; echo
+	echo "--- wan"; ubus call network.interface.wan status 2>&1 | head -40
+	echo "--- sipa"; cat /sys/kernel/debug/sipa/rm_res 2>&1 | head -20; cat /tmp/changxing60-wan-health 2>&1
+	# The one line that says *why* the previous boot ended, written by whoever called reboot (see the
+	# note() in mobile-data / hotspot-watch). It lives on the ext4, so it survives the reboot that the
+	# volatile logger ring does not.
+	echo "--- selfheal"; tail -n 10 /root/selfheal.log 2>&1
+	echo "--- ip rules"; ip rule 2>&1; ip -6 route 2>&1 | head -10
+	echo "--- logread"; logread 2>&1 | tail -c 120000
+	echo "--- dmesg"; dmesg 2>&1 | tail -c 200000
+	echo "--- ps"; ps w 2>&1 | head -40
+	echo "=== bootdiag end"
+}
+
+mkdir -p $D 2>/dev/null
+u=$(up)
+
+# Dumps: the per-boot count must live somewhere volatile -- /tmp -- and not in the dump directory
+# itself. $D is on the ext4 and the names are uptime-keyed, so every boot rewrites the *same* ten
+# names and counting them pins the total at MAXDUMPS from the first boot on. That is how this channel
+# went quiet on 2026-10-15 and stayed quiet for a day, which is exactly the kind of silence these
+# dumps exist to break.
+#
+# The bound then has to be kept by hand, because "one boot overwrites the last boot's files" is only
+# true when the names collide, and they usually do not: the names come from the uptime of the first
+# cron tick after boot, which shifts with how long the boot took, so a boot typically lands beside the
+# previous one rather than on top of it (measured 2026-10-16: 00313..00853 one boot, 00197..00317 the
+# next, 13 files for two boots). Ten dumps is ~3.3 MB, and this box reboots 20-25 times a day, so
+# that is ~80 MB a day of a rootfs nobody is watching. Keep the newest MAXKEEP instead: a boot's
+# dumps then survive the next boot by ~20 minutes, which is what makes "what happened at the end of
+# the previous boot" answerable.
+n=$(cat /tmp/bootdiag.dumps 2>/dev/null || echo 0)
+case "$n" in ''|*[!0-9]*) n=0 ;; esac
+if [ "$u" -lt "$MAXUPTIME" ] && [ "$n" -lt "$MAXDUMPS" ]; then
+	echo $((n + 1)) > /tmp/bootdiag.dumps
+	dump > $D/$(printf '%05d' "$u")s.log 2>&1
+	ls -t $D/*.log 2>/dev/null | tail -n +$((MAXKEEP + 1)) | while read -r f; do rm -f "$f"; done
+fi
+
+# USB: worth retrying for a while after boot, then stop touching the hardware
+[ "$u" -lt "$MAXUPTIME" ] && usb_recover
+
+# Adaptation bisect: runs only while /etc/changxing60/vendor-bisect exists (a flag file dropped in by
+# hand for one run), once per boot, in the background against the ext4 so that a kernel that dies
+# loading a batch still leaves the "TRYING <batch>" line that names it behind.
+if [ -e /etc/changxing60/vendor-bisect ] && [ ! -e /tmp/.bisect-ran ]; then
+	( /opt/changxing60/bin/vendor-modules bisect >> /root/vendor-bisect.log 2>&1 ) &
+fi
+true

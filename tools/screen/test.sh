@@ -1,7 +1,7 @@
 #!/bin/bash
 # Host-side checks for the screen binaries. Nothing here touches the device.
 #
-# mu300-screen has two parts that can be pinned down without a panel: the brightness state machine
+# changxing60-screen has two parts that can be pinned down without a panel: the brightness state machine
 # (test-backlight.c, self-checking) and the QR encoder on the status page (test-qr.c, diffed
 # against python-qrcode one mask at a time). Both are silent failures on the device -- a level that
 # comes back wrong after a reboot, or a QR that scans as the wrong URL -- so they are checked here
@@ -20,10 +20,19 @@ echo "== brightness state machine (test-backlight) =="
 
 echo
 echo "== management address on the panel (test-lan) =="
-# The address in the footer is displayed nowhere else, and the wrong one (br-lan's 192.168.77.1,
-# from the hotspot reader's point of view) went unnoticed until it was reported from the device.
+# The address in the footer is displayed nowhere else, and it has been wrong in both directions
+# (br-lan-first, then br-wifi-first, then back): the owner's ruling is that the panel prints the real
+# backend address, 192.168.77.1, so br-lan wins and br-wifi is only the fallback.
 "$CC" -O1 -Wall -Wextra -o "$tmp/test-lan" "$here/test-lan.c" "$here/qr.c"
 "$tmp/test-lan"
+
+echo
+echo "== caller id page and the three keys (test-call) =="
+# Which key does what depends on which of six call states is up, and the state file is written by
+# another program. Both are invisible on a bench: a key that dims the page when somebody is trying
+# to answer looks exactly like a key that answered and a call that did not connect.
+"$CC" -O1 -Wall -Wextra -o "$tmp/test-call" "$here/test-call.c" "$here/qr.c"
+"$tmp/test-call"
 
 echo
 echo "== QR encoder vs python-qrcode (test-qr) =="

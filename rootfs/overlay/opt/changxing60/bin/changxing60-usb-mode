@@ -1,0 +1,172 @@
+#!/bin/sh
+# What the USB link to the host PC is for: a management cable, or an uplink.
+#
+#   changxing60-usb-mode            print the mode that is in force
+#   changxing60-usb-mode manage     the PC gets an address and nothing else  (default)
+#   changxing60-usb-mode share      the PC gets a router and a DNS too: tethering
+#   changxing60-usb-mode --help
+#
+# Both modes hand the PC an address out of 192.168.77.0/24 on br-lan. What differs is the two DHCP options
+# that decide whether the PC is willing to *route* through this device:
+#
+#   option 3  router   manage: sent empty   share: 192.168.77.1
+#   option 6  DNS      manage: sent empty   share: 192.168.77.1
+#
+# Why manage is the default, and why the empty options rather than simply no options at all: a DHCP reply
+# that omits option 3 does not remove a default route the client already has, and Windows in particular
+# keeps the one it installed. Measured 2026-10-13, with br-lan and the hotspot still sharing one scope and
+# so one router option: the UsbNcm adapter's default route (via 192.168.77.1, interface metric 25) outranked
+# the machine's real Wi-Fi uplink (metric 30), and every destination the host's own proxy did not claim was
+# being routed into this phone's cellular modem. Nothing showed it -- the cable kept working, the AP kept
+# working, and the PC's traffic quietly changed path. Option 3 with a zero-length value is the DHCP way of
+# saying "there is no router here", and it is what makes Windows drop the route instead of keeping it.
+#
+# So share mode is a deliberate reversal of that, and it is a switch rather than a default because it has a
+# real cost: while it is on, the PC's internet depends on this device's cellular WAN, and a WAN wedge (see
+# docs/changxing60/sipa-wedge.md) takes the PC down with it. There is no lockout risk in either direction --
+# 192.168.77.1 stays on-link, so ssh and LuCI reach the device whatever the mode is, and whatever state the
+# PC's routing table is in.
+#
+# IPv6 follows the same split and for the same measured reason. br-lan advertises nothing in manage mode
+# (dhcp.lan.ra/dhcpv6 disabled: a router advertisement is a second default route just as option 3 is). In
+# share mode it becomes a relay, exactly like br-wifi, so the PC SLAACs an address out of the carrier's /64
+# and NAT66 on the wan zone rewrites it -- the carrier only ever routes the one address it assigned.
+#
+# The lease is shortened in share mode (5m, so the client renews at 2.5m) because a mode switch cannot push
+# anything to a client: DHCP has no server-initiated renew that Windows honours -- RFC 3203's FORCE_RENEW is
+# ignored unless the message is authenticated -- so without a short lease a PC switched back to manage would
+# keep its default route for the remaining 12 hours. With it, both directions converge within a few minutes
+# on their own. tools/win/usb-share.ps1 forces it immediately (ipconfig /renew).
+#
+# Idempotent, and it writes uci only until the last step, which is what applies it. A second run of the same
+# mode still restarts dnsmasq and odhcpd, so it doubles as "re-apply" after a hand-edit.
+set -e
+
+LAN_IP=192.168.77.1
+LEASE_SHARE=5m
+LEASE_MANAGE=12h
+
+usage() {
+	sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+# The mode is read back out of uci rather than kept in a file of its own: dhcp.lan is what actually decides
+# the behaviour, so deriving it from there is the only way the two cannot disagree.
+current() {
+	if uci -q get dhcp.lan.dhcp_option | tr -d "'" | grep -q '^3,'; then
+		echo share
+	else
+		echo manage
+	fi
+}
+
+write_mode() {
+	# Every `uci delete` is guarded with `|| true`, and that is not defensive noise: deleting an option that
+	# is not there exits 1, and with `set -e` above a bare one ends the script on the spot. net-split has the
+	# same guard for the same reason, and it was written after this exact thing bit it -- the run died on the
+	# first delete and everything after it, including the commits, never executed. Reproduced here on
+	# 2026-10-16: `uci -q delete dhcp.lan.ra_flags` returned 1 on an option that was present, so the guard is
+	# not even only about the absent case.
+	case "$1" in
+	manage)
+		# An option listed with no value is how dnsmasq is told to send it empty.
+		uci -q delete dhcp.lan.dhcp_option || true
+		uci -q add_list dhcp.lan.dhcp_option='3'
+		uci -q add_list dhcp.lan.dhcp_option='6'
+		uci -q set dhcp.lan.dhcpv6='disabled'
+		uci -q set dhcp.lan.ra='disabled'
+		uci -q delete dhcp.lan.ra_flags || true
+		uci -q set dhcp.lan.leasetime="$LEASE_MANAGE"
+		;;
+	share)
+		uci -q delete dhcp.lan.dhcp_option || true
+		uci -q add_list dhcp.lan.dhcp_option="3,$LAN_IP"
+		uci -q add_list dhcp.lan.dhcp_option="6,$LAN_IP"
+		# relay, not server: there is no prefix to delegate (see net-split for the whole reason), so the
+		# carrier's own advertisement is relayed and the PC SLAACs out of the carrier's /64.
+		uci -q set dhcp.lan.dhcpv6='relay'
+		uci -q set dhcp.lan.ra='relay'
+		uci -q delete dhcp.lan.ra_flags || true
+		uci -q add_list dhcp.lan.ra_flags='managed-config'
+		uci -q add_list dhcp.lan.ra_flags='other-config'
+		uci -q set dhcp.lan.leasetime="$LEASE_SHARE"
+		;;
+	*)
+		echo "changxing60-usb-mode: '$1' is not a mode (manage or share)" >&2
+		exit 2
+		;;
+	esac
+	uci commit dhcp
+}
+
+apply() {
+	# dnsmasq carries the DHCP options and odhcpd the IPv6 side; neither picks up a changed option on a
+	# plain reload, and a reload of one does not cover the other. The firewall is deliberately not
+	# touched: br-lan is in the lan zone in both modes, whose forwarding to wan is already accepted, and
+	# masquerading is on the wan zone -- so both modes route without a single firewall change. That is
+	# also why share mode needs no new rule to work and manage mode needed none to be safe.
+	/etc/init.d/dnsmasq restart
+	/etc/init.d/odhcpd restart
+}
+
+# state: the same facts `show` prints, as key=value lines, for the rpcd backend to read. One producer, so
+# the page and the terminal cannot come to different conclusions about which mode is in force.
+state() {
+	echo "mode=$(current)"
+	echo "lan_ip=$LAN_IP"
+	echo "dhcp_option=$(uci -q get dhcp.lan.dhcp_option | tr -d "'")"
+	echo "ra=$(uci -q get dhcp.lan.ra)"
+	echo "dhcpv6=$(uci -q get dhcp.lan.dhcpv6)"
+	echo "leasetime=$(uci -q get dhcp.lan.leasetime)"
+	echo "link=$(cat /sys/class/net/usb0/operstate 2>/dev/null || echo unknown)"
+	echo "addr=$(ip -4 -o addr show dev br-lan 2>/dev/null | awk '{print $4}' | head -1)"
+}
+
+show() {
+	m=$(current)
+	echo "mode:  $m"
+	case "$m" in
+	share)
+		echo "       the PC on the USB cable is offered 192.168.77.1 as router and DNS, and an IPv6"
+		echo "       address relayed from the carrier -- it will route through this device"
+		;;
+	manage)
+		echo "       the PC on the USB cable gets an address and nothing else -- it keeps its own uplink"
+		;;
+	esac
+	echo "uci:   dhcp.lan.dhcp_option='$(uci -q get dhcp.lan.dhcp_option | tr -d "'")'"
+	echo "       dhcp.lan.ra=$(uci -q get dhcp.lan.ra) dhcp.lan.dhcpv6=$(uci -q get dhcp.lan.dhcpv6) leasetime=$(uci -q get dhcp.lan.leasetime)"
+	echo "link:  $(ip -4 -o addr show dev br-lan 2>/dev/null | awk '{print $4}' | head -1) on br-lan, usb0 $(cat /sys/class/net/usb0/operstate 2>/dev/null)"
+	# The one thing a reader wants next: whether a client is actually on the link and what it was told.
+	if [ -s /tmp/dhcp.leases ]; then
+		echo "leases:"
+		while read -r _ mac ip _; do
+			case "$ip" in 192.168.77.*) echo "       $ip  $mac" ;; esac
+		done < /tmp/dhcp.leases
+	fi
+}
+
+case "${1:-show}" in
+""|show|status)
+	show
+	;;
+state)
+	state
+	;;
+manage|share)
+	if [ "$(current)" = "$1" ]; then
+		echo "already in $1 mode; re-applying" >&2
+	fi
+	write_mode "$1"
+	apply
+	state
+	;;
+--help|-h|help)
+	usage
+	;;
+*)
+	echo "changxing60-usb-mode: '$1' is not a mode (manage or share)" >&2
+	exit 2
+	;;
+esac
+exit 0

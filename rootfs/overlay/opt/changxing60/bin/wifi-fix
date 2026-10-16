@@ -1,0 +1,23 @@
+#!/bin/sh
+# One repair pass for the AP, run after netifd (changxing60-post, S99).
+#
+# changxing60-hw is S12 and netifd is S20, so `wifi up`/`wifi down` there cannot work: netifd does not
+# exist yet and every call answers "Command failed: Not found" (that was the four dead lines in
+# /tmp/changxing60-wifi-start.log). Loading the WCN modules and pinning the MAC still have to happen
+# before netifd, which is why the split is here rather than a reordering of changxing60-hw.
+#
+# By the time this runs the AP is normally up -- hostapd ENABLED on the MAC changxing60-hw wrote to uci.
+# This catches the two ways it can still be beaconing nothing:
+#   - hostapd never came up (no ubus object, or a state other than ENABLED)
+#   - it came up with the chip's all-zero BSSID, which OpenWrt derives from the phy address; a zero
+#     BSSID leaves hostapd "ENABLED" in ubus while nothing goes out on air
+[ -e /sys/class/net/wlan0 ] || exit 0        # chip did not init at all; a restart will not help
+[ -e /sys/class/ieee80211/phy0 ] || exit 0
+bssid=$(ubus call hostapd.wlan0 get_status 2>/dev/null | sed -n 's/.*"bssid": "\([^"]*\)".*/\1/p')
+case "$bssid" in
+    ""|00:00:00:00:00:00)
+        logger -t changxing60-post "wifi: AP not beaconing (bssid=${bssid:-missing}), restarting"
+        wifi down
+        wifi up
+        ;;
+esac

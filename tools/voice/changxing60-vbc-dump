@@ -1,0 +1,145 @@
+#!/bin/sh
+# Dump the VBC (voice band codec) profiles the kernel currently holds, one file per profile.
+#
+# WHY THIS EXISTS. Call audio on this board runs through the SC2730/UMP9620 VBC block, and the VBC
+# wants four firmware profiles (audio_structure, dsp_vbc, cvs, dsp_smartamp) before it can process a
+# voice path. Those blobs are not on this device's OpenWrt rootfs, are not in the vendor image we
+# have, and are not in any partition dump we hold -- so there is nothing to copy them from. They are,
+# however, loaded in RAM by Android's own audio HAL on every Android boot. The kernel exposes what it
+# holds: /dev/vbc_turningN has a .read, and it returns the same hdr[]/data[] arrays that a write (or
+# request_firmware) fills. So the way to get the blobs is to let Android load them and then read them
+# back out. This script is that read. Run it on Android; run it on OpenWrt too, where it will
+# correctly report that nothing is loaded.
+#
+# THE ABI, from the driver (kernel_modules/kernel5.4/audio_driver/sprd/dai/vbc/v4/vbc_dai/vbc-dai.c):
+#
+#   node          profile id   name             fops
+#   turning0      0            audio_structure  vbc_turning_structure_{read,write}
+#   turning1      1            dsp_vbc          vbc_turning_DSP_{read,write}
+#   turning2      2            cvs              vbc_turning_NXP_{read,write}
+#   turning3      3            dsp_smartamp     vbc_turning_SMARTPA_{read,write}
+#
+#   payload = struct vbc_fw_header { char magic[16]; u32 num_mode; u32 len_mode; }  (24 bytes)
+#             followed by num_mode * len_mode bytes
+#   magic   = "audio_profile" (VBC_PROFILE_FIRMWARE_MAGIC_LEN 16)
+#
+# TWO TRAPS, both hit while working this out:
+#
+#   1. ONE READ, NOT MANY. vbc_turning_profile_get() has two branches on the requested size: if it is
+#      <= 24 it copies just the header and says so ("only get profile %s party header!"); only above
+#      24 does it go on to the data. And vbc_turning_ndp_read() copy_to_user()s the FULL requested
+#      size, not the returned count. So the read has to be one big read -- `dd bs=1 count=64` is 64
+#      separate 1-byte reads, every one of them landing in the header-only branch, and the result is
+#      64 bytes of the header's leading zeros, which looks exactly like "the profile is all zeros".
+#   2. THE DRIVER'S SIZE AND THE BUFFER'S SIZE ARE TWO DIFFERENT NUMBERS. copy_to_user() copies the
+#      FULL requested size, so the userspace buffer has zeros past num_mode*len_mode; but read()
+#      returns only 24 + num_mode*len_mode, and dd writes what read() returned, so the file is already
+#      the right length. The header is therefore not needed to trim -- it is needed to CHECK, and this
+#      script fails the profile if the two disagree.
+#
+# AND THE ONE THING THIS CANNOT DO. A profile that nothing has loaded has data[id] == NULL and the
+# read fails with ENOMEM ("profile %s data is NULL!"). That is the normal answer on OpenWrt and is
+# reported as such, not as a broken node.
+#
+#   changxing60-vbc-dump [OUTDIR]     default OUTDIR /tmp/vbc-profiles
+#
+# Writes OUTDIR/<name>.bin (the exact bytes to write back to the same node) and OUTDIR/README, and
+# prints one line per profile. Exit 0 if at least one profile came out, 1 if none did.
+set -u
+
+OUT=${1:-/tmp/vbc-profiles}
+# 256 KiB is one read. The largest profile on this family is tens of KiB; a bigger buffer than the
+# profile costs nothing but zeros, and a smaller one silently truncates the payload (the driver
+# copies min(requested, payload) and reports the short read as success).
+MAX=262144
+
+mkdir -p "$OUT" 2>/dev/null || { echo "changxing60-vbc-dump: cannot create $OUT" >&2; exit 1; }
+
+# A little-endian u32 at byte offset $2 of file $1.
+#
+# hexdump and not od, and that is not a preference: this rootfs's busybox has no od at all, and a
+# missing od in a command substitution is a SILENT empty string, not an error -- the first version of
+# this script used `od -An -tu4 -j 16 -N 4` and reported "cannot read num_mode" on a profile that had
+# read back perfectly. hexdump is in busybox and in toybox (Android), so it is the one that is there
+# on both sides of this procedure. `1/4 "%u\n"` is one 4-byte unit per line, unsigned decimal.
+u32() {
+    hexdump -s "$2" -n 4 -e '1/4 "%u\n"' "$1" 2>/dev/null | head -1
+}
+
+got=0
+i=0
+for name in audio_structure dsp_vbc cvs dsp_smartamp; do
+    dev=/dev/vbc_turning$i
+    raw=$OUT/$name.raw
+    bin=$OUT/$name.bin
+    i=$((i + 1))
+
+    if [ ! -e "$dev" ]; then
+        echo "$name: $dev does not exist"
+        continue
+    fi
+
+    rm -f "$raw" "$bin"
+    # stderr is kept: when nothing is loaded the driver's ENOMEM arrives here as "Out of memory", and
+    # that is the difference between "empty node" and "read failed".
+    err=$(dd if="$dev" of="$raw" bs=$MAX count=1 2>&1 >/dev/null)
+    if [ ! -s "$raw" ]; then
+        echo "$name: nothing loaded ($err)"
+        rm -f "$raw"
+        continue
+    fi
+
+    magic=$(dd if="$raw" bs=16 count=1 2>/dev/null | tr -d '\000')
+    if [ "$magic" != "audio_profile" ]; then
+        echo "$name: read $MAX bytes but the header magic is not \"audio_profile\" -- not a profile"
+        rm -f "$raw"
+        continue
+    fi
+
+    num=$(u32 "$raw" 16)
+    len=$(u32 "$raw" 20)
+    case $num in ''|*[!0-9]*) echo "$name: cannot read num_mode"; rm -f "$raw"; continue ;; esac
+    case $len in ''|*[!0-9]*) echo "$name: cannot read len_mode"; rm -f "$raw"; continue ;; esac
+
+    want=$((24 + num * len))
+    # dd has already written exactly as many bytes as the driver's read() returned, which is
+    # 24 + num_mode*len_mode -- measured on this board with a synthetic 424-byte profile: dd reported
+    # "0+1 records out" and the file was 424 bytes, md5-identical to what was written in. So this is
+    # not a trim, it is a CROSS-CHECK: the header we just parsed must agree with the length the
+    # driver itself accounted for. If they disagree, one of the two is wrong and the blob is not
+    # trustworthy, so it is dropped rather than kept with a warning.
+    have=$(wc -c < "$raw" 2>/dev/null)
+    if [ "$have" != "$want" ]; then
+        echo "$name: header says $want bytes, the driver returned $have -- refusing to keep it"
+        rm -f "$raw"
+        continue
+    fi
+    mv "$raw" "$bin"
+
+    echo "$name: $want bytes (num_mode=$num len_mode=$len) -> $bin"
+    got=$((got + 1))
+done
+
+cat > "$OUT/README" <<'EOF'
+VBC profiles read back from /dev/vbc_turning0..3.
+
+Each <name>.bin is the exact byte string to write back to the same node:
+
+    dd if=<name>.bin of=/dev/vbc_turning<N> bs=65536
+
+with N = 0 audio_structure, 1 dsp_vbc, 2 cvs, 3 dsp_smartamp. The kernel checks the "audio_profile"
+magic itself (vbc_turning_profile_loading), so a file that is not a real profile is rejected with
+-EINVAL rather than loaded.
+
+Layout: 16-byte magic "audio_profile", u32 num_mode, u32 len_mode, then num_mode*len_mode bytes.
+
+These are board firmware, taken from this handset's own Android boot. Whether they may be
+redistributed is a separate question from whether they work -- keep them out of the repo.
+EOF
+
+if [ "$got" -gt 0 ]; then
+    echo "changxing60-vbc-dump: $got profile(s) in $OUT"
+    exit 0
+fi
+echo "changxing60-vbc-dump: no profile is loaded (run this on an Android boot, where the audio HAL loads them)" >&2
+exit 1

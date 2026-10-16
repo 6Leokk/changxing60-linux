@@ -1,0 +1,53 @@
+#!/bin/sh
+# Start Android's modem_control in a chroot. It (re)loads pm_sys/modem through Trusty; without it the
+# PM co-processor watchdog cuts power ~290 s after boot. See linux-boot/STATUS.md (v9).
+set -e
+A=/opt/changxing60/android
+# mountpoint comes from /opt/changxing60/busybox-bin on OpenWrt; without it the guards below always fall
+# through to their `|| mount ...` side and /dev, /proc and /sys get re-mounted on every run.
+export PATH="$PATH:/opt/changxing60/bin:/opt/changxing60/busybox-bin"
+mkdir -p /dev/socket /dev/block/by-name
+[ -S /dev/socket/logdw ] || { /opt/changxing60/bin/logdw /dev/socket/logdw >> /var/log/android-logcat.txt 2>&1 & sleep 1; }
+# bind the read-only Android property area instead of copying it: it is ~85 MiB (RAM on tmpfs) and OpenWrt's /dev
+# is a 512 KiB tmpfs, where the copy silently ends up as empty files and modem_control never boots the modem
+if ! [ -s /dev/__properties__/property_info ]; then
+    rm -rf /dev/__properties__ 2>/dev/null || true
+    mkdir -p /dev/__properties__
+    mount --bind $A/dev-properties /dev/__properties__
+fi
+# The property area must be owned by root:root. bionic's PropertyInfoAreaFile::LoadPath reads
+# st_uid|st_gid out of fstat and gives up unless both are 0 (it also refuses a group- or
+# world-writable file). The extraction carries the device's system uid, so with 1000:1000 bionic
+# opens property_info, fstats it, closes it and never maps it -- silently: every property read in
+# every vendor daemon then returns the caller's default. That is what held
+# ro.vendor.radio.modemtype at "not_find", and modem_control only creates its @modemd socket when
+# the modem type reads as something else. Proven on the device: before the chown `getprop` listed
+# 0 properties, after it 1756 and ro.vendor.radio.modemtype = "nr".
+chown 0:0 $A/dev-properties/* 2>/dev/null || true
+# 7552N port (B8): scan ALL block uevents, not just mmcblk0p* (UFS = sda/sdaN); PARTNAME filter
+# skips disks/loops without partition names, so this stays correct on F50's eMMC too
+for u in /sys/class/block/*/uevent; do
+    [ -r "$u" ] || continue
+    d=$(basename "$(dirname "$u")")
+    n=$(sed -n 's/^PARTNAME=//p' "$u")
+    ln -sfn /dev/$d /dev/block/$d
+    [ -n "$n" ] && ln -sfn /dev/$d /dev/block/by-name/$n
+done
+sh /opt/changxing60/bin/ueventd-perms.sh
+for m in dev proc sys; do mkdir -p $A/$m; done
+mkdir -p $A/data/vendor $A/mnt $A/tmp
+mountpoint -q $A/dev || mount --rbind /dev $A/dev
+[ -s $A/dev/__properties__/property_info ] || mount --bind $A/dev-properties $A/dev/__properties__
+mountpoint -q $A/proc || mount -t proc proc $A/proc
+mountpoint -q $A/sys || mount -t sysfs sysfs $A/sys
+# the vendor daemons read androidboot.* (slot, modem config) from the command line; the mainline kernel forces its
+# own command line, so fall back to the bootargs LK put in the device tree
+src=/proc/cmdline
+grep -q androidboot.slot_suffix /proc/cmdline || [ ! -r /proc/device-tree/chosen/bootargs ] || src=/proc/device-tree/chosen/bootargs
+tr -d '\000' < $src | sed 's/androidboot.slot_suffix=_b/androidboot.slot_suffix=_a/' > /run/changxing60-cmdline.android
+mount --bind /run/changxing60-cmdline.android $A/proc/cmdline
+# sprd_modem_loader only accepts a task whose comm is exactly "modem_control": exec it directly
+# OpenWrt's procd preloads /lib/libsetlbf.so into services; the bionic linker in the chroot cannot load it
+unset LD_PRELOAD
+export LD_LIBRARY_PATH=/apex/com.android.runtime/lib64/bionic:/system/lib64:/vendor/lib64
+exec chroot $A /vendor/bin/modem_control

@@ -21,15 +21,15 @@ Write-Host "== 2. SELinux live patches (needed for mounting) =="
 & $adb shell "su -c 'apd sepolicy --live `"allow kernel shell fd use`"'"
 & $adb shell "su -c 'apd sepolicy --live `"allow kernel ufs_device blk_file { read write open getattr ioctl append }`"'"
 
-Write-Host "== 3. mount mu300root =="
-& $adb shell "su -c 'losetup -o 77858865152 -S 50096766976 /dev/block/loop30 /dev/block/sda; mkdir -p /data/local/tmp/mu300root; mount -t ext4 /dev/block/loop30 /data/local/tmp/mu300root; echo mounted'"
+Write-Host "== 3. mount changxing60root =="
+& $adb shell "su -c 'losetup -o 77858865152 -S 50096766976 /dev/block/loop30 /dev/block/sda; mkdir -p /data/local/tmp/changxing60root; mount -t ext4 /dev/block/loop30 /data/local/tmp/changxing60root; echo mounted'"
 
 Write-Host "== 4. write default-boot=android + boot-os=android =="
-& $adb shell "su -c 'echo android > /data/local/tmp/mu300root/etc/mu300/default-boot && echo default-boot OK'"
-& $adb shell "su -c 'echo android > /data/local/tmp/mu300root/.mu300/boot-os && echo boot-os OK'"
+& $adb shell "su -c 'echo android > /data/local/tmp/changxing60root/etc/changxing60/default-boot && echo default-boot OK'"
+& $adb shell "su -c 'echo android > /data/local/tmp/changxing60root/.changxing60/boot-os && echo boot-os OK'"
 
 Write-Host "== 5. unmount =="
-& $adb shell "su -c 'umount /data/local/tmp/mu300root; losetup -d /dev/block/loop30; sync; echo unmounted'"
+& $adb shell "su -c 'umount /data/local/tmp/changxing60root; losetup -d /dev/block/loop30; sync; echo unmounted'"
 
 Write-Host "== 6. USB tethering ON (PC internet via phone) =="
 & $adb shell "su -c 'settings put global tether_dun_required 0'"

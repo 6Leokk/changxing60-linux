@@ -1,6 +1,6 @@
 #!/bin/bash
-# Host-side checks for the SMS page's backend (openwrt/overlay/usr/share/rpcd/ucode/mu300sms.uc) and the
-# detached sender it drives (openwrt/overlay/opt/mu300/bin/mu300-sms-job).
+# Host-side checks for the SMS page's backend (openwrt/overlay/usr/share/rpcd/ucode/changxing60sms.uc) and the
+# detached sender it drives (openwrt/overlay/opt/changxing60/bin/changxing60-sms-job).
 #
 # The backend is ucode and the target is OpenWrt, so the checks themselves run inside the OpenWrt image; the
 # message pool, the AT channel and the modem are the ones tools/sms/fake-at provides, which is what makes it
@@ -15,7 +15,7 @@ set -uo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$here/../.." && pwd)"
 
-IMAGE=${MU300_IMAGE:-mu300-openwrt-base:25.12.5}
+IMAGE=${CHANGXING60_IMAGE:-changxing60-openwrt-base:25.12.5}
 command -v docker >/dev/null || { echo "docker is needed: the backend is ucode, and the check runs on OpenWrt" >&2; exit 2; }
 command -v python3 >/dev/null || { echo "python3 is needed: it builds the SIM the check starts from (deliver.py)" >&2; exit 2; }
 

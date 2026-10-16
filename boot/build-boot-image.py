@@ -64,7 +64,7 @@ def bootloader_control(misc_head):
 
     Deriving both from the live block (rather than "live is the restore block, live minus one
     is the trial") is what makes the device work when it is already running slot b: the live
-    misc then *is* the slot-b block mu300-next-boot re-arms every boot, and a rule that just
+    misc then *is* the slot-b block changxing60-next-boot re-arms every boot, and a rule that just
     lowered the live slot a's priority would ratchet it down on every rebuild.
     """
     bc = misc_head[MISC_BC_OFFSET:MISC_BC_OFFSET + 32]

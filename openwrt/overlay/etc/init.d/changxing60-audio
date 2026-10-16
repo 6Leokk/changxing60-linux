@@ -1,0 +1,55 @@
+#!/bin/sh /etc/rc.common
+# Load the Unisoc ASoC / AGDSP audio driver set, so that card 0 (sprdphone-sc2730) exists at all.
+#
+# START=20: after init.d/changxing60-hw (S12), which fixes the Wi-Fi MAC and the other per-boot
+# hardware bits, and before init.d/changxing60-voiced (S21), which is what will drive call audio
+# once its voice-audio half exists. Nothing else in the boot depends on the sound card, so this is
+# not on the critical path: a module that will not load is logged and the boot carries on.
+#
+# Not procd, because there is no process to supervise -- the loader loads what it can and exits.
+# It is written to be safe to run again at any time (a module already in is left alone), which
+# matters here more than usual: this board reboots itself when the WAN wedges, and a loader caught
+# half way through must not be the thing that leaves the sound card missing for the next boot.
+#
+# The set is 27 modules and the whole story is in the loader and in docs/changxing60/telephony.md.
+# If it fails, /root/audio-load.log says where it stopped; the console will not, because the
+# console is pinned to ERR and above and a module that will not load is not a kernel error.
+START=20
+STOP=20
+
+start() {
+	[ -x /opt/changxing60/bin/changxing60-audio-load ] || {
+		logger -t changxing60-audio "no loader at /opt/changxing60/bin/changxing60-audio-load"
+		return 0
+	}
+	if /opt/changxing60/bin/changxing60-audio-load; then
+		logger -t changxing60-audio "audio driver set loaded, $(cat /proc/asound/cards 2>/dev/null | head -1)"
+	else
+		logger -t changxing60-audio "audio driver set incomplete, see /root/audio-load.log"
+	fi
+	# ALSA's device nodes are made by the kernel, but /dev/snd is 0660 root:audio and nothing in
+	# this rootfs is in the audio group -- the panel and the voice daemon run as root, so this is
+	# only about the nodes existing at all when the kernel did not make them.
+	[ -d /dev/snd ] || { mkdir -p /dev/snd 2>/dev/null; }
+	# The VBC profiles: without them the VBC has no parameters and a voice path cannot be processed.
+	# They go in through /dev/vbc_turningN, which the vbc module above creates -- hence after the
+	# module set, not before. Not fatal to the boot (the card exists either way), but it does mean
+	# no call audio, so it is logged loudly and left in /root/vbc-load.log.
+	if [ -x /opt/changxing60/bin/changxing60-vbc-load ]; then
+		if /opt/changxing60/bin/changxing60-vbc-load; then
+			logger -t changxing60-audio "VBC profiles loaded and verified"
+		else
+			logger -t changxing60-audio "VBC profiles NOT loaded, see /root/vbc-load.log"
+		fi
+	else
+		logger -t changxing60-audio "no profile loader at /opt/changxing60/bin/changxing60-vbc-load"
+	fi
+	return 0
+}
+
+stop() {
+	# Unloading the set is not supported: snd-soc-sprd-card cannot be unbound from sound@0
+	# without taking the whole ASoC core with it, and on this board a partially unloaded audio
+	# stack is worse than a loaded one. Nothing calls this.
+	return 0
+}

@@ -6,9 +6,9 @@
 # `ARCH=arm64` on every make line, so the only thing missing for a cross build is `CROSS_COMPILE`;
 # GNU make takes it straight from the environment, so no source edit is needed either.
 #
-#   docker build -t mu300-cross -f tools/Dockerfile.mainline-cross mu300-linux/
+#   docker build -t changxing60-cross -f tools/Dockerfile.mainline-cross changxing60-linux/
 #   docker run --rm -e CROSS_COMPILE=aarch64-linux-gnu- \
-#          -v mu300-mainline:/src -v "$PWD/upstream":/work mu300-cross bash /work/build.sh
+#          -v changxing60-mainline:/src -v "$PWD/upstream":/work changxing60-cross bash /work/build.sh
 #
 # The package list mirrors upstream/Dockerfile (bc/bison/flex run on the host; libssl-dev/libelf-dev
 # are for host tools like scripts/sign-file and objtool, NOT target libs), plus the arm64 cross

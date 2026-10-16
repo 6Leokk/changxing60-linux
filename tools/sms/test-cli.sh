@@ -1,5 +1,5 @@
 #!/bin/bash
-# Host-side smoke test for the SMS pool CLI (rootfs/overlay/opt/mu300/bin/mu300-sms).
+# Host-side smoke test for the SMS pool CLI (rootfs/overlay/opt/changxing60/bin/changxing60-sms).
 #
 # The CLI is what the panel reads and what the forwarder is driven by, and most of it never touches a modem:
 # it decodes the SIM listing, dedupes by fingerprint, joins the parts of a long message, writes one file per
@@ -11,9 +11,9 @@ set -uo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$here/../.."
-SMS_BIN="$ROOT/rootfs/overlay/opt/mu300/bin/mu300-sms"
-SMSD_BIN="$ROOT/rootfs/overlay/opt/mu300/bin/mu300-smsd"
-FORWARD_BIN="$ROOT/rootfs/overlay/opt/mu300/bin/mu300-sms-forward"
+SMS_BIN="$ROOT/rootfs/overlay/opt/changxing60/bin/changxing60-sms"
+SMSD_BIN="$ROOT/rootfs/overlay/opt/changxing60/bin/changxing60-smsd"
+FORWARD_BIN="$ROOT/rootfs/overlay/opt/changxing60/bin/changxing60-sms-forward"
 [ -f "$SMS_BIN" ] || { echo "missing $SMS_BIN" >&2; exit 2; }
 
 tmp="$(mktemp -d)"
@@ -24,22 +24,22 @@ bad() { printf 'FAIL %s\n' "$1"; [ $# -gt 1 ] && printf '     %s\n' "$2"; fails=
 eq()  { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "got [$2] want [$3]"; fi; }
 has() { case "$2" in *"$3"*) ok "$1" ;; *) bad "$1" "[$2] does not hold [$3]" ;; esac; }
 
-# A name on PATH that the CLI calls as mu300-at, plus a busybox shim so its fractional sleeps work on the host
+# A name on PATH that the CLI calls as changxing60-at, plus a busybox shim so its fractional sleeps work on the host
 mkdir -p "$tmp/bin"
-cp "$here/fake-at" "$tmp/bin/mu300-at"
-chmod 755 "$tmp/bin/mu300-at"
-printf '#!/bin/sh\nexec sleep "$@"\n' > "$tmp/bin/mu300busybox"
-chmod 755 "$tmp/bin/mu300busybox"
+cp "$here/fake-at" "$tmp/bin/changxing60-at"
+chmod 755 "$tmp/bin/changxing60-at"
+printf '#!/bin/sh\nexec sleep "$@"\n' > "$tmp/bin/changxing60busybox"
+chmod 755 "$tmp/bin/changxing60busybox"
 
 export PATH="$tmp/bin:$PATH"
 export FAKE_AT_SIM="$tmp/sim" FAKE_AT_SENT="$tmp/sent"
-export MU300_SMS_POOL="$tmp/pool"
-export MU300_AT_DIR="$tmp/atdir"
-export MU300_SMS_AWK="$ROOT/rootfs/overlay/opt/mu300/lib/sms-pdu.awk"
-export MU300_SMS_RUN="$tmp/run"
-export MU300_SMS_HOOK="$tmp/sms-hook"
-export MU300_SMS_FORWARD="$tmp/forward-disabled"
-export MU300_BUSYBOX="$tmp/bin/mu300busybox"
+export CHANGXING60_SMS_POOL="$tmp/pool"
+export CHANGXING60_AT_DIR="$tmp/atdir"
+export CHANGXING60_SMS_AWK="$ROOT/rootfs/overlay/opt/changxing60/lib/sms-pdu.awk"
+export CHANGXING60_SMS_RUN="$tmp/run"
+export CHANGXING60_SMS_HOOK="$tmp/sms-hook"
+export CHANGXING60_SMS_FORWARD="$tmp/forward-disabled"
+export CHANGXING60_BUSYBOX="$tmp/bin/changxing60busybox"
 mkdir -p "$tmp/atdir" "$tmp/run"
 # the CLI insists the daemon is there before it syncs or sends; the fifo is what it tests for
 mkfifo "$tmp/atdir/cmd"
@@ -55,7 +55,7 @@ p3=$(python3 "$here/deliver.py" "10086"           "and part two of it." 42 2 2)
 printf '1\t0\t%s\n2\t0\t%s\n3\t0\t%s\n' "$p1" "$p2" "$p3" > "$FAKE_AT_SIM"
 
 sms sync 2>"$tmp/sync.err" || bad "sync" "$(cat "$tmp/sync.err")"
-n=$(ls -1 "$MU300_SMS_POOL/msg" 2>/dev/null | grep -cE '^[0-9]+$')
+n=$(ls -1 "$CHANGXING60_SMS_POOL/msg" 2>/dev/null | grep -cE '^[0-9]+$')
 eq "two messages pooled (a two-part one counts once)" "$n" "2"
 
 list=$(sms list)
@@ -79,10 +79,10 @@ has "the long message is whole" "$showlong" "part one of a long message and part
 
 echo
 echo "== a sync that changes nothing writes nothing =="
-before=$(find "$MU300_SMS_POOL" -type f -newermt '1970-01-01' -printf '%p %T@\n' | sort)
+before=$(find "$CHANGXING60_SMS_POOL" -type f -newermt '1970-01-01' -printf '%p %T@\n' | sort)
 sleep 1
 sms sync 2>/dev/null
-after=$(find "$MU300_SMS_POOL" -type f -newermt '1970-01-01' -printf '%p %T@\n' | sort)
+after=$(find "$CHANGXING60_SMS_POOL" -type f -newermt '1970-01-01' -printf '%p %T@\n' | sort)
 eq "no file was rewritten by an unchanged sync" "$after" "$before"
 
 echo
@@ -92,11 +92,11 @@ eq "the pooled messages were removed from the SIM" "$left" "0"
 
 echo
 echo "== a directly delivered message (+CMT) is pooled, and the hook runs =="
-cat > "$MU300_SMS_HOOK" <<'EOF'
+cat > "$CHANGXING60_SMS_HOOK" <<'EOF'
 #!/bin/sh
 printf '%s|%s|%s\n' "$SMS_FROM" "$SMS_ID" "$SMS_TEXT" >> "$SMS_HOOK_LOG"
 EOF
-chmod 755 "$MU300_SMS_HOOK"
+chmod 755 "$CHANGXING60_SMS_HOOK"
 export SMS_HOOK_LOG="$tmp/hook.log"
 p4=$(python3 "$here/deliver.py" "+447700900123" "delivered straight to us")
 printf '%s\n' "$p4" > "$tmp/cmt.ready"

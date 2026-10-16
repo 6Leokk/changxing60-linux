@@ -1,0 +1,20 @@
+[Unit]
+# the vendor modem loader exists only in the 5.4 kernel
+ConditionPathExists=|/dev/modem
+ConditionPathExists=|/dev/pmsys
+Description=changxing60 mobile data (AT + sipa_eth0) with NAT for USB/Wi-Fi clients
+After=changxing60-vendor.service changxing60-usb-net.service systemd-resolved.service
+Wants=changxing60-vendor.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# the modem needs a little time after "Modem Alive" before the SIM answers
+ExecStartPre=/bin/sleep 15
+ExecStart=/opt/changxing60/bin/mobile-data up
+ExecStop=/opt/changxing60/bin/mobile-data down
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

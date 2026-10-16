@@ -1,0 +1,15 @@
+{
+	"luci-app-changxing60usb": {
+		"description": "Grant access to the USB link page",
+		"read": {
+			"ubus": {
+				"changxing60usb": [ "status" ]
+			}
+		},
+		"write": {
+			"ubus": {
+				"changxing60usb": [ "set" ]
+			}
+		}
+	}
+}

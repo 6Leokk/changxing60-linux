@@ -4,10 +4,10 @@
 # Why this exists: boot/flash-trial.sh is the Android-side path and is unusable here --
 #   * while Linux runs there is no adb (the only USB link is our NCM management port), and
 #   * it refuses unless the device is on slot a and misc holds the slot-a block; ours is on
-#     slot b, whose live misc *is* the slot-b block mu300-next-boot --rearm rewrites anyway.
+#     slot b, whose live misc *is* the slot-b block changxing60-next-boot --rearm rewrites anyway.
 #
 # This writes ONLY boot_b (/dev/sda40).  misc is deliberately left alone: the running system
-# re-arms slot b on every boot via /opt/mu300/bin/mu300-next-boot --rearm, and its BC_B is
+# re-arms slot b on every boot via /opt/changxing60/bin/changxing60-next-boot --rearm, and its BC_B is
 # byte-identical to the block our image embeds (checked below), so re-writing it would only
 # risk a torn misc for no gain.  boot_a / vendor_boot_a are never touched.
 #
@@ -45,14 +45,14 @@ echo "local image  $(stat -c%s "$IMG") bytes  sha256 $EXP"
 # --- device-side facts ---------------------------------------------------------------------
 dev_sh() { "${SSH[@]}" "$1" 2>/dev/null; }
 
-suffix=$(dev_sh 'cat /etc/mu300/default-boot 2>/dev/null || echo android')
+suffix=$(dev_sh 'cat /etc/changxing60/default-boot 2>/dev/null || echo android')
 [ "$suffix" = linux ] || { echo "device default-boot is '$suffix', not linux -- refusing" >&2; exit 1; }
 
 PART=$(dev_sh 'readlink -f /dev/block/by-name/boot_b')
 [ -n "$PART" ] || { echo "cannot resolve boot_b on the device" >&2; exit 1; }
 echo "device boot_b -> $PART"
 
-live_bc=$(dev_sh 'export PATH=$PATH:/opt/mu300/busybox-bin; dd if=/dev/block/by-name/misc bs=1 skip=2048 count=32 2>/dev/null | od -An -tx1 -v | tr -d " \n"')
+live_bc=$(dev_sh 'export PATH=$PATH:/opt/changxing60/busybox-bin; dd if=/dev/block/by-name/misc bs=1 skip=2048 count=32 2>/dev/null | od -An -tx1 -v | tr -d " \n"')
 if [ "$live_bc" = "$BC_B" ]; then
     echo "misc already holds this image's slot-b block; leaving misc untouched"
 elif [ "$FORCE" = 1 ]; then

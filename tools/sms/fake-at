@@ -1,5 +1,5 @@
 #!/bin/sh
-# Host-side stand-in for /opt/mu300/bin/mu300-at, so the SMS pool CLI can be driven without a modem.
+# Host-side stand-in for /opt/changxing60/bin/changxing60-at, so the SMS pool CLI can be driven without a modem.
 #
 # It answers from a text file instead of a tty: one line per SIM slot, "index<TAB>stat<TAB>PDU". Writes go back
 # to that file (AT+CMGD removes a line, AT+CMGR marks one read), so a test can watch the SIM change as the pool
@@ -23,9 +23,15 @@ cmd=${1:-}
 sim_used() { grep -c . "$SIM" 2>/dev/null || echo 0; }
 
 case $cmd in
-    'AT+CPMS='*)
+    'AT+CPMS?')
+        # The query form -- the only form the CLI is allowed to send. The *set* form wedges the real modem's AT
+        # channel for good (one command, no final result code for it or for anything after it, reboot to recover;
+        # docs/changxing60/sms-port.md), so this double answers the query and says nothing whatsoever to a set:
+        # that is what the real modem does, and it turns a regression into a failing test rather than a quiet pass.
         n=$(sim_used)
-        printf '+CPMS: %s,20,%s,20,%s,20\nOK\n' "$n" "$n" "$n"
+        printf '+CPMS: "SM",%s,20,"SM",%s,20,"SM",%s,20\nOK\n' "$n" "$n" "$n"
+        ;;
+    'AT+CPMS='*)
         ;;
     'AT+CMGF='*|'AT+CSMS='*|'AT+CNMI='*|'AT+CSCA='*)
         echo OK

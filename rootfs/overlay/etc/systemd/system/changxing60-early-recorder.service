@@ -1,0 +1,10 @@
+[Unit]
+Description=changxing60 early boot recorder (dmesg to boot_b persistent log area)
+DefaultDependencies=no
+After=local-fs.target
+
+[Service]
+ExecStart=/opt/changxing60/bin/early-recorder 300
+
+[Install]
+WantedBy=sysinit.target

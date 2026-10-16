@@ -1,6 +1,6 @@
 #!/bin/sh
 # Pull the Android vendor runtime needed by modem_control from a rooted device (adb + su) and build
-# the chroot subset used by the initramfs (/android) and the rootfs (/opt/mu300/android).
+# the chroot subset used by the initramfs (/android) and the rootfs (/opt/changxing60/android).
 # These files are proprietary (ZTE/Unisoc/Google) and are NOT part of this repository.
 set -eu
 OUT=${1:-android-subset}

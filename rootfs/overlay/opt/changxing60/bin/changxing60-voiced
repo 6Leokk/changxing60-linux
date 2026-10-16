@@ -1,0 +1,288 @@
+#!/bin/sh
+# Follow the modem's calls and keep the one state file everything else reads.
+#
+#   /run/changxing60-voice/state    what the call is doing, as key=value: the panel paints it, the web page polls it,
+#                             and the two volume keys are only answer and hang up while it says a call is up.
+#
+# Why a daemon and not "each reader asks the modem": AT+CLCC is a command on the shared nr1 channel, and the
+# channel takes one client at a time through changxing60-atd's lock. A panel repainting every two seconds and a page
+# polling for the call state would each be a client, and the modem would spend its time answering the same
+# question twice. Here it is asked once, the answer is written down, and everything else reads a file.
+#
+# What it listens to, and in what order of trust:
+#
+#   AT+CLCC     what the call IS. stat 4 or 5 is an incoming call, 2 dialling, 3 alerting, 0 active, 1 held;
+#               no +CLCC line at all means no call. This is the only thing that decides the state.
+#   RING/+CLIP  what just HAPPENED. Draining these is free (the daemon that owns the channel already writes
+#               them to $VURCDIR), and they are what makes the panel show a caller within a second instead of
+#               at the next poll. A +CLIP is also the only place a withheld number shows as withheld.
+#
+# A poll that the modem does not answer changes nothing. changxing60-at fails when there is no final result code, and
+# treating that silence as "the call ended" would write a log entry for a call still in progress and drop the
+# panel back to the status page mid-conversation. So a call is only ever ended by two consecutive replies that
+# both say so, and a modem that has stopped answering is not one of them.
+#
+# Only the first call is followed. A second incoming call (call waiting) shows in neither the state nor the
+# panel; nothing here answers, holds or swaps between two calls, and pretending otherwise would mean a state
+# file that describes something the rest of the system cannot act on.
+set -u
+export PATH="$PATH:/opt/changxing60/bin:/opt/changxing60/busybox-bin:/usr/sbin:/sbin"
+
+. "${CHANGXING60_VOICE_LIB:-/opt/changxing60/lib/voice.sh}" || { echo "changxing60-voiced: the voice library is missing" >&2; exit 1; }
+
+AT=${CHANGXING60_AT_BIN:-/opt/changxing60/bin/changxing60-at}
+AUDIO=${CHANGXING60_VOICE_AUDIO_BIN:-/opt/changxing60/bin/changxing60-voice-audio}
+POLL_UP=${CHANGXING60_VOICE_POLL_UP:-2}       # seconds between polls while a call is up
+POLL_IDLE=${CHANGXING60_VOICE_POLL_IDLE:-10}  # ... and while there is none: a RING wakes us sooner than this
+POLL_FAIL=${CHANGXING60_VOICE_POLL_FAIL:-15}  # ... and after the modem has stopped answering
+CLCC_T=${CHANGXING60_VOICE_CLCC_T:-4}         # AT+CLCC's own timeout. It is a read; it has no business taking long.
+
+# /run is world-writable on these images, so the directory of that name may be one somebody else made first,
+# and what this program puts in it are phone numbers. Only root's own directory is used: a symlink there is
+# refused rather than followed, because following it would write a caller's number wherever it points.
+if [ -L "$VDIR" ]; then
+    echo "changxing60-voiced: $VDIR is a symlink; refusing to write call state through it" >&2
+    exit 1
+fi
+mkdir -p "$VDIR" 2>/dev/null
+chmod 700 "$VDIR" 2>/dev/null
+
+say() { echo "changxing60-voiced: $*" | mask; }
+
+# The audio hook. A call's voice is the AGDSP's, and that driver stack is a separate piece of work; until it is
+# loaded there is nothing to attach, and a call that connects with no audio either way is still a call the panel
+# can show and the buttons can end. So its absence is logged once per call and never treated as a failure.
+audio() {
+    [ -x "$AUDIO" ] || return 0
+    "$AUDIO" "$1" >/dev/null 2>&1 || say "the audio hook refused to $1"
+}
+
+# urc_tail FILE MARKFILE: the lines added to FILE since the mark, then the mark is moved up. The mark lives in
+# a file, not a variable, because every call site reads this from a subshell -- and because a mark that survives
+# the daemon's own respawn is a mark that will not replay an old RING as a new call.
+urc_tail() {
+    [ -f "$1" ] || return 0
+    _mark=$(cat "$2" 2>/dev/null || echo 0)
+    case $_mark in ''|*[!0-9]*) _mark=0 ;; esac
+    _total=$(wc -l < "$1" 2>/dev/null || echo 0)
+    # The daemon that writes this log truncates it at CHANGXING60_AT_URC_MAX; a mark past the new end is not a
+    # reason to skip the file, it means start from the beginning of what is there.
+    [ "$_total" -lt "$_mark" ] && _mark=0
+    printf '%s' "$_total" > "$2" 2>/dev/null
+    [ "$_total" -gt "$_mark" ] || return 0
+    tail -n +$((_mark + 1)) "$1" 2>/dev/null
+}
+
+# The caller's number out of "+CLIP: "+8613800138000",145,,,,0 - empty when the network withheld it, which is
+# the ordinary case for a withheld number and not an error.
+clip_number() { awk -F'"' '/^\+CLIP:/ { print $2; exit }'; }
+
+# The modem's own account of the first call: "idx dir stat number", or nothing when there is no call.
+parse_clcc() {
+    printf '%s\n' "$1" | awk '
+        /^\+CLCC:/ {
+            line = $0
+            sub(/^\+CLCC:[ \t]*/, "", line)
+            split(line, f, /,[ \t]*/)
+            num = f[6]
+            gsub(/"/, "", num)
+            printf "%s %s %s %s\n", f[1], f[2], f[3], num
+            exit
+        }'
+}
+
+stat_name() {  # stat_name CLCC-STAT -> the state name, or nothing for a stat we do not know
+    case ${1:-} in
+        4|5) echo ringing ;;
+        2)   echo dialing ;;
+        3)   echo alerting ;;
+        0)   echo active ;;
+        1)   echo held ;;
+        *)   return 1 ;;
+    esac
+}
+
+# --- the call we are following ------------------------------------------------------------------------------
+cur=idle; curnum=; curname=; curidx=; curdir=; since=; talk=
+audio_on=0
+
+# Resumed from the file, not started empty: procd respawns this daemon, and a call that was up when it died is
+# still up. Starting empty would have the panel fall back to the status page and the buttons stop being answer
+# and hang up, in the middle of the call that made them matter.
+cur=$(state_read state); [ -n "$cur" ] || cur=idle
+[ "$cur" = idle ] || {
+    curnum=$(state_read number); curname=$(state_read name); curidx=$(state_read idx)
+    curdir=$(state_read dir); since=$(state_read since); talk=$(state_read talk)
+    [ -n "$talk" ] && audio_on=1
+}
+
+finalize() {  # finalize: the call is over; write it down and go idle
+    [ "$cur" = idle ] && return 0
+    now=$(date +%s)
+    dur=0
+    [ -n "$talk" ] && dur=$((now - ${talk:-$now}))
+    if [ -n "$talk" ]; then
+        st=answered
+    elif [ "$curdir" = in ]; then
+        # A call that rang and stopped is "missed" unless we ended it, and the modem's own account cannot tell
+        # the two apart. changxing60-voice leaves a timestamp when its hangup lands on a ringing call; anything older
+        # than half a minute is not that hangup.
+        st=missed
+        if [ -f "$VREJECT" ]; then
+            _r=$(cat "$VREJECT" 2>/dev/null || echo 0)
+            case $_r in ''|*[!0-9]*) _r=0 ;; esac
+            [ $((now - _r)) -le 30 ] && st=rejected
+        fi
+    else
+        st=failed
+    fi
+    log_append "$curdir" "$st" "$curnum" "$curname" "$dur"
+    say "call over: $st, $dur s, $(echo "${curname:-$curnum}" | mask)"
+    rm -f "$VREJECT" 2>/dev/null
+    cur=idle; curnum=; curname=; curidx=; curdir=; since=; talk=
+    if [ "$audio_on" = 1 ]; then audio stop; audio_on=0; fi
+    miss=0
+    state_write idle '' '' '' '' '' ''
+}
+
+fail=0        # consecutive polls the modem did not answer
+miss=0        # consecutive replies that said "no call"
+
+poll() {
+    try_clip
+    if ! out=$("$AT" -t "$CLCC_T" 'AT+CLCC' 2>/dev/null); then
+        fail=$((fail + 1))
+        [ "$fail" = 3 ] && say "the modem is not answering AT+CLCC; the call state is frozen at '$cur' until it does"
+        return 0
+    fi
+    fail=0
+    line=$(parse_clcc "$out")
+
+    if [ -z "$line" ]; then
+        # Two in a row, not one: between ATA and the call going active the modem can report nothing for a
+        # moment, and finalising on that would mark an answered call as missed and drop the audio with it.
+        miss=$((miss + 1))
+        [ "$miss" -ge 2 ] && finalize
+        return 0
+    fi
+    miss=0
+
+    # shellcheck disable=SC2086
+    set -- $line
+    new_idx=$1; new_dir=$2; new_stat=$3; new_num=$4
+    lstate=$(stat_name "$new_stat") || return 0      # a stat we do not know is not a state to invent a name for
+    ldir=out
+    [ "$new_dir" = 1 ] && ldir=in
+
+    # The number: the modem's, and the URC's when the modem reports none (a withheld number stays empty).
+    lnum=$new_num
+    [ -n "$lnum" ] || lnum=$ring_num
+    [ -n "$lnum" ] || lnum=$curnum
+
+    if [ "$lstate" = "$cur" ] && [ "$lnum" = "$curnum" ] && [ "$new_idx" = "$curidx" ]; then
+        return 0     # nothing moved; do not rewrite the file
+    fi
+
+    case $lstate in
+        ringing|dialing|alerting)
+            # A new call: everything about it starts here, and this is where the panel starts showing it.
+            [ "$cur" = idle ] && { curdir=$ldir; since=$(date +%s); talk=; curname=$(contact_name "$lnum"); }
+            ;;
+        active)
+            if [ -z "$talk" ]; then talk=$(date +%s); fi
+            if [ "$audio_on" = 0 ]; then audio start; audio_on=1; fi
+            ;;
+        held)
+            : ;;
+    esac
+
+    cur=$lstate; curnum=$lnum; curidx=$new_idx
+    state_write "$cur" "$curdir" "$curnum" "$curname" "$curidx" "$since" "$talk"
+    say "state: $cur $(echo "$curnum" | mask)"
+}
+
+# The tunnel a page and a panel both need: a claimed caller id. AT+CLIP is saved in the modem's own profile, so
+# this is once per boot rather than once per call, and a modem that refuses it is not a reason to exit -- a call
+# still connects, the panel just has nothing to put on it.
+#
+# It is retried from poll() until it takes, because the first attempt can land before there is anything to talk
+# to: this daemon starts in the same boot as the one that owns the channel, and a modem still coming up refuses
+# a command it will accept a minute later. Without the retry, a caller id that missed its one chance at boot
+# would be missing for the whole boot.
+clip_ok=0
+try_clip() {
+    [ "$clip_ok" = 1 ] && return 0
+    if "$AT" -t 8 'AT+CLIP=1' >/dev/null 2>&1; then
+        clip_ok=1
+        say "caller id on"
+    fi
+    return 0
+}
+
+# Wait for the daemon that owns the AT channel, because without it changxing60-at opens /dev/stty_nr1 for itself --
+# and a second reader on an SIPC channel is the one thing that leaves the modem silent until a reboot. Better
+# to start late than to be the reason the channel wedged.
+at_wait() {
+    _n=0
+    while [ ! -p "$ATDIR/cmd" ]; do
+        _n=$((_n + 1))
+        if [ "$_n" -gt "${CHANGXING60_VOICE_AT_WAIT:-240}" ]; then
+            say "no AT daemon after ${CHANGXING60_VOICE_AT_WAIT:-240} s ($ATDIR/cmd); not opening the channel myself"
+            return 1
+        fi
+        sleep 1
+    done
+    return 0
+}
+
+at_wait || exit 1
+try_clip
+rm -f "$VREJECT" 2>/dev/null   # a marker from before this boot describes nothing that is still ringing
+
+# Start reading the URC logs from their end, not their beginning. A respawn mid-boot would otherwise replay every
+# RING and +CLIP since the channel was opened and announce a call that ended long ago.
+for _f in stty_nr0 stty_nr1; do
+    wc -l < "$VURCDIR/$_f.log" 2>/dev/null > "$VDIR/mark.$_f" || echo 0 > "$VDIR/mark.$_f"
+done
+
+last=0
+say "watching calls (poll ${POLL_UP}s up / ${POLL_IDLE}s idle, state $cur)"
+
+# read_urcs: drain whatever the modem announced since the last look. Sets ring_num to a caller id if one came
+# with it, and ringing to how many RINGs there were -- both of which only decide WHEN to poll, never what the
+# state is. A +CLIP with no RING (or the other way round) is still a reason to look now.
+ring_num=; ringing=0
+read_urcs() {
+    ring_num=; ringing=0
+    urc=$(urc_tail "$VURCDIR/stty_nr0.log" "$VDIR/mark.nr0")
+    urc="$urc$(urc_tail "$VURCDIR/stty_nr1.log" "$VDIR/mark.nr1")"
+    [ -n "$urc" ] || return 0
+    _n=$(printf '%s\n' "$urc" | clip_number)
+    [ -n "$_n" ] && ring_num=$_n
+    ringing=$(printf '%s\n' "$urc" | grep -cE '^RING')
+    return 0
+}
+
+while :; do
+    read_urcs
+
+    now=$(date +%s)
+    due=0
+    if [ -e "$VNUDGE" ]; then
+        rm -f "$VNUDGE" 2>/dev/null
+        due=1                                    # the CLI said something happened; look now
+    fi
+    [ "${ringing:-0}" -gt 0 ] && due=1
+    [ -n "$ring_num" ] && due=1
+    if [ "$due" = 0 ]; then
+        interval=$POLL_IDLE
+        [ "$cur" != idle ] && interval=$POLL_UP
+        [ "$fail" -ge 3 ] && interval=$POLL_FAIL
+        [ $((now - last)) -ge "$interval" ] && due=1
+    fi
+    if [ "$due" = 1 ]; then
+        poll
+        last=$(date +%s)
+    fi
+    sleep 1
+done

@@ -1,0 +1,35 @@
+#!/bin/sh
+# Choose which system on the Linux disk area boots next (Ubuntu, OpenWrt).
+#   changxing60-os             show installed systems and the current choice
+#   changxing60-os openwrt     boot OpenWrt from now on (reboot to apply)
+#   changxing60-os ubuntu
+# OpenWrt: od/timeout come from the static busybox in /opt/changxing60/busybox-bin
+export PATH="$PATH:/opt/changxing60/busybox-bin"
+set -e
+if mountpoint -q /mnt/changxing60-disk 2>/dev/null; then
+    DISK=/mnt/changxing60-disk
+elif [ -x /lib/systemd/systemd ] && [ ! -d /ubuntu ] && [ -f /etc/os-release ] && grep -q '^ID=ubuntu' /etc/os-release; then
+    DISK=/            # first-install layout: Ubuntu lives in the filesystem root
+else
+    echo "cannot find the changxing60 disk area (/mnt/changxing60-disk)" >&2; exit 1
+fi
+list() {
+    for os in ubuntu openwrt; do
+        if [ -d "$DISK/$os/etc" ]; then echo "$os: installed ($DISK/$os)"
+        elif [ "$os" = ubuntu ] && [ "$DISK" = / ]; then echo "ubuntu: installed (/)"
+        else echo "$os: not installed"; fi
+    done
+    echo "boot-os: $(cat "$DISK/.changxing60/boot-os" 2>/dev/null || echo 'ubuntu (default)')"
+}
+case "${1:-}" in
+    "") list ;;
+    ubuntu|openwrt)
+        if [ ! -d "$DISK/$1/etc" ] && ! { [ "$1" = ubuntu ] && [ -x "$DISK/lib/systemd/systemd" ]; }; then
+            echo "$1 is not installed" >&2; exit 1
+        fi
+        mkdir -p "$DISK/.changxing60"
+        echo "$1" > "$DISK/.changxing60/boot-os.tmp" && mv "$DISK/.changxing60/boot-os.tmp" "$DISK/.changxing60/boot-os"
+        sync
+        echo "next Linux boot: $1 (reboot to apply)" ;;
+    *) echo "usage: $0 [ubuntu|openwrt]" >&2; exit 2 ;;
+esac

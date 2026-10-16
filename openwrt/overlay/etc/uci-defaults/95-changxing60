@@ -1,7 +1,7 @@
 #!/bin/sh
 # Branding: this build is the Changxing 60 (畅行60, ZTE 7552N / UMS9620) adaptation, and it should
 # say so wherever a human looks -- the LuCI status page, `ubus call system board`, the login realm
-# (uhttpd takes that from system.hostname, set in 90-mu300).
+# (uhttpd takes that from system.hostname, set in 90-changxing60).
 #
 # Done here rather than in build-rootfs.sh on purpose: that script's payload is one single-quoted
 # string, so an apostrophe or a nested quote in a sed expression would end it early and stop the

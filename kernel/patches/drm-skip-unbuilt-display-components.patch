@@ -11,7 +11,7 @@
 + * master forever and the panel never comes up, with nothing in the log to explain it.
 + *
 + * On this board dpu1@31880000 is status=okay although the display module is built with
-+ * CONFIG_DRM_SPRD_DPU0 + CONFIG_DRM_SPRD_DSI only (mu300-linux/kernel/build-internal-display.sh),
++ * CONFIG_DRM_SPRD_DPU0 + CONFIG_DRM_SPRD_DSI only (changxing60-linux/kernel/build-internal-display.sh),
 + * and it is reachable both as a display-subsystem port parent and, on other boards, through the
 + * DP transmitter that the dpu1 port points at. Drop both here the same way the driver
 + * registration table below is #ifdef d out, so the match reflects what this build provides.

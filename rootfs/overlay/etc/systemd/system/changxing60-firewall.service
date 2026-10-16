@@ -1,0 +1,13 @@
+[Unit]
+Description=changxing60 host firewall (block connections from the cellular network)
+DefaultDependencies=no
+Before=network-pre.target changxing60-mobile-data.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/changxing60/firewall.nft
+
+[Install]
+WantedBy=sysinit.target

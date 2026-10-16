@@ -1,17 +1,17 @@
 #!/bin/bash
 # Host-side test for mobile-data's recovery ladder (reboot -> CP restart).
 #
-# What it pins down: when the data call has been unusable for MU300_WAN_REBOOT_AFTER seconds and
+# What it pins down: when the data call has been unusable for CHANGXING60_WAN_REBOOT_AFTER seconds and
 # repairs are not helping, an *unspent* CP restart is tried first, and the reboot only remains for
 # when that restart was already spent (or is disabled). cp_reset itself, the "a healthy call ends
-# the outage" clearing of CP_MARK, and the MU300_CP_RESET=0 fallback are all exercised.
+# the outage" clearing of CP_MARK, and the CHANGXING60_CP_RESET=0 fallback are all exercised.
 #
 # It sources mobile-data with the final dispatch case stripped, then replaces the world it talks to
 # (link_up / probe_ok / at_state / ps / sleep) with stubs -- no device, no /dev/modem, no reboot.
 set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-SRC=$HERE/../../rootfs/overlay/opt/mu300/bin/mobile-data
+SRC=$HERE/../../rootfs/overlay/opt/changxing60/bin/mobile-data
 LIB=$(mktemp); T=$(mktemp -d)
 trap 'rm -rf "$LIB" "$T"' EXIT
 
@@ -50,14 +50,14 @@ CP_MARK=$T/cp-mark
 CP_STATE=$CP_STATE_PATH      # cp_state() reads the loader's debugfs node out of this
 REBOOT_MARK=$T/reboot-mark
 SELFHEAL=$T/selfheal.log     # the durable note must not be written to the real /root from a test
-# a script, not a command line: MU300_REBOOT_CMD is expanded unquoted, so an embedded ">>" would
+# a script, not a command line: CHANGXING60_REBOOT_CMD is expanded unquoted, so an embedded ">>" would
 # be passed to the command as an argument instead of becoming a redirection.
 cat > "$T/reboot" <<EOS
 #!/bin/sh
 echo reboot >> "$REBOOTLOG"
 EOS
 chmod 755 "$T/reboot"
-MU300_REBOOT_CMD=$T/reboot
+CHANGXING60_REBOOT_CMD=$T/reboot
 
 LINK_UP=1; PROBE_OK=1; AT_STATE=1
 link_up()  { [ "$LINK_UP"  = 1 ]; }
@@ -73,7 +73,7 @@ ok()   { pass=$((pass+1)); printf '  PASS  %s\n' "$1"; }
 bad()  { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 want() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (want $3, got $2)"; fi; }
 
-reset() { rm -f "$CPLOG" "$REBOOTLOG" "$SELFHEAL" "$CP_MARK" "$REBOOT_MARK"; CP_EXIT=0; LINK_UP=1; PROBE_OK=1; AT_STATE=1; MU300_CP_RESET=1; CP_STATE=$CP_STATE_PATH; printf 'run_state: 1, remote_flag: 0\n' > "$CP_STATE_PATH"; }
+reset() { rm -f "$CPLOG" "$REBOOTLOG" "$SELFHEAL" "$CP_MARK" "$REBOOT_MARK"; CP_EXIT=0; LINK_UP=1; PROBE_OK=1; AT_STATE=1; CHANGXING60_CP_RESET=1; CP_STATE=$CP_STATE_PATH; printf 'run_state: 1, remote_flag: 0\n' > "$CP_STATE_PATH"; }
 cps_called()   { [ -s "$CPLOG" ]; }
 rebooted()     { [ -s "$REBOOTLOG" ]; }
 noted()        { grep -c -- "$1" "$SELFHEAL" 2>/dev/null || true; }
@@ -187,14 +187,14 @@ AT_STATE=0; CP_EXIT=1
 maybe_reboot $((U-400)) $((U-300)) >/dev/null 2>&1
 want "AT answers + CP restart failed -> no reboot" "$(rebooted && echo yes || echo no)" "no"
 
-# 8. MU300_CP_RESET=0 restores the old reboot-only behaviour exactly.
+# 8. CHANGXING60_CP_RESET=0 restores the old reboot-only behaviour exactly.
 reset
-MU300_CP_RESET=0; AT_STATE=2; PROBE_OK=0
+CHANGXING60_CP_RESET=0; AT_STATE=2; PROBE_OK=0
 maybe_reboot $((U-400)) $((U-300)) >/dev/null 2>&1
 want "CP reset disabled -> no CP restart" "$(cps_called && echo yes || echo no)" "no"
 want "CP reset disabled + AT n/a -> no reboot (old behaviour)" "$(rebooted && echo yes || echo no)" "no"
 reset
-MU300_CP_RESET=0; AT_STATE=1
+CHANGXING60_CP_RESET=0; AT_STATE=1
 maybe_reboot $((U-400)) $((U-300)) >/dev/null 2>&1
 want "CP reset disabled + AT silent -> reboot (old behaviour)" "$(rebooted && echo yes || echo no)" "yes"
 

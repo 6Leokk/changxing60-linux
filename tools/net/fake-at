@@ -1,0 +1,89 @@
+#!/bin/sh
+# Host-side stand-in for /opt/changxing60/bin/changxing60-at, so changxing60-net-status can be driven
+# without a modem. Modelled on tools/sms/fake-at and tools/voice/fake-at, but the callers differ: the
+# status tool asks eleven different commands in one round and reads each answer's *shape*, so the
+# replies come from a script file rather than one env var per command.
+#
+# It answers from FAKE_AT_SCRIPT: blocks of lines, each headed by "===<the exact command>", the block
+# being everything up to the next "===" line. Replies carry the trailing CR a modem puts on its lines
+# (net-status strips them; that is its business, not this file's). Not part of the device build.
+#
+#   FAKE_AT_SCRIPT       the reply script (a file path; entries as above)
+#   FAKE_AT_DEFAULT      ok (default) -- an unlisted command gets a bare OK, which is "answered but
+#                        said nothing" and parses as null; silent -- the client's own no-answer
+#                        diagnostic and exit 1, which is "the modem never answered"
+#   FAKE_AT_SILENT_CMDS  comma-separated commands to answer nothing even when listed (one silent
+#                        command in an otherwise answering round)
+#   FAKE_AT_BUSY         1 -- the client's own "busy" line (another client holds the channel)
+#   FAKE_AT_DEAD         1 -- "the daemon is not reading commands"
+#   FAKE_AT_DIALED       where the raw commands are appended, so a test can prove which commands were
+#                        asked -- that is how the --fast test proves no engineering page was sent
+#
+# Two behaviours of the real client are reproduced on purpose, because net-status's classification
+# keys on them:
+#   * no final result code in the reply block means the client fails with its "no final response"
+#     diagnostic and prints NOTHING on stdout -- the partial answer is not an answer;
+#   * the command is not echoed. The daemon path (the only one net-status ever takes) delivers the
+#     reply without the echo, and reg_stat reads the info line off line 1 -- an echo there would turn
+#     every registration into "not registered". Verified on the device 2026-10-16.
+set -u
+
+[ "${1:-}" = -t ] && shift 2
+cmd=${1:-}
+
+dialed=${FAKE_AT_DIALED:-}
+[ -n "$dialed" ] && printf '%s\n' "$cmd" >> "$dialed"
+
+# a wedged modem: it holds every command until the caller's timeout gives up on it. The pause is
+# before any output, so the caller really waits. This is how a deadline test gets a round that the
+# tool's deadline, not the command timeout, puts an end to.
+case ${FAKE_AT_HANG:-} in ''|*[!0-9]*) ;; *) [ "$FAKE_AT_HANG" -gt 0 ] && sleep "$FAKE_AT_HANG" ;; esac
+
+# busy and dead are not the modem's words at all but the AT client's own -- it prints them itself and
+# fails, which is exactly how net-status's at() tells them apart (its AT_BUSY / AT_DEAD flags)
+if [ "${FAKE_AT_BUSY:-}" = 1 ]; then
+    echo "changxing60-at: busy" >&2
+    exit 1
+fi
+if [ "${FAKE_AT_DEAD:-}" = 1 ]; then
+    echo "changxing60-at: the daemon is not reading commands" >&2
+    exit 1
+fi
+
+# one command answered with nothing while the rest of the round answers
+case ",${FAKE_AT_SILENT_CMDS:-}," in
+    *",$cmd,"*)
+        echo "changxing60-at: modem returned no final response" >&2
+        exit 1
+        ;;
+esac
+
+script=${FAKE_AT_SCRIPT:-}
+resp=
+if [ -n "$script" ] && [ -r "$script" ]; then
+    resp=$(awk -v cmd="$cmd" '
+        /^===/          { on = ($0 == ("===" cmd)) ? 1 : 0; next }
+        on != 0         { print }
+    ' "$script")
+fi
+
+if [ -n "$resp" ]; then
+    # the same contract the real client enforces on the daemon's answer file: no final result code,
+    # no answer -- and nothing on stdout either, or a partial reply would read as one
+    if ! printf '%s\n' "$resp" | grep -qE '^(OK|ERROR|\+CME ERROR|\+CMS ERROR|CONNECT|NO CARRIER)'; then
+        echo "changxing60-at: modem returned no final response" >&2
+        exit 1
+    fi
+    printf '%s\n' "$resp" | sed 's/$/\r/'
+    exit 0
+fi
+
+case ${FAKE_AT_DEFAULT:-ok} in
+    silent)
+        echo "changxing60-at: modem returned no final response" >&2
+        exit 1
+        ;;
+    *)
+        printf '\rOK\r\n'
+        ;;
+esac

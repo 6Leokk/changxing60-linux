@@ -1,0 +1,39 @@
+#!/bin/sh
+# First boot: LAN split into a USB management link and a Wi-Fi hotspot, cellular WAN through the
+# modem, hostname, USB console.
+uci -q batch <<UCI
+set system.@system[0].hostname='changxing60'
+set system.@system[0].description='Changxing 60 (ZTE 7552N) - OpenWrt'
+set system.@system[0].zonename='Europe/Istanbul'
+set system.@system[0].timezone='<+03>-3'
+set network.lan.ipaddr='192.168.77.1'
+set network.lan.netmask='255.255.255.0'
+delete network.wan6
+set network.wan=interface
+set network.wan.proto='changxing60cell'
+set network.wan.apn=''
+UCI
+# the armsr default bridges eth0; the changxing60 LAN bridge carries the USB gadget (Wi-Fi joins via wireless config)
+dev=$(uci -q show network | sed -n "s/^network\.\(@device\[[0-9]*\]\)\.name='br-lan'$/\1/p" | head -1)
+if [ -n "$dev" ]; then
+	uci -q delete network.$dev.ports
+	uci add_list network.$dev.ports='usb0'
+fi
+uci commit system
+uci commit network
+# br-lan is now the USB management link only; the hotspot moves to br-wifi/192.168.8.0/24 so the
+# device stops handing the PC on the other end of the cable a default route and a DNS server.
+# net-split holds the whole change (and the reason for it) and is idempotent, so an install made
+# before the split can be brought up to date by running it there too.
+#
+# Through `sh`, and not silently. This line is the only thing that puts the hotspot's network into
+# a firewall zone, and a net-split that does not run is invisible from every angle that gets looked
+# at: the AP still beacons, clients still associate and still complete the 4-way handshake (EAPOL
+# rides a packet socket and never meets netfilter), the DHCP scope is still configured -- and not
+# one client can get an address, because the packets land on fw4's `jump handle_reject` instead of
+# `jump input_lan`. That is exactly what the 2026-10-16 flash shipped: net-split was committed
+# 644, the bare path answered "Permission denied", and this script's `exit 0` swallowed it.
+sh /opt/changxing60/bin/net-split || \
+	logger -t changxing60-uci-defaults "net-split failed (rc=$?) -- the hotspot will have no firewall zone and no client will get an address"
+grep -q '^ttyGS0:' /etc/inittab || echo 'ttyGS0::askfirst:/usr/libexec/login.sh' >> /etc/inittab
+exit 0

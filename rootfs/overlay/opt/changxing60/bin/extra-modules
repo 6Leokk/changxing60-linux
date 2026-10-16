@@ -1,0 +1,33 @@
+#!/bin/sh
+# Vendor drivers Android loads that the initramfs does not. Loaded one by one; a failure is logged, not fatal.
+#
+# Two kernels, two module sets: the list below is the vendor 5.4 one (thermal throttling, status LEDs, SAR
+# power backoff, SIM tray detection, vibrator, DDR/CP DVFS, Mali). On mainline 6.18 those same jobs are done
+# by the four out-of-tree modules the 6.18 tree builds -- mali_kbase, mu300_thermal, sprd_pmic_wdt and (by
+# wifi-start, not here) the WCN pair -- and none of the vendor names exist, so modprobe would just log
+# FAILED for all of them and nothing would come up. Picked off uname, so 5.4 is untouched.
+#
+# `mu300_thermal` keeps the upstream spelling and is NOT a leftover of the 2026-10-16 device rename: it is the
+# module's own name in the tree that builds it (`upstream/modules/mu300_thermal/`, `obj-m += mu300_thermal.o`,
+# lifted from kanoqwq's project), so it is also the .ko filename. A rename pass did rewrite it here once, which
+# made this line ask modprobe for a module that has never existed on either kernel -- and a missing .ko is
+# silent, so the only symptom would have been the "no message from modprobe" line below.
+case "$(uname -r)" in
+6.*) MODULES="mali_kbase mu300_thermal sprd_pmic_wdt" ;;
+*)   MODULES="sprd_soc_thm thermal-generic-adc sprd_cpu_cooling leds-sc27xx-bltc zte_sar zte_card_holder_det sc27xx-vibra sprd_cp_dvfs sprd_ddr_dvfs sprd_gpu_cooling mali_kbase" ;;
+esac
+
+for m in $MODULES; do
+    if modprobe "$m" 2>/tmp/changxing60-modprobe.err; then
+        echo "loaded $m"
+    else
+        why=$(cat /tmp/changxing60-modprobe.err)
+        # busybox modprobe writes nothing to stderr when the .ko file simply is not there, so a bare
+        # "FAILED x:" reads the same as a CRC/vermagic rejection. Say which one it is -- a missing
+        # file means the *build* is wrong, a rejection means the module is. (mali_kbase sat as a
+        # nameless "FAILED" for several rounds for want of this line.)
+        [ -n "$why" ] || why="no message from modprobe -- $m.ko is probably not installed"
+        echo "FAILED $m: $why"
+    fi
+done
+true

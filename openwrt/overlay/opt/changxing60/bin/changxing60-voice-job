@@ -1,0 +1,125 @@
+#!/bin/sh
+# The detached half of a dial from the control panel (the rpcd backend is /usr/share/rpcd/ucode/changxing60voice.uc).
+#
+# A dial cannot be answered inside one call, and its answer is not the state file either. changxing60-voice waits for
+# changxing60-at's lock (a data attach holds it for 10-20 s at a time) and then for the modem's answer to ATD, and rpcd
+# ends a call at 30 s -- so the dial runs here, detached, and the page asks after it through the plugin's dialjob
+# method. Without this a refused dial was invisible: the modem said ERROR, the state file stayed honestly idle, and
+# the page had nothing to show but a Call button that did nothing.
+#
+# The job directory is the claim, and taking it is atomic: mkdir without -p succeeds for exactly one caller. Two
+# dials at once therefore never both reach the modem (the second is told busy), which matters because the modem
+# takes one AT command at a time and a second ATD in flight would be a race the state file could not arbitrate.
+#
+#   changxing60-voice-job claim            take the claim for a dial (exit 1 = another dial holds it)
+#   changxing60-voice-job start NUMBER     hand the claimed job to a detached run: it dials, and writes how it
+#                                          went back into the job directory
+#   changxing60-voice-job state            "none", or "running SECONDS LIMIT", or "done SECONDS ENDED"
+#   changxing60-voice-job reply            what changxing60-voice printed (exit 1 = there is none)
+#   changxing60-voice-job run JOBDIR       the detached half itself
+#
+# Between claim and start the caller holds the claim; start writes the number into the job directory and launches
+# run. That is the whole contract between this and the plugin (rpcd plugin dir /usr/share/rpcd/ucode/changxing60voice.uc).
+#
+# The number goes into a file rather than staying an argument of the long-lived process for the same reason the SMS
+# job keeps its text there: the job directory is 0700, and nothing but root reads it.
+#
+# Why the lock wait is capped here: changxing60-at's default wait for the lock is 90 s, which no dial is worth -- a
+# dial that cannot get the channel within 15 s should say "busy" and let the user try again, not spin past the point
+# where anyone is still watching. The dial's own command timeout (20 s, in changxing60-voice) is untouched.
+set -u
+export PATH="$PATH:/opt/changxing60/bin:/opt/changxing60/busybox-bin:/usr/sbin:/sbin"
+
+VOICE=${CHANGXING60_VOICE_BIN:-/opt/changxing60/bin/changxing60-voice}
+ROOT=${CHANGXING60_VOICE_JOB_DIR:-/var/run/changxing60voice}
+JOB=$ROOT/job
+LIMIT=${CHANGXING60_VOICE_JOB_T:-60}
+# a dial that finds the channel busy should say so in seconds, not spin for the AT client's default 90
+: "${CHANGXING60_AT_LOCK_WAIT:=15}"
+export CHANGXING60_AT_LOCK_WAIT
+
+now() { date +%s; }
+
+# A job that has not written its pid yet is allowed this long to do so, so that a caller cannot mistake a live
+# dial for a dead one. The same ten seconds the plugin allows a claim to be started.
+STARTUP_GRACE=10
+
+# private_dir DIR: the runtime directory must be ours, a directory, and not writable by group or others - it
+# decides who may start a call on this modem. Refusing is the safe answer: without it a dial is not started at all.
+private_dir() {
+    (umask 077; mkdir -p "$1") 2>/dev/null
+    if [ -L "$1" ] || [ ! -d "$1" ] || [ ! -O "$1" ]; then
+        return 1
+    fi
+    case $(ls -ld "$1" 2>/dev/null) in
+        d????w*|d???????w*) return 1 ;;   # writable by group or others
+        d*) ;;
+        *) return 1 ;;
+    esac
+    chmod 700 "$1"
+}
+
+# running: a start is there and no end, and either the process is alive or it was started a moment ago
+running() {
+    [ -f "$JOB/start" ] && [ ! -f "$JOB/end" ] || return 1
+    _p=$(cat "$JOB/pid" 2>/dev/null)
+    if [ -n "${_p:-}" ]; then
+        [ -d "/proc/$_p" ] || return 1
+        # a recycled pid: the process there has to be this script
+        tr '\0' ' ' < "/proc/$_p/cmdline" 2>/dev/null | grep -q 'changxing60-voice-job' || return 1
+        return 0
+    fi
+    [ $(( $(now) - $(cat "$JOB/start" 2>/dev/null || echo 0) )) -lt "$STARTUP_GRACE" ]
+}
+
+case ${1:-} in
+claim)
+    private_dir "$ROOT" || { echo "changxing60-voice-job: refusing the runtime directory $ROOT" >&2; exit 1; }
+    # the last job's directory - finished, or a dial that died - is moved aside by whichever caller gets here
+    # first and removed, and then mkdir succeeds for exactly one caller; the other finds it and is told busy.
+    # A dial that is still running holds it and is never moved aside: its reply is what the page is waiting for.
+    # Nor is one taken from a caller that has claimed and has not called start yet - within the grace period
+    # that is a live dial too.
+    if [ -d "$JOB" ] && ! running; then
+        if [ -f "$JOB/start" ] || [ $(( $(now) - $(date -r "$JOB" +%s 2>/dev/null || echo 0) )) -ge $STARTUP_GRACE ]; then
+            mv "$JOB" "$JOB.old.$$" 2>/dev/null && rm -rf "$JOB.old.$$"
+        fi
+    fi
+    (umask 077; mkdir "$JOB") 2>/dev/null || exit 1
+    ;;
+start)
+    [ -d "$JOB" ] || { echo "changxing60-voice-job: no claim" >&2; exit 1; }
+    printf '%s\n' "${2:?start needs the number}" > "$JOB/num"
+    now > "$JOB/start"
+    # detached: setsid so it outlives this call, its own output thrown away, and the plugin's popen returns at once
+    setsid "$0" run "$JOB" >/dev/null 2>&1 &
+    ;;
+run)
+    _d=${2:?run needs the job directory}
+    # the pid is what tells a live dial from one that died under it (see running)
+    echo $$ > "$_d/pid"
+    _rc=0
+    _out=$("$VOICE" dial "$(cat "$_d/num" 2>/dev/null)" 2>&1) || _rc=$?
+    # written whole or not at all, so the page never reads half an answer
+    printf '%s\n' "$_out" > "$_d/reply.part" && mv "$_d/reply.part" "$_d/reply"
+    echo "$_rc" > "$_d/rc"
+    now > "$_d/end"
+    # the dial is done (placed, or refused): nothing keeps the number here any longer than it must
+    rm -f "$_d/num"
+    ;;
+state)
+    [ -f "$JOB/start" ] || { echo none; exit 0; }
+    _start=$(cat "$JOB/start" 2>/dev/null); case $_start in ''|*[!0-9]*) _start=$(now) ;; esac
+    if running; then echo "running $(( $(now) - _start )) $LIMIT"; exit 0; fi
+    _end=$(cat "$JOB/end" 2>/dev/null); case $_end in ''|*[!0-9]*) _end=$(now) ;; esac
+    echo "done $(( _end - _start )) $_end"
+    ;;
+reply)
+    [ -f "$JOB/reply" ] || exit 1
+    cat "$JOB/reply"
+    ;;
+*)
+    echo "usage: changxing60-voice-job claim|start NUMBER|state|reply|run JOBDIR" >&2
+    exit 2
+    ;;
+esac

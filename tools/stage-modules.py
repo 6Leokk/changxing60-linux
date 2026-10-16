@@ -7,7 +7,7 @@ drivers silently stayed out of the rootfs for weeks: the built kernel had them, 
 image did not, and nothing failed until someone probed the hardware.
 
 So the selection here is not a hand-written list. It is the transitive closure of the
-modules the mu300 scripts actually modprobe, resolved from the `depends=` field each
+modules the changxing60 scripts actually modprobe, resolved from the `depends=` field each
 .ko carries in its .modinfo section (the same field OpenWrt's kmodloader reads). A
 root module that was not built, or a dependency that is neither built nor built into
 the kernel, is reported and makes the script exit non-zero.
@@ -36,6 +36,40 @@ ROOTFS_ROOTS = [
     "mali_kbase",
     # zram-start (zram -> zsmalloc)
     "zram",
+    # changxing60-voiced, the call-audio stack. Out-of-tree: kernel/build-audio.sh builds it
+    # from the realme C51/C53 kernel_modules tree (kernel5.4/audio_driver) the same way; see
+    # docs/changxing60/telephony.md. The depends= closure only pulls what these modules
+    # *depend on*, so the leaf services (which depend on the stack, but are not depended
+    # on by it) have to be named explicitly -- that is the same reason Android keeps a
+    # modules.load list instead of trusting modules.dep: the UMP9620 codec, the AGDSP boot
+    # and DVFS loaders, the DSP debug/pipe services, saudio, the BT-SCO / vaudio / TDM /
+    # PDM DAIs, the DP codec, the routing helper and the voice triggers would never be
+    # reached from below.
+    "snd-soc-sprd-card",
+    "snd-soc-sprd-vbc-fe",
+    "snd-soc-sprd-vbc-v4",
+    "snd-soc-sprd-dai",
+    "sprd-dmaengine-pcm",
+    "sprd-compr-2stage-dma",
+    "sprd-platform-pcm-routing",
+    "snd-soc-sprd-codec-ump9620",
+    "snd-soc-sprd-codec-ump9620-power",
+    "snd-soc-sprd-codec-ump9620-power-dev",
+    "sprd_audcp_boot",
+    "sprd_audcp_dvfs",
+    "audio-dsp-dump",
+    "audio-pipe",
+    "saudio",
+    "sprd_apipe",
+    "snd-soc-sprd-dummy-codec",
+    "snd-soc-sprd-vaudio",
+    "snd-soc-sprd-tdm",
+    "snd-soc-sprd-pdm-r2p0",
+    "snd-soc-unisoc-dp-codec",
+    "voice_trigger_irq",
+    "voice_trigger_node",
+    # built here but deliberately not a load root: snd-soc-sprd-pa-ucp1301 binds no node
+    # on this board (no ucp1301 PA in the DT), kept out of the rootfs like Android does.
 ]
 
 # Named by the rootfs scripts but absent from out-linux: sprdbt_tty and zte_sar come from the realme
@@ -114,7 +148,7 @@ def main() -> int:
                     help="delete .ko in the staging dir that are outside the closure")
     ap.add_argument("--no-strip", action="store_true",
                     help="keep the debug info (the modules will not fit the ramdisk budget)")
-    ap.add_argument("--strip-image", default="mu300-kbuild-cross",
+    ap.add_argument("--strip-image", default="changxing60-kbuild-cross",
                     help="container holding aarch64-linux-gnu-strip (default: %(default)s)")
     args = ap.parse_args()
 

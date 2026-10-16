@@ -2,7 +2,7 @@
 # Host-side test for hotspot-watch's repair loop and its last-resort reboot.
 #
 # What it pins down: the reboot fires only after MAX_REPAIR repairs have failed, only once per boot
-# (REBOOT_MARK), is reachable through the MU300_HOTSPOT_REBOOT_CMD seam, and leaves its reason on the
+# (REBOOT_MARK), is reachable through the CHANGXING60_HOTSPOT_REBOOT_CMD seam, and leaves its reason on the
 # ext4. That last one is the 2026-10-16 lesson: after the reboot, /tmp and the logger ring are both
 # gone, so "which script restarted the box, and why" cost an hour of ramoops forensics.
 #
@@ -11,12 +11,12 @@
 set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-SRC=$HERE/../../rootfs/overlay/opt/mu300/bin/hotspot-watch
+SRC=$HERE/../../rootfs/overlay/opt/changxing60/bin/hotspot-watch
 LIB=$(mktemp); T=$(mktemp -d)
 trap 'rm -rf "$LIB" "$T"' EXIT
 
 # everything up to (not including) the first statement of the main body is the function library
-sed '/^# mu300-hw writes this at boot/,$d' "$SRC" > "$LIB" || exit 1
+sed '/^# changxing60-hw writes this at boot/,$d' "$SRC" > "$LIB" || exit 1
 [ -s "$LIB" ] || { echo "could not extract the function library from $SRC"; exit 1; }
 grep -q '^repair() {' "$LIB" || { echo "$SRC: repair() is not in the extracted library"; exit 1; }
 
@@ -40,7 +40,7 @@ cat > "$T/reboot" <<EOS
 echo reboot >> "$REBOOTLOG"
 EOS
 chmod 755 "$T/reboot"
-MU300_HOTSPOT_REBOOT_CMD=$T/reboot
+CHANGXING60_HOTSPOT_REBOOT_CMD=$T/reboot
 
 pass=0; fail=0
 ok()   { pass=$((pass+1)); printf '  PASS  %s\n' "$1"; }

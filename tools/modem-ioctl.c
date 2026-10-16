@@ -2,7 +2,7 @@
 /*
  * modem-ioctl - issue the Unisoc modem loader's /dev/modem ioctls.
  *
- * The SIPA wedge (docs/mu300/sipa-wedge.md) is a CP-side latch: the AP's 2 s
+ * The SIPA wedge (docs/changxing60/sipa-wedge.md) is a CP-side latch: the AP's 2 s
  * delegator timeout unlocks the AP's resource-manager state machine, but the CP
  * itself stops answering, so the carrier never comes back and only a full reboot
  * recovered the box. The modem loader exposes a CP stop/start through /dev/modem

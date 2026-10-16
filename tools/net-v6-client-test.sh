@@ -11,7 +11,7 @@
 # dead000000000100` in `kmem_cache_alloc_trace` <- `scs_alloc` <- `copy_process` <-
 # `call_usermodehelper_exec_work`, i.e. an Oops in the *fork* path on an unrelated kworker, seconds
 # after the netdev event burst. The next boot read `bootcause="Reboot into ap watchdog"`. The full
-# console is in mu300-linux/docs/FINDINGS.md §33. Nothing in the packet path is suspected -- the
+# console is in changxing60-linux/docs/FINDINGS.md §33. Nothing in the packet path is suspected -- the
 # device-side veth peer `$Vp` entering and leaving the bridge is what the kernel's vendor `sipa`
 # netdev notifier sees, and every `sipa_dummy: dev ... evt ...` line in that boot belonged to it.
 #

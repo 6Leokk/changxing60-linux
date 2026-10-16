@@ -1,9 +1,9 @@
 #!/system/bin/sh
-# Device side of install.sh (runs as root on Android). Settings come from /data/local/tmp/mu300-install.env:
+# Device side of install.sh (runs as root on Android). Settings come from /data/local/tmp/changxing60-install.env:
 #   OFF SIZE           free eMMC region (bytes) after the last GPT partition, as strings
 #   OFF_S SIZE_S       the same in 512-byte sectors (Android's mksh has 32-bit arithmetic: never compute with bytes)
-#   FORMAT=0|1         create the ext4 filesystem "mu300root" in that region
-#   OSES="ubuntu openwrt"  systems to (re)install from /data/local/tmp/mu300-<os>.tar.gz
+#   FORMAT=0|1         create the ext4 filesystem "changxing60root" in that region
+#   OSES="ubuntu openwrt"  systems to (re)install from /data/local/tmp/changxing60-<os>.tar.gz
 #   WIPE_LEGACY=0|1    remove a first-generation Ubuntu that lives directly in the filesystem root
 #   BOOT_OS            system started by the initramfs
 #   DEFAULT_LINUX=0|1  keep booting Linux (otherwise every Linux boot is one-shot and returns to Android)
@@ -11,8 +11,8 @@
 #   IMPORT_HOTSPOT=0|1 copy Android's hotspot SSID/passphrase into each system
 set -e
 T=/data/local/tmp
-. $T/mu300-install.env
-M=$T/mu300root
+. $T/changxing60-install.env
+M=$T/changxing60root
 say() { echo "[device] $*"; }
 
 # --- the region must not overlap any partition (checked again here, on the device itself)
@@ -31,9 +31,9 @@ disk=$(cat /sys/block/sda/size)
 # Every write this script makes to the region goes through a loop device, and those writes are
 # issued by the loop kworker (u:r:kernel:s0), which the AOSP policy denies on /dev/block/sda
 # (ufs_device): mke2fs and the untar below would fail with EIO and nothing would land. Reads are
-# unaffected, which is why this is easy to miss. See the long comment in android-mount-mu300root.sh.
-# Restored by the EXIT trap (android-mount-mu300root.sh -u restores it too, whichever runs first).
-SELINUX_PREV=$T/.mu300-selinux.prev
+# unaffected, which is why this is easy to miss. See the long comment in android-mount-changxing60root.sh.
+# Restored by the EXIT trap (android-mount-changxing60root.sh -u restores it too, whichever runs first).
+SELINUX_PREV=$T/.changxing60-selinux.prev
 if [ "$(getenforce 2>/dev/null)" != Permissive ] && getenforce > "$SELINUX_PREV" 2>/dev/null; then
     setenforce 0 2>/dev/null || rm -f "$SELINUX_PREV"
 fi
@@ -57,22 +57,22 @@ sb() { dd if=/dev/block/sda bs=512 skip=$OFF_S count=4 2>/dev/null | dd bs=1 ski
 magic=$(sb 1080 2 | od -An -tx1 | tr -d ' \n')
 label=$(sb 1144 16 | tr -d '\000')
 if [ "$FORMAT" = 1 ]; then
-    if [ "$magic" = 53ef ] && [ "$label" != mu300root ]; then say "refusing to format: foreign ext4 ($label) in the region"; exit 1; fi
+    if [ "$magic" = 53ef ] && [ "$label" != changxing60root ]; then say "refusing to format: foreign ext4 ($label) in the region"; exit 1; fi
     attach
-    say "creating ext4 mu300root on $L ($((SIZE_S / 2048)) MiB)"
-    mke2fs -t ext4 -L mu300root -F "$L" >/dev/null
+    say "creating ext4 changxing60root on $L ($((SIZE_S / 2048)) MiB)"
+    mke2fs -t ext4 -L changxing60root -F "$L" >/dev/null
     losetup -d "$L"
-elif [ "$magic" != 53ef ] || [ "$label" != mu300root ]; then
-    say "no mu300root filesystem in the region (run with FORMAT=1)"; exit 1
+elif [ "$magic" != 53ef ] || [ "$label" != changxing60root ]; then
+    say "no changxing60root filesystem in the region (run with FORMAT=1)"; exit 1
 fi
 
-MU300_OFF=$OFF MU300_SIZE=$SIZE sh $T/android-mount-mu300root.sh $M
-trap 'sync; sh $T/android-mount-mu300root.sh -u $M >/dev/null 2>&1; restore_selinux' EXIT
+CHANGXING60_OFF=$OFF CHANGXING60_SIZE=$SIZE sh $T/android-mount-changxing60root.sh $M
+trap 'sync; sh $T/android-mount-changxing60root.sh -u $M >/dev/null 2>&1; restore_selinux' EXIT
 
 if [ "$WIPE_LEGACY" = 1 ] && { [ -x $M/lib/systemd/systemd ] || [ -L $M/lib ]; }; then
     say "removing the root-level Ubuntu"
     for e in $M/* $M/.[!.]*; do
-        case "${e##*/}" in lost+found|.mu300|ubuntu|openwrt) ;; *) rm -rf "$e" ;; esac
+        case "${e##*/}" in lost+found|.changxing60|ubuntu|openwrt) ;; *) rm -rf "$e" ;; esac
     done
 fi
 
@@ -85,21 +85,21 @@ if [ "$IMPORT_HOTSPOT" = 1 ]; then
 fi
 
 for os in $OSES; do
-    tarball=$T/mu300-$os.tar.gz
+    tarball=$T/changxing60-$os.tar.gz
     [ -f $tarball ] || { say "missing $tarball"; exit 1; }
     say "installing $os"
     rm -rf $M/$os.new && mkdir $M/$os.new
     tar -xzpf $tarball -C $M/$os.new
     rm -rf $M/$os && mv $M/$os.new $M/$os
     R=$M/$os
-    mkdir -p $R/etc/mu300
+    mkdir -p $R/etc/changxing60
     if [ -n "$ssid" ]; then
         umask 077
-        printf 'SSID=%s\nPSK=%s\nBAND=5\nCHANNEL=auto\nCOUNTRY=TR\n' "$ssid" "$psk" > $R/etc/mu300/hotspot.conf
-        chmod 600 $R/etc/mu300/hotspot.conf
+        printf 'SSID=%s\nPSK=%s\nBAND=5\nCHANNEL=auto\nCOUNTRY=TR\n' "$ssid" "$psk" > $R/etc/changxing60/hotspot.conf
+        chmod 600 $R/etc/changxing60/hotspot.conf
         umask 022
     fi
-    if [ "$DEFAULT_LINUX" = 1 ]; then echo linux > $R/etc/mu300/default-boot; else rm -f $R/etc/mu300/default-boot; fi
+    if [ "$DEFAULT_LINUX" = 1 ]; then echo linux > $R/etc/changxing60/default-boot; else rm -f $R/etc/changxing60/default-boot; fi
     if [ -n "$PWHASH" ]; then
         case $os in
             ubuntu) sed -i "s|^ubuntu:[^:]*:|ubuntu:$PWHASH:|" $R/etc/shadow ;;
@@ -108,9 +108,9 @@ for os in $OSES; do
     fi
     rm -f $tarball
 done
-mkdir -p $M/.mu300
-echo "$BOOT_OS" > $M/.mu300/boot-os
+mkdir -p $M/.changxing60
+echo "$BOOT_OS" > $M/.changxing60/boot-os
 [ -n "$ssid" ] && say "hotspot: SSID $ssid imported (passphrase ${#psk} chars)"
 say "installed: $(ls -d $M/ubuntu $M/openwrt 2>/dev/null | sed "s|$M/||g" | tr '\n' ' ')boot-os=$BOOT_OS default-linux=$DEFAULT_LINUX"
-rm -f $T/mu300-install.env
-echo MU300-INSTALL-OK   # install.sh checks for this line (set -e stops before it on any failure)
+rm -f $T/changxing60-install.env
+echo CHANGXING60-INSTALL-OK   # install.sh checks for this line (set -e stops before it on any failure)

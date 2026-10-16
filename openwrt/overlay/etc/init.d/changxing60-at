@@ -1,0 +1,59 @@
+#!/bin/sh /etc/rc.common
+# Keep the modem's AT channels open for the lifetime of the boot.
+#
+# /dev/stty_nr* are SIPC channels, not serial ports: only one reader gets the data, and closing one while the
+# modem runs leaves it silent for ever while still occupying the device -- only a reboot brings it back (see
+# changxing60-atd for the measurements). Android's RIL holds nr0-nr5 open for the whole life of the system. Until
+# this service existed nothing did, so every AT user opened the channel for itself, and whenever two of them
+# were alive at once each got a random half of every reply. That is the shape of "the modem stopped answering
+# after a few minutes": not a dead modem, two readers.
+#
+# nr1 is the shared command channel. mobile-data's dial, the SMS stack (changxing60-smsd), the status page and the
+# voice control all reach it through changxing60-at and the daemon's command fifo, one command at a time.
+#
+# nr2 is mobile-data's own channel, and it sits behind a switch (/etc/changxing60/at-split) rather than being always
+# on. Why it exists: AT+CGDATA blocks its channel for 10-20 s while the bearer comes up, and on a shared nr1
+# every signal check and SMS waited behind that. Why it is not the default: issuing the data call on nr2 is an
+# unmeasured change on this modem -- our dial has only ever run on nr1 -- and the wrong channel means an attach
+# that never returns, i.e. no WAN at all. So the default is one daemon on nr1, which is already enough to give
+# every AT user a single owner, and the split is something to turn on and measure.
+#
+# START=19, not 91. netifd (S20network) runs the wan protocol, and that dial is nothing but AT commands, all
+# of them through these daemons. Started later, the first attach found no daemon, opened nr1 directly ("works
+# once, and then the channel needs a modem restart"), and then the daemon opened the same channel again: two
+# readers on one SIPC tty.
+START=19
+USE_PROCD=1
+export PATH="$PATH:/opt/changxing60/busybox-bin"
+
+# Wait for the SIPC node inside the procd command, never in start_service: the nodes appear only once the CP
+# is alive, and an init script that returns without opening an instance never gets a second chance. Bounded
+# (240 s) so that a kernel without the modem stack says so instead of spinning silently; procd respawns and
+# retries, which also covers the CP coming up late.
+wait_and_exec() {  # wait_and_exec TTYNODE DAEMON...; the daemon's environment comes from procd_set_param env
+	local dev=$1; shift
+	echo "n=0; while [ ! -c $dev ]; do n=\$((n+1)); [ \"\$n\" -gt 240 ] && { echo 'changxing60-at: $dev never appeared' >&2; exit 1; }; sleep 1; done; exec $*"
+}
+
+start_service() {
+	procd_open_instance atd
+	procd_set_param command /bin/sh -c "$(wait_and_exec /dev/stty_nr1 /opt/changxing60/bin/changxing60-atd)"
+	procd_set_param respawn 3600 10 0
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+
+	# mobile-data's own channel. Created by hand on the device (echo > /etc/changxing60/at-split) to be measured:
+	# without it mobile-data routes its dial through nr1 like every other client.
+	[ -e /etc/changxing60/at-split ] || return 0
+	# No URC channels on this one: nr0's unsolicited stream belongs to the daemon above, and a second reader
+	# would split it between them. CHANGXING60_AT_URC_CHANNELS is set empty on purpose -- changxing60-atd reads a value
+	# that is set but empty as "drain nothing", where an unset one would fall back to nr0.
+	procd_open_instance atd2
+	procd_set_param command /bin/sh -c "$(wait_and_exec /dev/stty_nr2 /opt/changxing60/bin/changxing60-atd)"
+	procd_set_param env CHANGXING60_AT_DEV=/dev/stty_nr2 CHANGXING60_AT_DIR=/run/changxing60-at2 CHANGXING60_AT_URC_CHANNELS=
+	procd_set_param respawn 3600 10 0
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}

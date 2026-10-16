@@ -19,7 +19,7 @@ KV=${KV:-6.18.56}
 cmd=${1:-kernel}
 
 KERNEL_DOCKER=(docker run --rm -e CROSS_COMPILE=aarch64-linux-gnu- -e KV="$KV"
-               -v mu300-mainline:/src -v "$UP":/work)
+               -v changxing60-mainline:/src -v "$UP":/work)
 
 build_kernel() {
     # merge_config takes fragments in order and later ones win; concatenating is exactly equivalent to a
@@ -38,21 +38,21 @@ build_kernel() {
     done
     echo "== kernel $KV =="
     "${KERNEL_DOCKER[@]}" "${ours[@]}" -v "$HERE/merged-7552n.config":/work/mu300-mainline.config:ro \
-        mu300-cross bash /work/build.sh
+        changxing60-cross bash /work/build.sh
     echo "== modules =="
-    "${KERNEL_DOCKER[@]}" mu300-cross bash /work/build-modules.sh
+    "${KERNEL_DOCKER[@]}" changxing60-cross bash /work/build-modules.sh
     # our out-of-tree module deltas, applied to build-modules.sh's own copy under /src/mod-build
     # (never to upstream/) and rebuilt there -- see the script's header for what and why.
     echo "== module deltas =="
     "${KERNEL_DOCKER[@]}" -v "$HERE":/work/mainline-7552n:ro \
-        mu300-cross bash /work/mainline-7552n/module-deltas.sh
+        changxing60-cross bash /work/mainline-7552n/module-deltas.sh
     # LK copies the kernel to 0x80080000 and 6.18 has text_offset 0, so the Image must be wrapped first
     python3 "$UP/wrap-image.py" "$UP/out/Image" "$UP/out/Image.lk"
 }
 
 build_dtb() {
     echo "== patched vendor_boot (slot b) =="
-    docker run --rm -v "$ROOT":/w -v /tmp:/tmp mu300-cross \
+    docker run --rm -v "$ROOT":/w -v /tmp:/tmp changxing60-cross \
         python3 /w/mainline-7552n/tools/patch-vendor-dtb.py \
             --vendor-boot /w/work/dumps/vendor_boot_b.img \
             --out        /w/work/vendor_boot_b-7552n.img

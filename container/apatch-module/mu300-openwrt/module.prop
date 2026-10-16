@@ -1,6 +1,0 @@
-id=mu300_openwrt
-name=mu300 OpenWrt Container
-version=v1.0.0
-versionCode=1
-author=7552n port
-description=OpenWrt transparent-proxy gateway as a chroot container on /data/openwrt: procd + LuCI + dnsmasq + sing-box (VLESS). Android keeps the modem, power management and the hotspot; the container is the router brain.

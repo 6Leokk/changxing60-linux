@@ -59,7 +59,7 @@ int main(int argc, char **argv)
 	usetup.id.bustype = BUS_VIRTUAL;
 	usetup.id.vendor = 0x1d5c;
 	usetup.id.product = 0x3000;
-	snprintf(usetup.name, UINPUT_MAX_NAME_SIZE, "mu300-keyinject");
+	snprintf(usetup.name, UINPUT_MAX_NAME_SIZE, "changxing60-keyinject");
 	if (ioctl(fd, UI_DEV_SETUP, &usetup) < 0) { perror("UI_DEV_SETUP"); return 1; }
 	if (ioctl(fd, UI_DEV_CREATE) < 0) { perror("UI_DEV_CREATE"); return 1; }
 	printf("keyinject: created, will send %d press(es) of key %d every %d s\n",

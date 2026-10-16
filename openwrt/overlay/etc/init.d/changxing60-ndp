@@ -1,0 +1,37 @@
+#!/bin/sh /etc/rc.common
+# Keep the carrier's /64 routed to the hotspot bridge in changxing60cell's relay mode (see
+# /opt/changxing60/bin/ndp-learn for the whole reason, and for why the route goes to br-wifi and not to the
+# USB management link on br-lan).
+#
+# Does nothing unless network.wan.ipv6 is relay: without the relay the bearer has no public prefix of
+# its own, and flipping accept_ra on a bearer that should not take RAs is the one thing upstream warns
+# this loop against. A changed option takes effect when this service restarts (a reload is enough).
+START=99
+USE_PROCD=1
+
+start_service() {
+	[ "$(uci -q get network.wan.ipv6)" = relay ] || return 0
+	procd_open_instance
+	procd_set_param command /bin/sh /opt/changxing60/bin/ndp-learn
+	procd_set_param respawn 3600 10 0
+	procd_close_instance
+}
+
+stop_service() {
+	# The route this service installed is state, not config: leaving it behind after a stop would
+	# blackhole the prefix on br-wifi until something else removed it. (Same reason ndp-learn removes
+	# its own route when the carrier's prefix disappears.)
+	#
+	# `return`, never `exit`. rc.common's stop() runs this hook and *then* calls procd_kill, in the same
+	# shell -- an `exit` here ends the script before the daemon is killed, which leaves the loop running
+	# with its route removed. Measured 2026-10-13: with `exit 0` the process survived every `stop`
+	# (and the prefix route came back ten seconds later, from the loop that was still alive).
+	prefix=$(/bin/sh /opt/changxing60/bin/ndp-learn --prefix 2>/dev/null)
+	if [ -n "$prefix" ]; then
+		lan_if=$(uci -q get network.wifi.device)
+		[ -n "$lan_if" ] || lan_if=br-wifi
+		ip -6 route del "$prefix" dev "$lan_if" metric 128 2>/dev/null
+		ip -6 route del "$prefix" dev "$lan_if" metric 1024 2>/dev/null
+	fi
+	return 0
+}

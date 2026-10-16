@@ -1,0 +1,36 @@
+#!/bin/sh /etc/rc.common
+# Status page on the internal 854x480 MIPI panel, plus the power key as a screen on/off switch.
+#
+# S95, i.e. after netifd (S20) and hostapd: the page reports WAN/WiFi state, so it should start once
+# those exist. Nothing here is on the boot critical path -- if the panel never comes up, the device
+# still boots and serves LuCI, so every step logs and continues.
+START=95
+USE_PROCD=1
+export PATH="$PATH:/opt/changxing60/busybox-bin"
+
+start_service() {
+	/opt/changxing60/bin/display-modules >/tmp/changxing60-display-modules.log 2>&1
+
+	# uinput is compiled in (CONFIG_INPUT_UINPUT=y), so the driver is always registered -- but /dev
+	# on this rootfs is a tmpfs layered over devtmpfs and nothing ever creates its node, so
+	# /usr/bin/keyinject (the synthetic power-key injector the display tests use) has nothing to
+	# open after a reboot. Take the minor from /proc/misc rather than hardcoding 223.
+	local minor
+	minor=$(awk '$2 == "uinput" { print $1 }' /proc/misc)
+	[ -n "$minor" ] && [ ! -e /dev/input/uinput ] && mknod /dev/input/uinput c 10 "$minor"
+
+	# The program itself opens /dev/dri/card0 and exits nonzero if the mode set fails; procd's
+	# respawn (5 tries inside an hour) retries in case the DRM device shows up late.
+	procd_open_instance
+	procd_set_param command /usr/bin/changxing60-screen
+	procd_set_param respawn 3600 5 5
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_close_instance
+}
+
+stop_service() {
+	# Leave the last frame on the panel and the backlight on: a black "working" screen during a
+	# service restart reads as a hang. The backlight is only ever driven by the program.
+	logger -t changxing60-screen "stopped"
+}

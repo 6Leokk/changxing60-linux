@@ -93,13 +93,13 @@ average. `top` shows about 98 % idle.
   **Correction (2026-10-13):** display and touch drivers are *not* missing. The ZTE tree carries
   `drivers/gpu/drm/sprd` in full — the config simply leaves `CONFIG_DRM_SPRD` off (the F50 has no panel),
   so `sprd-drm.ko` was never built, not absent. Touch is on SPI (`axs15205`), and `spi-sprd.ko` /
-  `zte_tpd.ko` are in the tree too. See `docs/mu300/screen-plan.md` (in the parent repo).
+  `zte_tpd.ko` are in the tree too. See `docs/changxing60/screen-plan.md` (in the parent repo).
   Only `sprd,vpu-pd` is genuinely absent from the ZTE tree and comes from elsewhere.
 * An older Unisoc 5.4.147 tree lacks the whole qogirn6pro USB stack and is not usable.
 
 ### 8. Build notes
 * Full LTO needs more than 8 GiB in the linker step; ThinLTO keeps CFI and links fine.
-* Stock config + `kernel/mu300-linux.fragment` adds devtmpfs, fhandle, autofs, SysV IPC, namespaces, nftables,
+* Stock config + `kernel/changxing60-linux.fragment` adds devtmpfs, fhandle, autofs, SysV IPC, namespaces, nftables,
   btrfs/xfs/squashfs, NFS/CIFS, USB serial/modem/audio host drivers, crypto user API, CDC-ACM gadget, and removes
   `STATIC_USERMODEHELPER` and forced module signatures.
 * All vendor modules must be rebuilt from the same tree (symbol CRCs change).
@@ -109,7 +109,7 @@ average. `top` shows about 98 % idle.
 ### 9. Unused space after userdata
 * `userdata` is 20 GiB and ends at sector 54218752; the GPT's last usable LBA is 122155007 and the backup GPT
   is at the very end. About **32.4 GiB between them belongs to no partition** and read back as zeros.
-* The rootfs is an ext4 filesystem (`mu300root`) at byte offset `27762098176` (sector 54222848), 32.39 GiB,
+* The rootfs is an ext4 filesystem (`changxing60root`) at byte offset `27762098176` (sector 54222848), 32.39 GiB,
   accessed through a loop device with an offset. **The GPT, userdata and all Android partitions are unchanged.**
 * `userdata` uses metadata encryption (`dm-default-key`, `inlinecrypt`), so it cannot be shrunk or shared.
 
@@ -126,7 +126,7 @@ average. `top` shows about 98 % idle.
 5.4 is systemd's minimum baseline; the system boots to `running` with the `old-kernel` taint.
 
 ### 12. USB Ethernet must be up before the host activates ECM
-* Symptom: macOS shows the "MU300 Linux USB Ethernet" interface as `inactive` forever, no DHCP, although on the
+* Symptom: macOS shows the "changxing60 Linux USB Ethernet" interface as `inactive` forever, no DHCP, although on the
   device `usb0` is UP with carrier.
 * Cause: `usb0` was only brought up by a systemd unit a few seconds after the UDC was bound. f_ecm reports the link
   in its first CONNECT notification and macOS' `AppleUserECM` does not pick up a later "connected" notification.
@@ -178,7 +178,7 @@ average. `top` shows about 98 % idle.
 ### 16. Rootfs details found while testing data
 * `docker export` leaves an empty `/etc/resolv.conf`: `resolvectl query` works but glibc programs cannot resolve names.
   Link it to `../run/systemd/resolve/stub-resolv.conf`.
-* busybox/toybox tar drop xattrs, so `ping` loses `cap_net_raw`; `mu300-fixups.service` restores it.
+* busybox/toybox tar drop xattrs, so `ping` loses `cap_net_raw`; `changxing60-fixups.service` restores it.
 * Android's uid `system` (1000) is also Ubuntu's first user, so modem device nodes show up as owned by `ubuntu`.
 
 ## Default boot
@@ -187,10 +187,10 @@ average. `top` shows about 98 % idle.
 * LK decrements `tries_remaining` before booting a slot and rolls back when it finds `tries == 1 && !successful`.
   The one-shot trial arms slot b with `tries = 2`.
 * Default-Linux mode never sets `successful_boot`. Instead:
-  1. init skips the slot-a restore when `/etc/mu300/default-boot` in the rootfs says `linux` (slot b is left at `tries = 1`);
-  2. `mu300-boot-ok.service` runs 30 s after `multi-user.target` and writes the `tries = 2` block again.
-* A boot that never reaches `mu300-boot-ok` therefore leaves `tries = 1`, and the next boot rolls back to Android.
-* Verified: `mu300-next-boot linux` + reboot returned to Linux and re-armed slot b; `mu300-next-boot android` + reboot
+  1. init skips the slot-a restore when `/etc/changxing60/default-boot` in the rootfs says `linux` (slot b is left at `tries = 1`);
+  2. `changxing60-boot-ok.service` runs 30 s after `multi-user.target` and writes the `tries = 2` block again.
+* A boot that never reaches `changxing60-boot-ok` therefore leaves `tries = 1`, and the next boot rolls back to Android.
+* Verified: `changxing60-next-boot linux` + reboot returned to Linux and re-armed slot b; `changxing60-next-boot android` + reboot
   booted slot a.
 
 ## Parity with Android
@@ -217,7 +217,7 @@ average. `top` shows about 98 % idle.
 
 ### 20. Diagnosing early power cuts
 * The initramfs log loop ends at `switch_root` and journald flushes only after local filesystems are up, so a power cut in
-  the first seconds of systemd leaves no log. `mu300-early-recorder.service` keeps writing `dmesg` to the boot_b log area
+  the first seconds of systemd leaves no log. `changxing60-early-recorder.service` keeps writing `dmesg` to the boot_b log area
   for the first five minutes.
 
 ## LAN, Wi-Fi bands and regulatory
@@ -225,7 +225,7 @@ average. `top` shows about 98 % idle.
 ### 21. One LAN for USB and Wi-Fi
 * `br-lan` (192.168.77.1/24, `usb0`) is the USB management link; `br-wifi` (192.168.8.1/24, `wlan0`)
   is the hotspot. Split 2026-10-13 so the device stops advertising itself as router/DNS to the PC
-  on the other end of the cable -- see `opt/mu300/bin/net-split`.
+  on the other end of the cable -- see `opt/changxing60/bin/net-split`.
 * cfg80211 refuses to bridge `wlan0` ("Device does not allow enslaving to a bridge") because `IFF_DONT_BRIDGE` stays set:
   the SC2355 driver marks the interface as AP but returns an error from `change_virtual_intf` when tearing down the
   previous firmware mode fails, so cfg80211 skips clearing the flag. `kernel/patches/wlan_combo-allow-bridging-ap.patch`.
@@ -263,22 +263,22 @@ average. `top` shows about 98 % idle.
   `sipa_delegate: modem_reset`, and `modem_control` stops and reloads the modem through Trusty. It comes back with
   `+CFUN: 0`, no registration and no PDP context, while `sipa_eth0` keeps its stale address, so clients lose internet.
   Android's RIL reconnects silently.
-* `mobile-data watch` (procd instance `cellwatch`, started by `mu300-post`) no longer polls `AT+CGACT?`: the live data
+* `mobile-data watch` (procd instance `cellwatch`, started by `changxing60-post`) no longer polls `AT+CGACT?`: the live data
   call holds the AT channel (`/dev/stty_nr1`), so the watchdog must not touch it. It judges the link by *reachability*
   instead. While idle (every third cycle, ~90 s) it sends ICMP probes to the carrier DNS plus 223.5.5.5/119.29.29.29;
   moving packet counters count as proof of life without probing at all, which both saves the probe and avoids false
   alarms where the carrier drops ICMP. Three consecutive failures make it repair with `ifdown`+`ifup` -- plain `ifup`
   is a no-op while netifd still believes the interface is up, which is exactly the failure seen in practice ("fake
   alive": address present, operstate `up`, `tx +0 rx +0`), rate-limited to one repair per 10 minutes; three failed
-  repairs trigger one `sim-reset`. It publishes `/tmp/mu300-wan-health` (`ok|dead` + uptime) so the status page can
-  report red instead of a green lie. `mobile-data down` sets `/run/mu300-mobile-data-down` so a manual disconnect is
+  repairs trigger one `sim-reset`. It publishes `/tmp/changxing60-wan-health` (`ok|dead` + uptime) so the status page can
+  report red instead of a green lie. `mobile-data down` sets `/run/changxing60-mobile-data-down` so a manual disconnect is
   respected.
 * Last resort (2026-10-13, commit `6c6fe97`): some wedges survive both the repair and `sim-reset` -- after
   `SIPA_RM` released the WWAN bearer, or after a 6-stream 279 Mbps burst, `mobile-data up` hangs in `do_select` and
   the cellular AT channel goes silent (bare `AT` unanswered, while the WCN `atcmd` attribute still answers `rc=0`,
   i.e. it is the cellular AT channel that died, not WCN). Only a reboot recovers it. `watch` now reboots when all
   four hold: health `dead` for >=300 s, a repair in flight for >=60 s (i.e. repairs are not helping), a bare `AT` on
-  `/dev/stty_nr1` going unanswered, and this boot has not rebooted yet (`/var/run/mu300-wan-rebooted`; `/var` is
+  `/dev/stty_nr1` going unanswered, and this boot has not rebooted yet (`/var/run/changxing60-wan-rebooted`; `/var` is
   tmpfs, so the marker is per-boot for free). The probe refuses to send AT at all while `$IFACE` still holds an
   address, which keeps the "never put AT traffic on a live data call" rule. Verified against a stubbed copy with the
   thresholds lowered: it fired exactly once, at the cooldown plus threshold, and never again.
@@ -295,7 +295,7 @@ average. `top` shows about 98 % idle.
   needed, because OpenWrt drives the panel through DRM instead of the Android logo buffer.
   `kernel/patches/of-reserved-mem-skip.patch` adds `CONFIG_OF_RESERVED_MEM_SKIP` (the boot image command line is not
   passed on by LK, so a cmdline option alone would not work); MemTotal grew from 1447 to 1473 MiB.
-* `mu300-zram.service` adds lz4 zram swap of half the RAM (swappiness 100).
+* `changxing60-zram.service` adds lz4 zram swap of half the RAM (swappiness 100).
 
 
 ### 28. Mali-G57 GPU (OpenCL) without Android
@@ -317,11 +317,11 @@ average. `top` shows about 98 % idle.
 
 ### 29. OpenWrt 25.12 next to Ubuntu
 * Layout: the ext4 area holds `/openwrt` (and `/ubuntu`, or Ubuntu directly in the root on first installs);
-  `/.mu300/boot-os` selects the system and `init` starts `/lib/systemd/systemd` or procd's `/sbin/init`. The disk stays
-  mounted at `/mnt/mu300-disk`; `mu300-os ubuntu|openwrt` switches. `openwrt/build-rootfs.sh` builds the rootfs from the
+  `/.changxing60/boot-os` selects the system and `init` starts `/lib/systemd/systemd` or procd's `/sbin/init`. The disk stays
+  mounted at `/mnt/changxing60-disk`; `changxing60-os ubuntu|openwrt` switches. `openwrt/build-rootfs.sh` builds the rootfs from the
   official armsr/armv8 tarball (checksum-verified) with apk, our kernel modules flat in `/lib/modules/<release>`
-  (ubox kmodloader), the vendor chroot and procd services (`mu300-vendor`, `mu300-hw`, `mu300-post`).
-* Cellular WAN is a netifd protocol (`proto mu300cell`, option `apn`), so LuCI/fw4 handle routing, DNS and NAT;
+  (ubox kmodloader), the vendor chroot and procd services (`changxing60-vendor`, `changxing60-hw`, `changxing60-post`).
+* Cellular WAN is a netifd protocol (`proto changxing60cell`, option `apn`), so LuCI/fw4 handle routing, DNS and NAT;
   `mobile-data watch` keeps it honest -- ICMP probes plus a health file, `ifdown`/`ifup` repairs, a `sim-reset` after
   three failures, and a once-per-boot reboot as the last resort (see 26).
 * Pitfalls found on the device:
@@ -347,7 +347,7 @@ average. `top` shows about 98 % idle.
     (own GPT, kernel 6.12) over the eMMC and brick the device. The packages are removed and `/sbin/sysupgrade` only allows
     configuration backups.
   * `wifi-scripts` generates an open "OpenWrt" network on first boot; `openwrt-wifi-config` replaces it once (marker
-    `/etc/mu300/wifi-configured`) with the imported SSID/WPA2 settings.
+    `/etc/changxing60/wifi-configured`) with the imported SSID/WPA2 settings.
 * Verified after reboots: 5 GHz AP (channel 36), cellular WAN, a USB client's traffic leaves with the modem's public IP;
   memory use about 140 MiB.
 * The early recorder runs from preinit, so a failed OpenWrt boot leaves dmesg, `ps`, `logread` and the Android logcat in
@@ -388,7 +388,7 @@ average. `top` shows about 98 % idle.
   The third row is the trap: the address-configuration restart schedules the solicitation, and writing
   `accept_ra` afterwards cancels it -- silence for another 30 s, which is easy to misread as "this SIM
   has no IPv6". So the order is `accept_ra` first, restart second, nothing after.
-* Fix: `proto mu300cell` (`openwrt/overlay/lib/netifd/proto/mu300cell.sh`, option `ipv6 'relay'`). The
+* Fix: `proto changxing60cell` (`openwrt/overlay/lib/netifd/proto/changxing60cell.sh`, option `ipv6 'relay'`). The
   address and the RA default route are then installed by the kernel's own SLAAC -- nothing is reported
   to netifd, and odhcpd reads the advertisement off the wire rather than out of netifd's records.
 * Lifetimes are infinite (address `valid_lft forever`, router lifetime ~18 h), so an address, once
@@ -419,7 +419,7 @@ Three separate things have to be true, and each fails invisibly on its own:
   client, so the wan zone needs `masq6` (`net-split` sets it). Proven on the wire rather than inferred:
   with a client on the hotspot, every echo request on the bearer leaves with the **bearer's** address as
   source, never the client's, and the replies come back to the bearer.
-* **A route to the LAN.** None exists by default: `mu300cell` flushes the bearer's IPv6 routes on setup,
+* **A route to the LAN.** None exists by default: `changxing60cell` flushes the bearer's IPv6 routes on setup,
   so a lookup for a client address falls through to the default route and the reply leaves via the modem
   towards the carrier gateway, where it disappears. `ndp-learn` installs the bearer's /64 on the hotspot
   bridge at metric 128 -- below the RA's own route for the same /64 on the bearer (metric 256) -- and
@@ -465,7 +465,7 @@ watchdog resets the SoC), so the first thing worth knowing is where the real sto
 **`/sys/fs/pstore/console-ramoops-0` survives the panic.** On a Unisoc boot the kernel is built with
 ramoops (`ramoops: using 0x40000@0xfff80000`), and pstore keeps the *previous* boot's console -- read it
 on the boot after a death and you get the Oops verbatim, timestamps and call trace included. The port's
-own `early-recorder` (`/opt/mu300/bin/early-recorder`) writes to a region inside `boot_b` every 5 s for
+own `early-recorder` (`/opt/changxing60/bin/early-recorder`) writes to a region inside `boot_b` every 5 s for
 the first 300 s, which is the right tool for a *power cut*, but it stops long before a crash hours later
 and this boot's writes overwrite it byte for byte -- so for a panic, **pstore first**:
 
@@ -661,7 +661,7 @@ the approach:
   `btattach -B /dev/ttyBT0 -P h4` creates `hci0`.
 * Vendor init (Android `libbt-sprd_suite`, Marlin3): before the stack starts, send `0xFCA0` with the 176-byte PSKey block
   from `bt_configure_pskey.ini` (BD address at bytes 20..25, little endian), `0xFCA2` with the 252-byte RF block from
-  `bt_configure_rf.ini`, then `0xFCA1 00 00 01` (dual mode, enable). `tools/bt-init/mu300-bt-init.c` does this. Without the
+  `bt_configure_rf.ini`, then `0xFCA1 00 00 01` (dual mode, enable). `tools/bt-init/changxing60-bt-init.c` does this. Without the
   PSKey upload the controller reports a fixed placeholder address.
 * The firmware advertises Hold Mode and Park State in its LMP features, but `Write Default Link Policy Settings` returns
   `Invalid HCI Command Parameters` for any value that includes them (0x0000/0x0001/0x0004/0x0005 accepted, 0x0007 rejected).
@@ -669,7 +669,7 @@ the approach:
   `kernel/patches/bluetooth-marlin3-link-policy.patch` requests only Role Switch and Sniff (Bluetooth is built in, so this
   needs the kernel rebuild).
 * Android keeps the real BT address in `/data/vendor/bluetooth/btmac.txt` on encrypted `/data`; Linux uses
-  `BDADDR=` from `/etc/mu300/bluetooth.conf` or a stable locally administered address derived from `machine-id`.
+  `BDADDR=` from `/etc/changxing60/bluetooth.conf` or a stable locally administered address derived from `machine-id`.
 * Verified: `bluetoothd` powers the adapter and LE/BR-EDR scanning lists nearby devices.
 * Rebuilding with a modified tree appends `-dirty` to the kernel release and breaks module loading; `.scmversion` with
   `-gb50db5b6224c` in the source tree keeps the release string stable.
@@ -692,34 +692,34 @@ the approach:
 * What was actually wrong: fw4's input chain was `iifname "br-lan" jump input_lan` / `iifname "sipa_eth0" jump
   input_wan` / `jump handle_reject` under `policy drop`, with `forward` the same. `br-wifi` was in **no** zone.
   The one line that puts it there is in `net-split`, and `net-split` was committed `100644`.
-* Why it was invisible. `openwrt/overlay/etc/uci-defaults/90-mu300` invoked it as a bare
-  `/opt/mu300/bin/net-split`, which answered `Permission denied` and returned 126; the script ends in `exit 0`.
+* Why it was invisible. `openwrt/overlay/etc/uci-defaults/90-changxing60` invoked it as a bare
+  `/opt/changxing60/bin/net-split`, which answered `Permission denied` and returned 126; the script ends in `exit 0`.
   The device still had `br-wifi` / `192.168.8.1/24` (that lives in `etc/config/network`, which
-  `tools/mu300-carry-over.py` carries across a reflash) and the DHCP scope (its own `uci` section, `set:wifi`),
+  `tools/changxing60-carry-over.py` carries across a reflash) and the DHCP scope (its own `uci` section, `set:wifi`),
   so the only missing piece was a zone no config file held.
 * The 2026-10-15 rebuild is what split them apart: it carried `etc/config/network`, `etc/config/wireless` and
-  `etc/mu300` -- including the `wifi-configured` marker that makes `openwrt-wifi-config` exit early -- but not
+  `etc/changxing60` -- including the `wifi-configured` marker that makes `openwrt-wifi-config` exit early -- but not
   `etc/config/firewall`. Whatever carries `network` has to carry `firewall`; that is now in the ALWAYS list.
 * Four more scripts were 644 while every caller reached them by path, and every one of those failures was
-  silent: `hotspot-watch` (a procd instance in `mu300-post`, so the radio watchdog never ran), `charge-fix`
-  (crontab + `mu300-post`, so the charger was never re-pinned), `quiet-console` (`mu300-hw`, so the console was
-  never quieted for the SC2355), and the overlay's own `/etc/init.d/mu300-ndp` (so `ndp-learn` never routed the
+  silent: `hotspot-watch` (a procd instance in `changxing60-post`, so the radio watchdog never ran), `charge-fix`
+  (crontab + `changxing60-post`, so the charger was never re-pinned), `quiet-console` (`changxing60-hw`, so the console was
+  never quieted for the SC2355), and the overlay's own `/etc/init.d/changxing60-ndp` (so `ndp-learn` never routed the
   carrier's /64 to the hotspot -- the metric 128 route appeared the moment it was made executable). A fifth,
-  `ndp-learn` itself, escaped only because `mu300-ndp` calls it through `sh`. The three in
-  `openwrt/overlay/opt/mu300/bin` -- `vendor-modules`, `bootdiag`, `touch-ctl` -- were 644 like the rest, and
-  that directory is not tracked at all, which is exactly why `tools/mu300-android-stage-adapt.sh` had to
+  `ndp-learn` itself, escaped only because `changxing60-ndp` calls it through `sh`. The three in
+  `openwrt/overlay/opt/changxing60/bin` -- `vendor-modules`, `bootdiag`, `touch-ctl` -- were 644 like the rest, and
+  that directory is not tracked at all, which is exactly why `tools/changxing60-android-stage-adapt.sh` had to
   `chmod` them by hand.
 * Fixes: all nine carry 755, and `openwrt/build-rootfs.sh` re-applies the bit at build time, so a wrong one
   cannot ship again. Worth recording how long the second half took, because the gap was invisible: the bits
   were right on disk well before they were right in git. Six of the nine
-  (`rootfs/overlay/opt/mu300/bin/{net-split,hotspot-watch,charge-fix,quiet-console,ndp-learn}` plus
-  `openwrt/overlay/etc/init.d/mu300-ndp`) were tracked but still recorded `100644` in HEAD -- a mode-only
-  worktree edit that nothing stages for you -- and the three under `openwrt/overlay/opt/mu300/bin/` were
+  (`rootfs/overlay/opt/changxing60/bin/{net-split,hotspot-watch,charge-fix,quiet-console,ndp-learn}` plus
+  `openwrt/overlay/etc/init.d/changxing60-ndp`) were tracked but still recorded `100644` in HEAD -- a mode-only
+  worktree edit that nothing stages for you -- and the three under `openwrt/overlay/opt/changxing60/bin/` were
   untracked, along with the rest of that overlay subtree. `git ls-files -s` is the only check that sees the
   difference; the device, `ls -l`, and a `git diff` of the scripts all looked correct the whole time. Both
   landed in the same commit, 2026-10-16.
-  The other fixes: `90-mu300` calls net-split through `sh` and logs a non-zero exit rather than swallowing it;
-  `mu300-carry-over.py` carries `etc/config/firewall`. A mode bit is not a thing anyone reviews, so the build
+  The other fixes: `90-changxing60` calls net-split through `sh` and logs a non-zero exit rather than swallowing it;
+  `changxing60-carry-over.py` carries `etc/config/firewall`. A mode bit is not a thing anyone reviews, so the build
   should not depend on one.
 * The lesson generalises past modes. The check that decides "is the hotspot working" has to be one a client
   would pass. Every signal that said healthy here -- beaconing AP, `ENABLED` hostapd, associated station,
@@ -733,16 +733,16 @@ the approach:
 
 * Context. Thirteen vendor modules Android loads at boot (sensor hub, ION heaps, the DMA engine,
   AP/DPU/GSP DVFS glue, `uid`/stats/bootreason, the status-LED pattern trigger) are staged into the
-  OpenWrt rootfs and loaded by `/opt/mu300/bin/vendor-modules`. On 2026-10-16 the first attempt to load
+  OpenWrt rootfs and loaded by `/opt/changxing60/bin/vendor-modules`. On 2026-10-16 the first attempt to load
   the whole group took the kernel down with `CFI failure (target: 0x0)` about three seconds later -- a
   driver arming a timer with a NULL callback -- with no way to tell which one from a single boot. So the
-  box bisects itself: `vendor-modules bisect` walks `/etc/mu300/vendor-candidates` one batch per 20 s
+  box bisects itself: `vendor-modules bisect` walks `/etc/changxing60/vendor-candidates` one batch per 20 s
   window, writes `TRYING <batch>` to `/root/vendor-bisect.log` *before* loading it (a batch that kills
   the kernel leaves a TRYING with no verdict behind, which names it on the next boot), and appends what
-  survived to `/etc/mu300/vendor-good` -- which the default path then loads.
+  survived to `/etc/changxing60/vendor-good` -- which the default path then loads.
 * The bug. The verdict was "the kernel survived the window", and `load()` shells out to
   `timeout 15 insmod`. `timeout(1)` is not in OpenWrt's busybox: it comes from the static busybox in
-  `/opt/mu300/busybox-bin`, and `mu300-hw` (S12) puts that directory on PATH **for itself**. `bootdiag`
+  `/opt/changxing60/busybox-bin`, and `changxing60-hw` (S12) puts that directory on PATH **for itself**. `bootdiag`
   reaches `vendor-modules bisect` from **cron**, whose PATH is `/usr/sbin:/usr/bin:/sbin:/bin`. Every
   load therefore failed with `timeout: not found`, the kernel survived every window -- of course it did,
   nothing was loaded -- and the bisect wrote thirteen `OK`s and thirteen module names into
@@ -752,19 +752,19 @@ the approach:
   `FAILED apsys-dvfs.ko: .../vendor-modules: line 51: timeout: not found` immediately followed by
   `OK apsys-dvfs` -- but the script's own summary said OK, and that is the line anyone reads.
 * Fixes, both aimed at the same mistake. (1) *One script, one PATH*: `vendor-modules` prepends
-  `/opt/mu300/busybox-bin:/opt/mu300/bin` itself, so what it can call no longer depends on who called
+  `/opt/changxing60/busybox-bin:/opt/changxing60/bin` itself, so what it can call no longer depends on who called
   it. (2) *The verdict reads state, not survival*: after each window it checks every module in
   `/proc/modules`, and if any is missing writes `SKIPPED <batch> : not loaded:<mods> -- nothing proven`
   and does **not** add it to `vendor-good`. `SKIPPED` counts as a verdict, so the previous-boot detector
   does not mistake it for a kernel death and blacklist the batch.
 * After one reboot: all 11 batches `already loaded ... OK`, zero `FAILED` in
-  `/tmp/mu300-vendor-modules.log`, zero `CFI failure` in dmesg, `vendor-bad` still absent, all 13 modules
+  `/tmp/changxing60-vendor-modules.log`, zero `CFI failure` in dmesg, `vendor-bad` still absent, all 13 modules
   up in `/proc/modules`. The first suspect, `apsys-dvfs`, was clean. The 13 lines in `vendor-good` were
   originally written by the broken verdict, but every boot since has re-confirmed each one against
   `/proc/modules`, so the set is real now.
 * The lesson is §35's from the other side. A verdict that reads a log line, an exit code, or "it is
   still running" can certify *nothing happened* as *everything is fine*. Read state -- `/proc/modules`,
   sysfs links, device registers -- and never let a script's reach depend on the caller's environment.
-  The sibling trap is in the outer tree's `docs/mu300/drivers.md` §2.1: the USB verdict there used to be
+  The sibling trap is in the outer tree's `docs/changxing60/drivers.md` §2.1: the USB verdict there used to be
   two dmesg debug prints, and on the boot that actually fixed USB neither of them appeared, so the check
   called a working box broken.

@@ -1,0 +1,213 @@
+#!/bin/sh
+# Voice calls, control side.
+#
+#   changxing60-voice state                  what the call is doing, as the state file's own key=value lines
+#   changxing60-voice status                 the same, as one line for a human
+#   changxing60-voice dial NUMBER            place a call
+#   changxing60-voice answer                 answer the ringing call
+#   changxing60-voice hangup                 end the call, or refuse it while it is still ringing
+#   changxing60-voice dtmf DIGITS            send DTMF into an active call
+#   changxing60-voice mute on|off            mute the uplink
+#   changxing60-voice log [N]                call history, newest first (default 20)
+#   changxing60-voice log clear              empty it
+#   changxing60-voice contacts [list]        the contact book
+#   changxing60-voice contacts add NUM NAME
+#   changxing60-voice contacts del NUM
+#   changxing60-voice name NUMBER            what the contact book calls that number, or nothing
+#   changxing60-voice preview STATE [NUMBER] write the state file by hand, to look at the panel without a call
+#
+# Every AT command here goes through changxing60-at and the changxing60-atd daemon (init.d/changxing60-at) that owns the channel;
+# nothing opens /dev/stty_nr1 for itself. The commands are the ordinary GSM ones -- ATD<number>; to dial (the
+# semicolon is what makes it a voice call rather than data), ATA to answer, AT+CHUP to end, AT+VTS for DTMF,
+# AT+CMUT to mute -- and they are the same ones the E5's port drives (kanoqwq/e5-linux), so a call placed from
+# here is an ordinary call as far as the network is concerned.
+#
+# What this program does NOT do is carry the audio. A call's voice goes through the AGDSP, and the driver stack
+# for it is a separate piece of work (docs/changxing60/telephony.md); changxing60-voiced asks /opt/changxing60/bin/changxing60-voice-audio
+# for it when a call comes up, and that program does not exist yet. Until it does, a call connects, the panel
+# shows who is calling, the buttons answer and hang up -- and neither side hears anything.
+#
+# The state file is not written here. changxing60-voiced is its only writer, and it learns what happened by asking the
+# modem (AT+CLCC), not by being told. That is deliberate: a page that sets its own idea of the state can be
+# wrong about it, and the modem cannot. This program's job is to send the command and to knock on the daemon's
+# door (the nudge file) so the answer shows up in a fraction of a second instead of at the next poll.
+set -u
+export PATH="$PATH:/opt/changxing60/bin:/opt/changxing60/busybox-bin:/usr/sbin:/sbin"
+
+. "${CHANGXING60_VOICE_LIB:-/opt/changxing60/lib/voice.sh}" || { echo "changxing60-voice: the voice library is missing" >&2; exit 1; }
+
+AT=${CHANGXING60_AT_BIN:-/opt/changxing60/bin/changxing60-at}
+
+at() { "$AT" -t "${2:-10}" "$1" 2>&1; }
+
+# nudge: tell changxing60-voiced to look at the modem now. Best effort -- the daemon also polls on its own, so a
+# missing /run (a host-side test) is not a reason for a command that already reached the modem to report failure.
+nudge() { mkdir -p "$VDIR" 2>/dev/null; : > "$VNUDGE" 2>/dev/null; return 0; }
+
+# end_reason: remember that we ended a call which was still ringing, so the daemon writes "rejected" rather
+# than "missed". The daemon cannot tell the two apart from AT+CLCC -- both are a call that stopped before it
+# was answered -- and "I pressed hang up" and "they gave up" are different things to read back later.
+note_reject() {
+    [ "$(state_read state)" = ringing ] || return 0
+    mkdir -p "$VDIR" 2>/dev/null; date +%s > "$VREJECT" 2>/dev/null
+}
+
+# What may reach the modem, checked here rather than discovered by its parser. A stray quote or comma would end
+# up as a different command entirely.
+#
+# Three shapes, because they are three different things:
+#   digits_plus  a phone number: digits, with at most one leading + (the country code). A contact's number.
+#   mmi          a feature code: digits, * and # (ATD*100#; is an ordinary call to the network).
+#   dtmf_ok      the tones a keypad can send. No + -- it is not a tone -- and the A-D column, which a phone
+#                keypad does not have but an IVR can still ask for.
+digits_plus() { case ${1:-} in ''|*[!0-9+]*) return 1 ;; +*+*) return 1 ;; esac; [ -n "$(digits "$1")" ]; }
+mmi()         { case ${1:-} in ''|*[!0-9*#]*) return 1 ;; esac; }
+dtmf_ok()     { case ${1:-} in ''|*[!0-9*#ABCDabcd]*) return 1 ;; esac; }
+dial_ok()     { digits_plus "$1" || mmi "$1"; }
+
+# ok_or_error OUT: did the modem end the command with a final result code that means success? changxing60-at already
+# fails when there is no final code at all; this is the second half, and it is what stops an ERROR from being
+# reported as a placed call.
+#
+# The CR is dropped first. The client strips it from each line it reads back, so it should never arrive here --
+# but the modem ends its lines with one, and a trailing CR makes "OK" stop matching "OK", which is a failure
+# that looks exactly like the modem refusing a command that in fact succeeded.
+ok_or_error() {
+    case $(printf '%s\n' "$1" | tr -d '\r' | grep -aE '^(OK|CONNECT)' | tail -1) in
+        OK|CONNECT*) return 0 ;;
+    esac
+    return 1
+}
+
+case "${1:-state}" in
+
+state)
+    if [ -r "$VSTATE" ]; then cat "$VSTATE"; else printf 'state=idle\ndir=\nnumber=\nname=\nidx=\nsince=\nupdated=\n'; fi ;;
+
+status)
+    s=$(state_read state); n=$(state_read number); m=$(state_read name); d=$(state_read dir)
+    [ -n "$s" ] || s=idle
+    case $s in
+        idle) echo "no call" ;;
+        ringing) echo "incoming call from ${m:-$n}${m:+ ($n)}" ;;
+        dialing|alerting) echo "outgoing call to ${m:-$n}${m:+ ($n)} ($s)" ;;
+        active) echo "call with ${m:-$n}${m:+ ($n)} is up" ;;
+        *) echo "call: $s ${m:-$n}" ;;
+    esac ;;
+
+dial)
+    num=${2:-}
+    dial_ok "$num" || { echo "changxing60-voice: usage: changxing60-voice dial NUMBER (digits, an optional leading +, or an MMI code)" >&2; exit 2; }
+    # ATD is answered with OK as soon as the modem accepts the request, not when the far end rings, so a
+    # success here means "placed", never "connected". The state comes from changxing60-voiced asking AT+CLCC.
+    out=$(at "ATD$num;" 20) || true
+    nudge
+    if ok_or_error "$out"; then
+        echo "dialling $(echo "$num" | mask)" >&2
+        exit 0
+    fi
+    echo "changxing60-voice: the call was not placed: $(printf '%s' "$out" | tail -1)" >&2
+    exit 1 ;;
+
+answer)
+    out=$(at 'ATA' 15) || true
+    nudge
+    if ok_or_error "$out"; then echo "answered" >&2; exit 0; fi
+    echo "changxing60-voice: could not answer: $(printf '%s' "$out" | tail -1)" >&2
+    exit 1 ;;
+
+hangup)
+    note_reject
+    out=$(at 'AT+CHUP' 10) || true
+    nudge
+    # CHUP on a call that has already ended is an ERROR on most modems, and reporting that as a failure would
+    # make the button look broken exactly when it worked. The state is what decides, so ask it.
+    if ok_or_error "$out" || [ "$(state_read state)" = idle ]; then echo "ended" >&2; exit 0; fi
+    echo "changxing60-voice: could not end the call: $(printf '%s' "$out" | tail -1)" >&2
+    exit 1 ;;
+
+dtmf)
+    d=${2:-}
+    dtmf_ok "$d" || { echo "changxing60-voice: usage: changxing60-voice dtmf DIGITS (0-9 * # A-D)" >&2; exit 2; }
+    # One at a time: a modem that does not implement the comma-separated list form answers ERROR to the whole
+    # string, and then no tone goes out at all. The loop costs one AT round per digit and always works.
+    i=0
+    while [ $i -lt ${#d} ]; do
+        c=$(printf '%s' "$d" | cut -c$((i + 1)))
+        out=$(at "AT+VTS=\"$c\"" 5) || true
+        ok_or_error "$out" || { echo "changxing60-voice: DTMF '$c' was refused: $(printf '%s' "$out" | tail -1)" >&2; exit 1; }
+        i=$((i + 1))
+    done
+    echo "sent $i tone(s)" >&2 ;;
+
+mute)
+    case ${2:-} in
+        on) out=$(at 'AT+CMUT=1' 8) || true ;;
+        off) out=$(at 'AT+CMUT=0' 8) || true ;;
+        *) echo "usage: changxing60-voice mute on|off" >&2; exit 2 ;;
+    esac
+    ok_or_error "$out" || { echo "changxing60-voice: the modem refused: $(printf '%s' "$out" | tail -1)" >&2; exit 1; }
+    echo "mute $2" >&2 ;;
+
+log)
+    case ${2:-} in
+        clear)
+            : > "$VLOG" 2>/dev/null && echo "call log cleared" >&2 || { echo "changxing60-voice: could not clear $VLOG" >&2; exit 1; } ;;
+        *)
+            n=${2:-20}
+            case $n in ''|*[!0-9]*) echo "changxing60-voice: usage: changxing60-voice log [N|clear]" >&2; exit 2 ;; esac
+            log_lines | head -n "$n" ;;
+    esac ;;
+
+contacts)
+    case ${2:-list} in
+        list)
+            [ -s "$VCONTACTS" ] && cat "$VCONTACTS" ;;
+        add)
+            num=${3:-}; name=${4:-}
+            digits_plus "$num" || { echo "usage: changxing60-voice contacts add NUMBER NAME" >&2; exit 2; }
+            [ -n "$name" ] || { echo "usage: changxing60-voice contacts add NUMBER NAME" >&2; exit 2; }
+            # The name may not contain the field separator or a newline: the file has one record per line and
+            # '|' is what splits it, so a name carrying either would silently become two contacts.
+            case $name in *'|'*) echo "changxing60-voice: a name may not contain '|'" >&2; exit 2 ;; esac
+            mkdir -p "$(dirname "$VCONTACTS")" 2>/dev/null
+            dq=$(digits "$num")
+            # Replace an existing entry for the same number rather than adding a second one: two names for one
+            # number is a contact book that answers the panel differently depending on which line it hits first.
+            if [ -s "$VCONTACTS" ]; then
+                awk -F'|' -v d="$dq" '{ n=$1; gsub(/[^0-9]/,"",n); if (n != d) print }' "$VCONTACTS" > "$VCONTACTS.tmp" &&
+                    mv "$VCONTACTS.tmp" "$VCONTACTS"
+            fi
+            printf '%s|%s\n' "$num" "$name" >> "$VCONTACTS"
+            echo "added" >&2 ;;
+        del)
+            num=${3:-}
+            digits_plus "$num" || { echo "usage: changxing60-voice contacts del NUMBER" >&2; exit 2; }
+            [ -s "$VCONTACTS" ] || { echo "changxing60-voice: the contact book is empty" >&2; exit 1; }
+            dq=$(digits "$num")
+            before=$(wc -l < "$VCONTACTS")
+            awk -F'|' -v d="$dq" '{ n=$1; gsub(/[^0-9]/,"",n); if (n != d) print }' "$VCONTACTS" > "$VCONTACTS.tmp" &&
+                mv "$VCONTACTS.tmp" "$VCONTACTS"
+            after=$(wc -l < "$VCONTACTS" 2>/dev/null || echo 0)
+            [ "$after" -lt "$before" ] || { echo "changxing60-voice: no contact for that number" >&2; exit 1; }
+            echo "deleted" >&2 ;;
+        *) echo "usage: changxing60-voice contacts [list|add NUMBER NAME|del NUMBER]" >&2; exit 2 ;;
+    esac ;;
+
+name)
+    contact_name "${2:-}" ;;
+
+# preview: write the state file by hand. There is no way to make the modem ring on demand, and the caller-id
+# screen is the one piece of this that a person has to look at to believe. changxing60-voiced owns the file and will
+# overwrite this at its next poll, so stop it first (/etc/init.d/changxing60-voiced stop) if the preview is to stay.
+preview)
+    s=${2:-ringing}; n=${3:-+8613800138000}
+    case $s in idle|ringing|dialing|alerting|active|held) ;; *) echo "usage: changxing60-voice preview STATE [NUMBER]" >&2; exit 2 ;; esac
+    mkdir -p "$VDIR" 2>/dev/null
+    state_write "$s" "$([ "$s" = ringing ] && echo in || echo out)" "$n" "$(contact_name "$n")" 1
+    echo "state=$s, number=$(echo "$n" | mask) - changxing60-voiced will overwrite this at its next poll" >&2 ;;
+
+*)
+    sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
+    exit 2 ;;
+esac

@@ -32,7 +32,7 @@ usage:
   patch-vendor-dtb.py --dtb-only out.dtb          # just produce the patched DTB (no repack)
 
 Needs `dtc` and python3; upstream/mkvendorboot.py does the repack.  Run it where dtc exists, e.g.
-  docker run --rm -v "$PWD":/w -v /tmp:/tmp mu300-cross \
+  docker run --rm -v "$PWD":/w -v /tmp:/tmp changxing60-cross \
       python3 /w/mainline-7552n/tools/patch-vendor-dtb.py --vendor-boot /w/work/dumps/vendor_boot_b.img \
                                                           --out /w/work/vendor_boot_b-7552n.img
 """
@@ -96,7 +96,7 @@ NODE_EDITS = {
     # The way back is cheap and does not need a repack: "disabled" is 9 bytes with the NUL and "okay" 5,
     # both padding into a 12-byte slot, so `vendor-dtb-status.py --set okay` rewrites the 9 bytes in
     # place, leaves the blob the same size, and is verified by a full-partition sha256.  Do that before
-    # returning to OpenWrt (tools/mu300-dtb-fix.sh drives it from Android over adb); for the opposite
+    # returning to OpenWrt (tools/changxing60-dtb-fix.sh drives it from Android over adb); for the opposite
     # direction -- okay -> disabled, which does not fit the padding and *does* need this script and a
     # repack -- run this tool again.
     "dummyphy": {

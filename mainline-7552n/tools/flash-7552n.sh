@@ -32,7 +32,7 @@ flash_vendor_boot() {   # flash_vendor_boot SRC  (SRC must be a full 100 MiB ven
     # that partition is *also* the DTB source for the 5.4 OpenWrt slot-b boot -- where the disabled node
     # means no usb_phy, no UDC and no management interface (the 2026-10-14..16 unreachable box).  Going
     # back to OpenWrt therefore needs the 9-byte in-place restore, not just a boot_b flash:
-    #     tools/mu300-dtb-fix.sh          # from Android, over adb; NOARM=1 if misc is already armed
+    #     tools/changxing60-dtb-fix.sh          # from Android, over adb; NOARM=1 if misc is already armed
     # `--restore-vendor-boot` flashes the *stock* DTB, which also fixes 5.4 USB (but drops the ufs/gpu
     # mainline edits, so the next 6.18 trial has to re-run patch-vendor-dtb.py).
     src=$1

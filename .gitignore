@@ -15,8 +15,21 @@ logs-*/
 rootfs/base.tar
 __pycache__/
 .DS_Store
-tools/bt-init/mu300-bt-init
+tools/bt-init/changxing60-bt-init
 tools/gpu/cltest
+# Same class as the two above: binaries we build ourselves from a source file that IS tracked.
+# (tools/modem/changxing60-modemd.c + build.sh, and the modem-ioctl test helper.)
+tools/modem/changxing60-modemd
+tools/modem-ioctl
+# Vendored third-party proxy cores, obtained from their upstream releases, not from this repo:
+#   clash/bin/mihomo    -- the OpenClash core (clash/ is a vendored OpenClash tree; config.yaml IS tracked)
+#   .../bin/sing-box    -- 86 MiB; container/build-rootfs.sh line 14 refuses to build without it and
+#                          points at container/README for where to get it.
+clash/bin/
+container/overlay/opt/changxing60/bin/sing-box
+# The vendored OpenClash web UI: a downloaded release, i.e. hashed Vite build output (note the
+# dist/dist nesting) that nothing in this repo references. config.yaml next to it IS tracked.
+clash/ui/dist/
 work/
 openwrt/*.tar.gz
 upstream/stub/*.elf

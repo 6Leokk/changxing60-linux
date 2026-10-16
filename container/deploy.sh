@@ -6,8 +6,8 @@
 set -eu
 TOP=$(cd "$(dirname "$0")/.." && pwd)
 ADB=${ADB:-/mnt/c/platform-tools/adb.exe}
-TARBALL=$TOP/container/mu300-openwrt-container-rootfs.tar.gz
-MODSRC=$TOP/container/apatch-module/mu300-openwrt
+TARBALL=$TOP/container/changxing60-openwrt-container-rootfs.tar.gz
+MODSRC=$TOP/container/apatch-module/changxing60-openwrt
 ROOT=/data/openwrt
 
 [ -f "$TARBALL" ] || { echo "run container/build-rootfs.sh first" >&2; exit 1; }
@@ -17,12 +17,12 @@ echo "== pushing rootfs tarball (extracts on device) =="
 "$ADB" push "$TARBALL" /data/local/tmp/openwrt-rootfs.tar.gz
 
 echo "== extracting container rootfs =="
-"$ADB" shell su -c 'rm -rf /data/openwrt && mkdir -p /data/openwrt && cd /data/openwrt && tar -xzf /data/local/tmp/openwrt-rootfs.tar.gz && chmod 755 /data/openwrt/opt/mu300/bin/sing-box /data/openwrt/opt/mu300/bin/mu300-vpn /data/openwrt/etc/init.d/mu300-vpn && rm /data/local/tmp/openwrt-rootfs.tar.gz'
+"$ADB" shell su -c 'rm -rf /data/openwrt && mkdir -p /data/openwrt && cd /data/openwrt && tar -xzf /data/local/tmp/openwrt-rootfs.tar.gz && chmod 755 /data/openwrt/opt/changxing60/bin/sing-box /data/openwrt/opt/changxing60/bin/changxing60-vpn /data/openwrt/etc/init.d/changxing60-vpn && rm /data/local/tmp/openwrt-rootfs.tar.gz'
 
 echo "== installing APatch module =="
-"$ADB" push "$MODSRC/service.sh" /data/local/tmp/mu300-openwrt-service.sh
-"$ADB" push "$MODSRC/module.prop" /data/local/tmp/mu300-openwrt-module.prop
-"$ADB" shell su -c 'mkdir -p /data/adb/modules/mu300_openwrt && cp /data/local/tmp/mu300-openwrt-service.sh /data/adb/modules/mu300_openwrt/service.sh && cp /data/local/tmp/mu300-openwrt-module.prop /data/adb/modules/mu300_openwrt/module.prop && chmod 755 /data/adb/modules/mu300_openwrt/service.sh && rm /data/local/tmp/mu300-openwrt-service.sh /data/local/tmp/mu300-openwrt-module.prop'
+"$ADB" push "$MODSRC/service.sh" /data/local/tmp/changxing60-openwrt-service.sh
+"$ADB" push "$MODSRC/module.prop" /data/local/tmp/changxing60-openwrt-module.prop
+"$ADB" shell su -c 'mkdir -p /data/adb/modules/changxing60_openwrt && cp /data/local/tmp/changxing60-openwrt-service.sh /data/adb/modules/changxing60_openwrt/service.sh && cp /data/local/tmp/changxing60-openwrt-module.prop /data/adb/modules/changxing60_openwrt/module.prop && chmod 755 /data/adb/modules/changxing60_openwrt/service.sh && rm /data/local/tmp/changxing60-openwrt-service.sh /data/local/tmp/changxing60-openwrt-module.prop'
 
 echo "== done. Start now (y) or on next boot? Starting now: =="
-"$ADB" shell su -c 'sh /data/adb/modules/mu300_openwrt/service.sh start; sleep 5; sh /data/adb/modules/mu300_openwrt/service.sh status'
+"$ADB" shell su -c 'sh /data/adb/modules/changxing60_openwrt/service.sh start; sleep 5; sh /data/adb/modules/changxing60_openwrt/service.sh status'

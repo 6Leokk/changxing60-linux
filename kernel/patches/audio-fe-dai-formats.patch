@@ -1,0 +1,106 @@
+sprd-fe-dai: offer the DSP front ends only the formats and layouts the DSP really takes
+
+Based on kanoqwq/e5-linux@6e4377e (0017-capture-dsp-s16-only.patch) and @cd4a536
+(0019-fast-play-s16-only.patch, 0020-mcdt-fe-interleaved-only.patch), ported to the 5.4 audio_driver tree.
+All three were measured on the E5's AGDSP, which runs the same VBC v4 / MCDT front ends as this board.
+
+* FE_CAPTURE_DSP: the DSP capture scene writes S16_LE whatever hw_params says; opened S24_LE the buffer
+  holds two samples per 32-bit word and records as noise.
+* FE_FAST_P: one S24_LE stream plays, the next one stalls with the MCDT FIFO full; S16_LE restarts every
+  time, and Android's HAL only ever opens it S16_LE.
+* Every FE that mcdt_dma_config_init() puts on an MCDT channel (FE_VOICE_PCM_P and FE_VOICE_CAPTURE, the
+  two ends a call bridge uses, among them) moves the stream through one DMA channel into one FIFO, so the
+  buffer must be interleaved; the platform advertises NONINTERLEAVED for every FE, and a planar client
+  (PipeWire) plays an octave high. A startup() constraint limits those FEs to interleaved access.
+
+--- a/sprd/dai/vbc/v4/fe_dai/sprd-fe-dai.c
++++ b/sprd/dai/vbc/v4/fe_dai/sprd-fe-dai.c
+@@ -812,9 +812,54 @@
+ 	agdsp_access_disable();
+ 
+ 	return 0;
++}
++
++/*
++ * The front ends that mcdt_dma_config_init() puts on an MCDT channel move the
++ * whole stream through one DMA channel into one MCDT FIFO
++ * (sprd_pcm_hw_params() forces ch_cnt = 1 for them), so the buffer must be
++ * interleaved. The platform still advertises SNDRV_PCM_INFO_NONINTERLEAVED
++ * for every FE - the AP FEs split left and right over two DMA channels - and
++ * a client whose native layout is planar (PipeWire) takes it and plays each
++ * plane as interleaved frames, an octave high with a click per period.
++ * Based on kanoqwq/e5-linux@cd4a536 (kernel/patches/0020-mcdt-fe-interleaved-only.patch).
++ */
++static bool fe_dai_uses_mcdt(int id)
++{
++	switch (id) {
++	case FE_DAI_ID_CAPTURE_DSP:
++	case FE_DAI_ID_FM_CAP_DSP:
++	case FE_DAI_ID_BTSCO_CAP_DSP:
++	case FE_DAI_ID_VOICE_CAPTURE:
++	case FE_DAI_ID_LOOP:
++	case FE_DAI_ID_FAST_P:
++	case FE_DAI_ID_HIFI_FAST_P:
++	case FE_DAI_ID_VOIP:
++	case FE_DAI_ID_A2DP_PCM:
++	case FE_DAI_ID_RECOGNISE_CAPTURE:
++	case FE_DAI_ID_VOICE_PCM_P:
++	case FE_DAI_ID_HIFI_P:
++	case FE_DAI_ID_MM_P:
++		return true;
++	default:
++		return false;
++	}
+ }
+ 
++static int fe_startup(struct snd_pcm_substream *substream,
++	struct snd_soc_dai *fe_dai)
++{
++	if (!fe_dai_uses_mcdt(fe_dai->id))
++		return 0;
++
++	return snd_pcm_hw_constraint_mask64(substream->runtime,
++		SNDRV_PCM_HW_PARAM_ACCESS,
++		(1ULL << SNDRV_PCM_ACCESS_MMAP_INTERLEAVED) |
++		(1ULL << SNDRV_PCM_ACCESS_RW_INTERLEAVED));
++}
++
+ static struct snd_soc_dai_ops sprd_fe_dai_ops = {
++	.startup = fe_startup,
+ 	.hw_params = fe_hw_params,
+ 	.hw_free = fe_hw_free,
+ };
+@@ -927,8 +972,14 @@
+ 			.stream_name = "FE_DAI_CAP_DSP_C",
+ 			.aif_name = "FE_IF_CAP_DSP_C",
+ 			.rates = SNDRV_PCM_RATE_CONTINUOUS,
+-			.formats = (SNDRV_PCM_FMTBIT_S16_LE |
+-						SNDRV_PCM_FMTBIT_S24_LE),
++			/*
++			 * The AGDSP capture scene writes 16-bit samples whatever
++			 * the hw_params say; opened S24_LE the buffer holds two
++			 * of them per 32-bit word. Android's HAL only ever opens
++			 * it S16_LE.
++			 * Based on kanoqwq/e5-linux@6e4377e (0017-capture-dsp-s16-only.patch).
++			 */
++			.formats = SNDRV_PCM_FMTBIT_S16_LE,
+ 			.channels_min = 1,
+ 			.channels_max = 2,
+ 			.rate_min = 8000,
+@@ -945,8 +996,14 @@
+ 			.stream_name = "FE_DAI_FAST_P",
+ 			.aif_name = "FE_IF_FAST_P",
+ 			.rates = SNDRV_PCM_RATE_CONTINUOUS,
+-			.formats = (SNDRV_PCM_FMTBIT_S16_LE |
+-						SNDRV_PCM_FMTBIT_S24_LE),
++			/*
++			 * The AGDSP fast-playback scene plays one S24_LE stream,
++			 * and the stream opened after it stalls with the MCDT
++			 * FIFO full; S16_LE streams restart every time, and
++			 * Android's HAL only ever opens this FE S16_LE.
++			 * Based on kanoqwq/e5-linux@cd4a536 (0019-fast-play-s16-only.patch).
++			 */
++			.formats = SNDRV_PCM_FMTBIT_S16_LE,
+ 			.channels_min = 1,
+ 			.channels_max = 2,
+ 			.rate_min = 8000,

@@ -1,6 +1,6 @@
 /* Set wlan0's MAC to this device's factory address, through the vendor's own private ioctl.
  *
- * The driver in use is sprd_wlan_combo, built from mu300-linux/upstream/modules/sprd_wlan_combo
+ * The driver in use is sprd_wlan_combo, built from changxing60-linux/upstream/modules/sprd_wlan_combo
  * (common/ + sc2355/); the same code also sits in the vendor tree at
  * kernel-src/zte-ums9620-kernel-5.4.254/drivers/unisoc_platform/wlan (marlin3_sipc/ is the other
  * chip variant, not built here), and the references below are by function name because the two

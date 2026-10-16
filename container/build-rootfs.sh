@@ -1,32 +1,32 @@
 #!/bin/sh
 # Build the 7552N OpenWrt container rootfs tarball on the host (WSL/PC).
 #   container/build-rootfs.sh [out.tar.gz]
-# Output: mu300-openwrt-container-rootfs.tar.gz - official OpenWrt 25.12.5 armsr rootfs
+# Output: changxing60-openwrt-container-rootfs.tar.gz - official OpenWrt 25.12.5 armsr rootfs
 # (procd, ubus, rpcd, uhttpd, LuCI, dnsmasq, dropbear are all in the official tarball) plus our
-# overlay: sing-box, mu300-vpn, the procd service and default configs.
+# overlay: sing-box, changxing60-vpn, the procd service and default configs.
 set -eu
 TOP=$(cd "$(dirname "$0")/.." && pwd)
-OUT=${1:-$TOP/container/mu300-openwrt-container-rootfs.tar.gz}
+OUT=${1:-$TOP/container/changxing60-openwrt-container-rootfs.tar.gz}
 BASE=$TOP/openwrt/openwrt-25.12.5-armsr-armv8-rootfs.tar.gz
 OVL=$TOP/container/overlay
 
 [ -f "$BASE" ] || { echo "official armsr rootfs tarball missing: $BASE" >&2; exit 1; }
-[ -x "$OVL/opt/mu300/bin/sing-box" ] || { echo "sing-box missing under $OVL (see container/README)" >&2; exit 1; }
+[ -x "$OVL/opt/changxing60/bin/sing-box" ] || { echo "sing-box missing under $OVL (see container/README)" >&2; exit 1; }
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 mkdir -p "$WORK/r"
 tar -xzf "$BASE" -C "$WORK/r"
 
-# overlay: /opt/mu300/bin/{sing-box,mu300-vpn}, /etc/init.d/mu300-vpn, /etc/mu300/vpn.conf
+# overlay: /opt/changxing60/bin/{sing-box,changxing60-vpn}, /etc/init.d/changxing60-vpn, /etc/changxing60/vpn.conf
 cp -a "$OVL/opt" "$WORK/r/"
 cp -a "$OVL/etc/init.d" "$WORK/r/etc/"
-mkdir -p "$WORK/r/etc/mu300"
-cp "$OVL/etc/mu300/vpn.conf" "$WORK/r/etc/mu300/"
-chmod 755 "$WORK/r/opt/mu300/bin/sing-box" "$WORK/r/opt/mu300/bin/mu300-vpn" "$WORK/r/etc/init.d/mu300-vpn"
+mkdir -p "$WORK/r/etc/changxing60"
+cp "$OVL/etc/changxing60/vpn.conf" "$WORK/r/etc/changxing60/"
+chmod 755 "$WORK/r/opt/changxing60/bin/sing-box" "$WORK/r/opt/changxing60/bin/changxing60-vpn" "$WORK/r/etc/init.d/changxing60-vpn"
 
 # enable our service the way the tarball enables the others (rc.common needs ubus, absent here)
-ln -sf ../init.d/mu300-vpn "$WORK/r/etc/rc.d/S99mu300-vpn"
+ln -sf ../init.d/changxing60-vpn "$WORK/r/etc/rc.d/S99changxing60-vpn"
 
 # config: LuCI/uhttpd listens on all interfaces (the hotspot subnet is the LAN);
 # dnsmasq: only DNS on the hotspot subnet (Android's own DHCP already serves the AP clients),

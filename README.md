@@ -30,13 +30,13 @@ Wi-Fi on the ZTE F50 5G mobile hotspot (hardware MU300, Unisoc T760 / UMS9620). 
 | Internet sharing to USB (NAT) | ✅ host behind `usb0` reaches the internet through the modem; a watchdog reconnects after modem resets |
 | Wi-Fi hotspot out of the box | ✅ hostapd on `wlan0` on its own `br-wifi`/192.168.8.0/24, while the USB gadget keeps `br-lan`/192.168.77.0/24 as a management link (address only, no router/DNS); SSID/password imported from Android or generated; `BAND=5` (802.11ac, 80 MHz, channels 36-48/149-165) or `BAND=2.4`; one band at a time |
 | Modem NV persistence (`cp_diskserver`), `refnotify` | ✅ Android daemons in the chroot |
-| Thermal throttling, status LEDs, SIM tray, DVFS drivers | ✅ `mu300-extra-modules` (blue LED = mobile data up) |
-| Default boot to Linux with automatic fallback | ✅ `mu300-next-boot linux\|android`; a Linux boot that never completes rolls back to Android |
+| Thermal throttling, status LEDs, SIM tray, DVFS drivers | ✅ `changxing60-extra-modules` (blue LED = mobile data up) |
+| Default boot to Linux with automatic fallback | ✅ `changxing60-next-boot linux\|android`; a Linux boot that never completes rolls back to Android |
 | RAM | ✅ 1473 MiB usable (464 MiB is the modem firmware's, unavoidable); unused logo/sysdump reservations freed, zram swap |
-| OpenWrt 25.12 (selectable next to Ubuntu, `mu300-os`) | ✅ procd boot, modem, cellular WAN (`proto mu300cell`, APN in LuCI), firewall4 NAT, 5 GHz Wi-Fi (UCI/LuCI), USB LAN, SSH; ~140 MiB RAM used |
+| OpenWrt 25.12 (selectable next to Ubuntu, `changxing60-os`) | ✅ procd boot, modem, cellular WAN (`proto changxing60cell`, APN in LuCI), firewall4 NAT, 5 GHz Wi-Fi (UCI/LuCI), USB LAN, SSH; ~140 MiB RAM used |
 | Internal MIPI panel (BOE, 480×854 portrait) | ✅ `sprd-drm.ko` built as an external module (DPU0 + DSI; it is *not* missing from the tree — the F50 config just leaves `CONFIG_DRM_SPRD` off), plus a self-drawn status page with a LuCI QR (`tools/screen/`). The power key toggles the backlight. **Touch is deliberately not loaded.** |
 | Internal audio | ✗ no speaker/mic path; the AW883xx amplifier does not answer on I2C. The AGDSP can be booted with firmware from another device (Android community modules), Linux port pending |
-| Bluetooth (SC2355) | ✅ BlueZ `hci0` powered, scanning works: `sprdbt_tty` (PCIe H4) + `mu300-bt-init` vendor PSKey/RF upload + link-policy kernel patch |
+| Bluetooth (SC2355) | ✅ BlueZ `hci0` powered, scanning works: `sprdbt_tty` (PCIe H4) + `changxing60-bt-init` vendor PSKey/RF upload + link-policy kernel patch |
 | GPU (Mali-G57) | ✅ OpenCL 3.0 (headless): `mali_kbase` r40p0 built from source + Android's Mali userspace in the vendor chroot (`android-gpu-run`) |
 
 ## How it works
@@ -47,14 +47,14 @@ LK (slot b, tries=2) ─► custom 5.4 kernel + vendor_boot DTB
          ├─ load 86 modules in a fixed order (boot/module-order.txt)
          ├─ misc: restore slot a, unless the rootfs says default-boot=linux
          ├─ bind USB gadget: ECM (usb0 up immediately) + ACM console
-         ├─ losetup -o 27762098176 /dev/mmcblk0 → ext4 "mu300root" (free space after userdata)
+         ├─ losetup -o 27762098176 /dev/mmcblk0 → ext4 "changxing60root" (free space after userdata)
          └─ switch_root → systemd
-               ├─ mu300-vendor   : Android modem_control in a chroot (disarms PM watchdog, boots modem)
-               ├─ mu300-lan      : br-lan (usb0) 192.168.77.1 + dnsmasq DHCP (no router/DNS)
-               ├─ mu300-wifi     : br-wifi (wlan0) 192.168.8.1 + dnsmasq DHCP/DNS
-               ├─ mu300-wifi     : pcie-sprd, wcn_bsp, sprd_wlan_combo
-               ├─ mu300-mobile-data : AT on /dev/stty_nr1, sipa_eth0, nftables NAT
-               ├─ mu300-bluetooth : sprdbt_tty, mu300-bt-init (PSKey/RF), btattach → bluetoothd
+               ├─ changxing60-vendor   : Android modem_control in a chroot (disarms PM watchdog, boots modem)
+               ├─ changxing60-lan      : br-lan (usb0) 192.168.77.1 + dnsmasq DHCP (no router/DNS)
+               ├─ changxing60-wifi     : br-wifi (wlan0) 192.168.8.1 + dnsmasq DHCP/DNS
+               ├─ changxing60-wifi     : pcie-sprd, wcn_bsp, sprd_wlan_combo
+               ├─ changxing60-mobile-data : AT on /dev/stty_nr1, sipa_eth0, nftables NAT
+               ├─ changxing60-bluetooth : sprdbt_tty, changxing60-bt-init (PSKey/RF), btattach → bluetoothd
                └─ ssh.socket, telnetd, serial-getty@ttyGS0
 ```
 
@@ -65,7 +65,7 @@ USB dependency chain, the PM watchdog, the `modem_control` process-name check, m
 
 | Path | Contents |
 |---|---|
-| `kernel/` | Docker build env, stock F50 config, `mu300-linux.fragment`, build scripts, Wi-Fi driver patch |
+| `kernel/` | Docker build env, stock F50 config, `changxing60-linux.fragment`, build scripts, Wi-Fi driver patch |
 | `boot/` | `init`, `module-order.txt`, `build-boot-image.py`, `flash-trial.sh` |
 | `rootfs/` | Ubuntu 26.04 `Dockerfile`, `assemble.sh`, systemd units and helper scripts (`overlay/`) |
 | `android-vendor/` | Scripts to extract the Android runtime subset from *your* device, permission generator |
@@ -96,7 +96,7 @@ Android and Docker running:
 ```
 
 The installer
-* checks the device and finds the unpartitioned eMMC space after the last partition (or the existing `mu300root` ext4),
+* checks the device and finds the unpartitioned eMMC space after the last partition (or the existing `changxing60root` ext4),
 * asks which systems to install (Ubuntu, OpenWrt or both), which one boots, whether Linux is the default boot, whether to
   copy Android's hotspot name/password and whether to include the GPU userspace, and asks for a password
   (`ubuntu` user on Ubuntu, `root` on OpenWrt),
@@ -105,9 +105,9 @@ The installer
 * unpacks the systems to `/ubuntu` and `/openwrt` on the Linux filesystem, writes `boot_b` and arms slot b, and reboots.
 
 Only the Linux region, `boot_b` and 32 bytes of `misc` are written; `boot_a`, the GPT and `userdata` stay untouched. After
-installation: `mu300-os ubuntu|openwrt` switches systems, `mu300-next-boot android` returns to Android. Hotspot, cellular
-data and USB sharing are configured on first boot and stay editable (`/etc/mu300/hotspot.conf` on Ubuntu, UCI/LuCI on
-OpenWrt). `MU300_REUSE_BUILD=1` reuses the root filesystems built by a previous run.
+installation: `changxing60-os ubuntu|openwrt` switches systems, `changxing60-next-boot android` returns to Android. Hotspot, cellular
+data and USB sharing are configured on first boot and stay editable (`/etc/changxing60/hotspot.conf` on Ubuntu, UCI/LuCI on
+OpenWrt). `CHANGXING60_REUSE_BUILD=1` reuses the root filesystems built by a previous run.
 
 **Never flash OpenWrt firmware images or use sysupgrade on this device** (they target generic arm64 disks and would
 overwrite the eMMC); the installed OpenWrt blocks it. Updating packages with `apk upgrade` is fine, except `kernel`/`kmod-*`
@@ -118,13 +118,13 @@ overwrite the eMMC); the installed OpenWrt blocks it. Updating packages with `ap
 ### 1. Kernel
 ```sh
 git clone https://github.com/dikeckaan/zte-ums9620-kernel-5.4.254   # or the Enceka U30 Air repo
-docker build -t mu300-kbuild kernel/
-docker volume create mu300-kernel
-docker run --rm -v mu300-kernel:/src -v "$PWD/../zte-ums9620-kernel-5.4.254":/tree mu300-kbuild cp -a /tree /src/zte-u30air
+docker build -t changxing60-kbuild kernel/
+docker volume create changxing60-kernel
+docker run --rm -v changxing60-kernel:/src -v "$PWD/../zte-ums9620-kernel-5.4.254":/tree changxing60-kbuild cp -a /tree /src/zte-u30air
 cp kernel/f50-stock-B09.config kernel/device.config
-docker run --rm -v mu300-kernel:/src -v "$PWD/kernel":/work mu300-kbuild bash /work/build-linux.sh
+docker run --rm -v changxing60-kernel:/src -v "$PWD/kernel":/work changxing60-kbuild bash /work/build-linux.sh
 ```
-`build-linux.sh` merges `mu300-linux.fragment` into the stock config, switches to ThinLTO and builds `Image` + modules
+`build-linux.sh` merges `changxing60-linux.fragment` into the stock config, switches to ThinLTO and builds `Image` + modules
 into `/src/out-linux`. Copy `Image` and `modules.builtin*` to `out/`, then stage the modules with
 `sudo python3 tools/stage-modules.py`: it copies the transitive closure of the modules the rootfs scripts load
 (wifi-start, extra-modules, zram-start) plus `boot/module-order.txt`, strips the debug info, and fails if one of them is
@@ -142,7 +142,7 @@ GPU: copy `kernel_modules/kernel5.4/gpu/natt/mali` from the realme tree (master 
 `tools/gpu/build.sh <dir with libc.so libdl.so libOpenCL.so>`.
 
 Bluetooth: build `sprdbt_tty.ko` from the same realme tree (`wcn/bluetooth/driver/tty-pcie`, `BSP_BOARD_UNISOC_WCN_SOCKET=pcie`)
-and the vendor-init tool: `docker run --rm -v "$PWD/tools/bt-init":/w mu300-kbuild gcc -O2 -static -o /w/mu300-bt-init /w/mu300-bt-init.c`.
+and the vendor-init tool: `docker run --rm -v "$PWD/tools/bt-init":/w changxing60-kbuild gcc -O2 -static -o /w/changxing60-bt-init /w/changxing60-bt-init.c`.
 
 ### 2. Android vendor subset (from your device)
 ```sh
@@ -152,9 +152,9 @@ python3 android-vendor/gen-ueventd-perms.py android-subset/vendor/etc/ueventd.rc
 
 ### 3. Boot image
 ```sh
-docker build -t mu300-ubuntu:26.04 rootfs/
-docker run --rm mu300-ubuntu:26.04 cat /bin/busybox > busybox && chmod +x busybox   # static, has mdev/losetup/switch_root/telnetd
-docker run --rm -v "$PWD/tools/logdw":/w mu300-kbuild gcc -O2 -static -o /w/logdw /w/logdw.c
+docker build -t changxing60-ubuntu:26.04 rootfs/
+docker run --rm changxing60-ubuntu:26.04 cat /bin/busybox > busybox && chmod +x busybox   # static, has mdev/losetup/switch_root/telnetd
+docker run --rm -v "$PWD/tools/logdw":/w changxing60-kbuild gcc -O2 -static -o /w/logdw /w/logdw.c
 python3 boot/build-boot-image.py --stock-boot dumps/boot_a.img --misc-head dumps/misc-head.bin \
   --kernel out/Image --modules out/modules --busybox busybox --logdw tools/logdw/logdw \
   --ueventd-perms android-vendor/ueventd-perms.sh --android-subset android-subset --out boot-linux-slotb.img
@@ -162,16 +162,16 @@ python3 boot/build-boot-image.py --stock-boot dumps/boot_a.img --misc-head dumps
 
 ### 4. Root filesystem on the free eMMC region
 1. Check on *your* device that the space after `userdata` is really unallocated (compare the last partition end with
-   the GPT's last usable LBA) and adjust `ROOT_OFFSET` in `boot/init` and `tools/android-mount-mu300root.sh`.
+   the GPT's last usable LBA) and adjust `ROOT_OFFSET` in `boot/init` and `tools/android-mount-changxing60root.sh`.
 2. On Android (root), create the filesystem through a bounded loop device and verify offset/size first.
 3. Assemble and deploy:
 ```sh
-cid=$(docker create mu300-ubuntu:26.04); docker export $cid > rootfs/base.tar; docker rm $cid
+cid=$(docker create changxing60-ubuntu:26.04); docker export $cid > rootfs/base.tar; docker rm $cid
 docker run --rm -v "$PWD/rootfs":/w -v "$PWD/out/modules":/kmods:ro -v "$PWD/out":/kout:ro \
   -v "$PWD/firmware":/firmware:ro -v "$PWD/android-subset":/android-subset:ro -v "$PWD/tools/logdw/logdw":/logdw:ro \
-  -v "$PWD/tools/bt-init/mu300-bt-init":/bt-init:ro mu300-ubuntu:26.04 bash /w/assemble.sh
+  -v "$PWD/tools/bt-init/changxing60-bt-init":/bt-init:ro changxing60-ubuntu:26.04 bash /w/assemble.sh
 ```
-Push `mu300-ubuntu-26.04-rootfs.tar.gz` to the device and extract it with `tools/android-mount-mu300root.sh`.
+Push `changxing60-ubuntu-26.04-rootfs.tar.gz` to the device and extract it with `tools/android-mount-changxing60root.sh`.
 `firmware/` holds `wcnmodem.bin`, `gnssmodem.bin` and `wifi_board_config*.ini` from the device's `/odm/firmware`, plus
 `bt_configure_pskey.ini` and `bt_configure_rf.ini` from `/vendor/etc`.
 
@@ -180,20 +180,20 @@ Push `mu300-ubuntu-26.04-rootfs.tar.gz` to the device and extract it with `tools
 boot/flash-trial.sh boot-linux-slotb.img
 ```
 After about 50 s: `ssh ubuntu@192.168.77.1` (password `ubuntu`, **change it**), `telnet 192.168.77.1`, or
-`screen /dev/cu.usbmodem* 115200`. `sudo /opt/mu300/bin/mobile-data status|up [APN]|down|sim-reset` controls the modem (`mu300-mobile-data-watch` reconnects automatically unless you ran `down`). `sudo reboot` returns to Android. If a trial fails, collect logs from Android with
+`screen /dev/cu.usbmodem* 115200`. `sudo /opt/changxing60/bin/mobile-data status|up [APN]|down|sim-reset` controls the modem (`changxing60-mobile-data-watch` reconnects automatically unless you ran `down`). `sudo reboot` returns to Android. If a trial fails, collect logs from Android with
 `tools/collect-logs.sh`.
 
 Make Linux the default (inside Linux):
 ```sh
-sudo mu300-next-boot linux     # every successful boot re-arms slot b (mu300-boot-ok.service)
-sudo mu300-next-boot android   # next reboot goes to Android and stays there
-sudo mu300-next-boot status
+sudo changxing60-next-boot linux     # every successful boot re-arms slot b (changxing60-boot-ok.service)
+sudo changxing60-next-boot android   # next reboot goes to Android and stays there
+sudo changxing60-next-boot status
 ```
-Hotspot settings live in `/etc/mu300/hotspot.conf` (`SSID=`, `PSK=`, `BAND=5|2.4`, `CHANNEL=auto|n`, `COUNTRY=`); `tools/android-import-hotspot.sh`
+Hotspot settings live in `/etc/changxing60/hotspot.conf` (`SSID=`, `PSK=`, `BAND=5|2.4`, `CHANNEL=auto|n`, `COUNTRY=`); `tools/android-import-hotspot.sh`
 copies the current Android hotspot into it before the first boot, otherwise a random password is generated and shown at login.
 
 From Android, `boot/android-boot-linux.sh boot-linux-slotb.img` boots the image already on `boot_b` again without reflashing.
-If Linux ever fails before `mu300-boot-ok` runs, LK sees `tries_remaining=1` on the next boot and falls back to Android.
+If Linux ever fails before `changxing60-boot-ok` runs, LK sees `tries_remaining=1` on the next boot and falls back to Android.
 
 ## Credits and licenses
 

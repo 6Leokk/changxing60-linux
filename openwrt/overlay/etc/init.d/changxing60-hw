@@ -1,0 +1,79 @@
+#!/bin/sh /etc/rc.common
+# Hardware bring-up before netifd: vendor drivers, zram, Wi-Fi (SC2355), first-boot Wi-Fi config, Bluetooth off
+START=12
+export PATH="$PATH:/opt/changxing60/busybox-bin"
+
+boot() {
+	/opt/changxing60/bin/extra-modules >/tmp/changxing60-extra-modules.log 2>&1
+	# Vendor drivers Android loads that the boot set does not carry: CPU crypto offload, USB-Ethernet,
+	# sensor hub, ION/DMA/DVFS glue. Staged from the same 5.4 build as the boot set, so the vermagic
+	# matches; see docs/changxing60/drivers.md. The touchscreen is NOT one of them -- it stays opt-in
+	# through touch-ctl, see the note in that script.
+	/opt/changxing60/bin/vendor-modules >>/tmp/changxing60-vendor-modules.log 2>&1
+	# bootdiag writes the evidence a post-switch_root failure leaves nowhere else (WCN/hostapd/netifd,
+	# the wedge watch) into /root/diag, and attaches a UDC that only turns up after the initramfs gave
+	# up. It is driven by cron because a wedged init queue would stall an init script. Re-asserted
+	# every boot: this rootfs' crontab is hand-edited, so an install from before it exists would
+	# otherwise never get the line.
+	if [ -f /etc/crontabs/root ] || [ -d /etc/crontabs ]; then
+		grep -q 'changxing60/bin/bootdiag' /etc/crontabs/root 2>/dev/null || \
+			echo '* * * * * /opt/changxing60/bin/bootdiag >/dev/null 2>&1' >> /etc/crontabs/root
+	fi
+	# After the vendor modules are in (one of them is what leaves console_loglevel at 7 rather
+	# than the quiet default the kernel was built and booted with) and before the WLAN ones, so
+	# the SC2355 driver's startup burst never reaches the 115200-baud console. See quiet-console.
+	/opt/changxing60/bin/quiet-console
+	/opt/changxing60/bin/zram-start >/dev/null 2>&1
+	/opt/changxing60/bin/wifi-start >/tmp/changxing60-wifi-start.log 2>&1
+	# sprd_wlan_combo is loaded by wifi-start; re-assert in case its probe raised the level again.
+	/opt/changxing60/bin/quiet-console
+	# What the WCN framework should do when the firmware asserts. The build default is "dump"
+	# (read out the firmware's memory and stop: is_reset = WCN_ASSERT_ONLY_DUMP, sysfs.h:15, set
+	# from the FLAG_WCN_USER-less branch at sysfs.c:1064), which leaves the chip wedged with
+	# cp_asserted = 1 until a reboot -- the radio stays up as far as hostapd is concerned and no
+	# client gets a packet. "reset" instead powers the radio off on an assert and lets the WLAN
+	# driver's own reset_work (iface.c:150 -> sc2355_reset_self, tx.c:1820) clear the wedge;
+	# hotspot-watch then re-opens the interface, which re-downloads the firmware. This is a
+	# kernel-memory atomic, so it is re-applied every boot, after the wcn misc device exists.
+	R=/sys/devices/virtual/misc/wcn/devices/reset_dump
+	i=0
+	while [ $i -lt 30 ]; do
+		[ -w "$R" ] && break
+		sleep 1
+		i=$((i + 1))
+	done
+	[ -w "$R" ] && echo reset > "$R"
+	# cfg80211 looked for regulatory.db before the rootfs was mounted; load it now so hostapd sees the country rules
+	/opt/changxing60/bin/regdb-load >>/tmp/changxing60-wifi-start.log 2>&1
+	/opt/changxing60/bin/openwrt-wifi-config >>/tmp/changxing60-wifi-start.log 2>&1
+	# apply the country before netifd starts hostapd, otherwise 5 GHz channels are still NO-IR under world rules
+	country=$(uci -q get wireless.radio0.country)
+	if [ -n "$country" ]; then
+		iw reg set "$country"
+		for n in $(seq 1 10); do iw reg get | grep -q "country $country:" && break; sleep 1; done
+	fi
+	# The board's factory MAC, out of prodnv, into the driver -- see wifi-mac. It has to be applied
+	# before netifd starts hostapd, and before the pin below reads the address back.
+	/opt/changxing60/bin/wifi-mac >>/tmp/changxing60-wifi-start.log 2>&1
+	# OpenWrt derives the AP's BSSID from the phy MAC, which is all-zero on this chip, leaving
+	# hostapd with bssid=00:00:00:00:00:00 and no beacon at all; pin the vif to the interface's
+	# actual address so hostapd and the firmware agree on the BSSID. (That address is the factory
+	# one now that wifi-mac has run, so this also keeps the BSSID stable across reboots; it is still
+	# what stops the all-zero case, which is why it stays.) Before netifd starts hostapd, i.e. here.
+	wifimac=$(cat /sys/class/net/wlan0/address 2>/dev/null)
+	if [ -n "$wifimac" ] && [ "$wifimac" != "00:00:00:00:00:00" ]; then
+		uci -q get wireless.ap0 >/dev/null && {
+			uci -q set wireless.ap0.macaddr="$wifimac"
+			uci -q commit wireless
+		}
+	fi
+	# Deliberately no `wifi down; wifi up` here. changxing60-hw is S12 and netifd is S20, so there is no
+	# netifd to serve the ubus object yet and every `wifi` call answers "Command failed: Not found"
+	# (four such lines, one per call, used to land in /tmp/changxing60-wifi-start.log) while the AP came up
+	# fine a moment later under netifd, with the country and the pinned MAC already in place. An AP
+	# that still ends up without a beacon is repaired by changxing60-post's wififix, which runs after netifd.
+}
+
+start() {
+	boot
+}

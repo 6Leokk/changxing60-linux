@@ -13,7 +13,7 @@
 #   usage: tools/power/test-policy.sh        (exit 0 = all checks passed)
 set -u
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-policy="$here/../../rootfs/overlay/opt/mu300/bin/power-policy"
+policy="$here/../../rootfs/overlay/opt/changxing60/bin/power-policy"
 fails=0
 
 tmp="$(mktemp -d)"
@@ -36,9 +36,9 @@ mkpolicy() { # mkpolicy NAME GOVERNORS CURRENT
 gov() { cat "$tmp/cpufreq/$1/scaling_governor"; }
 
 run() { # run [args...]  -- with the fake tree in place
-	env MU300_POWER_CPUFREQ="$tmp/cpufreq" MU300_POWER_THERMAL="$tmp/thermal" \
-		MU300_POWER_NETDEV="$tmp/net" MU300_PANEL_IDLE_FILE="$tmp/panel-idle" \
-		MU300_POWER_CONF="$tmp/power.conf" \
+	env CHANGXING60_POWER_CPUFREQ="$tmp/cpufreq" CHANGXING60_POWER_THERMAL="$tmp/thermal" \
+		CHANGXING60_POWER_NETDEV="$tmp/net" CHANGXING60_PANEL_IDLE_FILE="$tmp/panel-idle" \
+		CHANGXING60_POWER_CONF="$tmp/power.conf" \
 		sh "$policy" "$@" 2>&1
 }
 

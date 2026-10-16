@@ -1,4 +1,4 @@
-/* Host-side check for the brightness state machine in mu300-screen.c.
+/* Host-side check for the brightness state machine in changxing60-screen.c.
  *
  * The power-key path cannot be exercised on the host any other way: --dump returns before the
  * backlight is touched, and the real path needs /dev/dri/card0 and a writable
@@ -11,11 +11,11 @@
  * The whole program is compiled in, with its main() renamed, so the test drives the real
  * handle_key()/backlight_load()/backlight_save() rather than a copy of them.
  */
-#define main mu300_screen_main
-#include "mu300-screen.c"
+#define main changxing60_screen_main
+#include "changxing60-screen.c"
 #undef main
 
-static const char *state = "/tmp/mu300-bl-test/backlight";
+static const char *state = "/tmp/changxing60-bl-test/backlight";
 static int fails;
 
 static void expect(int got, int want, const char *what)
@@ -27,7 +27,7 @@ static void expect(int got, int want, const char *what)
 /* Put CONTENTS in the state file (NULL removes it) and point the program at it. */
 static void state_file(const char *contents)
 {
-	mkdir("/tmp/mu300-bl-test", 0755);
+	mkdir("/tmp/changxing60-bl-test", 0755);
 	strcpy(bl_state, state);
 	if (!contents) { unlink(state); return; }
 	FILE *f = fopen(state, "w");
@@ -168,19 +168,19 @@ int main(void)
 	expect(bl_idle_dark, 0, "idle: 0 disables the timer");
 
 	/* idle_config() reads the file and the environment, and the environment wins. */
-	mkdir("/tmp/mu300-bl-test", 0755);
-	FILE *cf = fopen("/tmp/mu300-bl-test/panel-idle", "w");
+	mkdir("/tmp/changxing60-bl-test", 0755);
+	FILE *cf = fopen("/tmp/changxing60-bl-test/panel-idle", "w");
 	if (cf) { fputs("120\n", cf); fclose(cf); }
 	bl_idle_s = 0;
 	idle_config();                                  /* no env: todo-> the file is not where the code looks */
 	expect(bl_idle_s, 0, "idle: /etc path not shadowed by the test");
-	putenv((char *)"MU300_PANEL_IDLE=45");
+	putenv((char *)"CHANGXING60_PANEL_IDLE=45");
 	bl_idle_s = 0;
 	idle_config();
 	expect(bl_idle_s, 45, "idle: env override honoured");
 	/* An explicit 0 is authoritative off -- and it has to win even when the file above asked for
 	 * 120 s, or there is no way to disable the timer without editing the file first. */
-	putenv((char *)"MU300_PANEL_IDLE=0");
+	putenv((char *)"CHANGXING60_PANEL_IDLE=0");
 	bl_idle_s = 7;
 	idle_config();
 	expect(bl_idle_s, 0, "idle: env 0 turns it off even so");

@@ -1,0 +1,13 @@
+{
+	"luci-app-changxing60net": {
+		"description": "Grant access to the cellular network status page",
+		"read": {
+			"ubus": {
+				"changxing60net": [ "status", "fast" ]
+			}
+		},
+		"write": {
+			"ubus": { }
+		}
+	}
+}

@@ -21,8 +21,8 @@ SRC_CACHE=${SRC_CACHE:-$HOME/.cache/mali-src}
 REPO=https://github.com/realme-kernel-opensource/realme_C51_C53_Narzo-N53-AndroidT-kernel-source.git
 COMMIT=4381465ccaf87fcf3215b9cd42f4a685df40e5e0
 SPARSE=kernel_modules/kernel5.4/gpu/natt/mali
-VOLUME=${VOLUME:-mu300-kernel}
-IMAGE=${IMAGE:-mu300-kbuild-cross}      # needs clang-12 + llvm-strip, see kernel/Dockerfile.cross
+VOLUME=${VOLUME:-changxing60-kernel}
+IMAGE=${IMAGE:-changxing60-kbuild-cross}      # needs clang-12 + llvm-strip, see kernel/Dockerfile.cross
 BUILT=${BUILT:-$TOP/out-linux}          # where stage-modules.py looks for .ko
 WANT_VERMAGIC=${WANT_VERMAGIC:-5.4.254-gb50db5b6224c}
 

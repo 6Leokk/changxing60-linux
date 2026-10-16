@@ -91,8 +91,8 @@ mainline-7552n/tools/flash-7552n.sh            # 只刷 slot b:vendor_boot_b + b
 mainline-7552n/tools/flash-7552n.sh --restore-vendor-boot   # 把原厂 vendor_boot_b 刷回去
 ```
 
-`upstream/` 通过 volume `mu300-mainline`(`:/src`)与 bind mount(`:/work`)参与构建,细节见
-`docs/mu300/mainline-6.18.md`(B1 交叉编译决策)。
+`upstream/` 通过 volume `changxing60-mainline`(`:/src`)与 bind mount(`:/work`)参与构建,细节见
+`docs/changxing60/mainline-6.18.md`(B1 交叉编译决策)。
 
 ## 盲启取证
 

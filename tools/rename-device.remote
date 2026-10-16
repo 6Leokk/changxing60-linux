@@ -1,0 +1,267 @@
+#!/bin/sh
+# Rename, on a running device, every mu300* name this port gave something to its changxing60* name.
+#
+# This is the device half of the rename the repository already went through (docs/changxing60/rename.md).
+# It is run by tools/rename-device.sh, which pushes it and runs it as root over ssh. Nothing here changes
+# what any program does: the same scripts, the same config, the same services, under the project's name.
+#
+# ONE THING THIS CANNOT DO, and the reason the boot image has to be rebuilt as well: the boot image
+# in boot_b is a separate artifact from this rootfs. Its /init creates /run/mu300, mounts the disk
+# area at /mnt/mu300-disk, reads /newroot/etc/mu300/default-boot and sets the USB gadget's strings to
+# MU300LINUX / "MU300 Linux USB Ethernet". Renaming the rootfs alone leaves all of that behind, and
+# the default-boot one is not cosmetic -- with the file gone the old init writes the slot-a control
+# block into misc, i.e. arms Android for the next boot. /etc/init.d/changxing60-bootpaths (S00)
+# adopts the first two after switch_root, and changxing60-post re-arms slot b at S99, so a reboot in
+# that state survives -- but the window is real. Rebuild boot_b from boot/init before trusting it:
+#
+#     tools/repack-ramdisk.py --base work/boot_b-live.img --set init=boot/init --out work/boot-linux-slotb.img
+#     tools/flash-boot-b.sh --image work/boot-linux-slotb.img --reboot
+#
+# Idempotent. Every step tests for the old name first, so a second run -- or a run on a device that has
+# already been renamed -- does nothing. The first run leaves a copy of everything it rewrites in
+# /root/rename-changxing60.backup, together with the list of paths as they were before.
+#
+# Three names are deliberately left alone, because they are other people's:
+#   kanoqwq/mu300-linux, dikeckaan/mu300-linux   upstream repositories, cited in comments as the source
+#                                                of a behaviour. Renaming them would break the citation.
+#   mu300dash                                    upstream's LuCI dashboard, which this port's SMS page is
+#                                                contrasted with in comments.
+# The vendor's own model string (MU300_ZYV1.0.0B09) is protected the same way: it names the hardware, not us.
+# A bare "MU300" in prose becomes "changxing60", matching the repository, and "MU300_" (our environment
+# variables) becomes "CHANGXING60_".
+
+set -u
+
+log() { echo "rename: $*"; }
+die() { echo "rename: $*" >&2; exit 1; }
+
+BK=/root/rename-changxing60.backup
+
+# ---------------------------------------------------------------- backup
+if [ ! -d "$BK" ]; then
+	mkdir -p "$BK"
+	# The files this rewrites, and the inventory of what was named what before it ran. /opt/mu300/bin is
+	# included whole: it is a few MB of scripts plus three small binaries, and having the originals is the
+	# difference between a five-minute rollback and re-deriving what a file used to say.
+	tar czf "$BK/files.tgz" -C / \
+		opt/mu300/bin opt/mu300/lib opt/mu300/charge-cap \
+		etc/init.d etc/profile.d etc/hotplug.d etc/crontabs etc/mu300 etc/config \
+		lib/netifd/proto lib/preinit \
+		usr/share/rpcd/ucode usr/share/rpcd/acl.d usr/share/luci/menu.d \
+		www/luci-static/resources/view \
+		root/mu300-cp-reset.sh root/wedge-watch.sh root/bak-2026-1013 2>/dev/null
+	# Pruned to what this port owns: the vendor chroot, the previous rootfs kept as a rollback, and the
+	# boot images under /root are not renamed by anything here, and walking them costs minutes.
+	find / -xdev \( -path /proc -o -path /sys -o -path /dev \
+		-o -path /opt/mu300/android -o -path /root/diag \
+		-o -path '*/openwrt' -o -path '*/openwrt.old' \) \
+		-prune -o -name '*mu300*' -print > "$BK/paths-before.txt" 2>/dev/null
+	log "backup in $BK ($(wc -l < "$BK/paths-before.txt") paths, $(du -k "$BK/files.tgz" | cut -f1) KiB)"
+else
+	log "backup already in $BK"
+fi
+
+# ---------------------------------------------------------------- 1. the two renamed directories
+# /opt/mu300 first, because it is the one that is not a plain rename: modem_control runs chrooted into
+# /opt/mu300/android, and that chroot carries live mounts (dev, dev/pts, dev/__properties__, proc,
+# proc/cmdline, sys). rename() refuses a directory that has a mount point inside it, so when the plain
+# move fails those mounts are lifted out to a staging directory first and put back afterwards. The
+# chrooted process is not disturbed: its root is the same inode under a new name.
+if [ -d /opt/mu300 ]; then
+	if mv /opt/mu300 /opt/changxing60 2>/dev/null; then
+		log "/opt/mu300 -> /opt/changxing60"
+	else
+		log "/opt/mu300 holds live mounts (the chroot); lifting them aside"
+		STAGE=/opt/.rename-stage
+		mkdir -p "$STAGE"
+		for m in dev proc sys; do
+			grep -q " /opt/mu300/android/$m " /proc/mounts || continue
+			mount --move "/opt/mu300/android/$m" "$STAGE/$m" \
+				|| die "could not move /opt/mu300/android/$m aside; nothing has been renamed yet"
+		done
+		mv /opt/mu300 /opt/changxing60 || die "mv /opt/mu300 failed even with the mounts lifted"
+		for m in dev proc sys; do
+			[ -d "$STAGE/$m" ] || continue
+			mkdir -p "/opt/changxing60/android/$m"
+			mount --move "$STAGE/$m" "/opt/changxing60/android/$m" \
+				|| die "moved the tree but could not put /opt/changxing60/android/$m back"
+		done
+		rmdir "$STAGE" 2>/dev/null
+		log "/opt/mu300 -> /opt/changxing60 (around the chroot's mounts)"
+	fi
+fi
+
+if [ -d /etc/mu300 ]; then
+	mv /etc/mu300 /etc/changxing60 && log "/etc/mu300 -> /etc/changxing60"
+fi
+
+# The LuCI view directory. Its name is the last path component of the page's URL, so this one is
+# user-visible: the SMS panel moves from /cgi-bin/luci/admin/mu300sms to .../changxing60sms.
+if [ -d /www/luci-static/resources/view/mu300sms ]; then
+	mv /www/luci-static/resources/view/mu300sms /www/luci-static/resources/view/changxing60sms \
+		&& log "the SMS view directory -> changxing60sms"
+fi
+
+# ---------------------------------------------------------------- 2. renamed files
+# One rule for every name: mu300 -> changxing60, with MU300_ -> CHANGXING60_ for our environment
+# variables and a bare MU300 -> changxing60 in prose. Applied to a basename it is just a rename.
+newname() {
+	printf '%s' "$1" | sed -e 's/MU300_/CHANGXING60_/g' -e 's/MU300/changxing60/g' -e 's/mu300/changxing60/g'
+}
+
+ren() {  # ren DIR ... -- rename every entry in DIR whose name contains mu300
+	for d in "$@"; do
+		[ -d "$d" ] || continue
+		for f in "$d"/*mu300* "$d"/*MU300*; do
+			[ -e "$f" ] || continue
+			b=${f##*/}
+			nb=$(newname "$b")
+			[ "$b" = "$nb" ] && continue
+			if [ -e "$d/$nb" ]; then
+				# Already renamed (a second run), or the host pushed the new file before this ran.
+				log "left $f in place: $nb already exists"
+			else
+				mv "$f" "$d/$nb" && log "$f -> $d/$nb"
+			fi
+		done
+	done
+}
+
+ren /opt/changxing60 /opt/changxing60/bin /opt/changxing60/lib /opt/changxing60/busybox-bin \
+    /usr/bin /etc/init.d /etc/hotplug.d/iface /etc/profile.d \
+    /lib/netifd/proto /lib/preinit \
+    /usr/share/rpcd/ucode /usr/share/rpcd/acl.d /usr/share/luci/menu.d \
+    /root /root/bak-2026-1013
+
+# The screen binary is installed by the host before this runs, under its new name, so the old one is
+# left behind by the loop above rather than renamed onto it. Drop it: a stale copy that still logs as
+# mu300-screen and reads /tmp/mu300-wan-health is exactly the kind of thing this migration is for.
+[ -e /usr/bin/changxing60-screen ] && [ -e /usr/bin/mu300-screen ] && rm -f /usr/bin/mu300-screen \
+	&& log "removed the old /usr/bin/mu300-screen (the new binary is in place)"
+
+# ---------------------------------------------------------------- 3. rewritten file contents
+# Only text files are rewritten. busybox grep has no working -I (it lists binaries just the same), so the
+# test is a NUL byte: every ELF file in /opt/changxing60/bin (busybox, logdw, modem-ioctl,
+# changxing60-bt-init) has one, no script or config here does, and sed on an ELF file would corrupt it.
+#
+# /opt/changxing60/android is excluded: it is the vendor tree android-vendor-start copies in for the
+# chroot, tens of thousands of files none of which are ours, and reading all of it to find a handful of
+# strings costs minutes on this SoC. Nothing under it is named or written by this port.
+is_text() {
+	tr -d '\0' < "$1" 2>/dev/null | cmp -s - "$1"
+}
+
+scan() {  # scan DIR... -- text files under DIR that mention the old name
+	grep -rl -e mu300 -e MU300 "$@" 2>/dev/null \
+		| grep -v -e '^/root/diag/' -e '\.log$' -e '\.img$' -e '^/opt/changxing60/android/'
+}
+
+TEXT=
+for f in $(scan \
+		/opt/changxing60/bin /opt/changxing60/lib \
+		/etc/init.d /etc/profile.d /etc/hotplug.d /etc/crontabs \
+		/lib/netifd/proto /lib/preinit \
+		/usr/share/rpcd /usr/share/luci \
+		/www/luci-static/resources/view \
+		/root); do
+	is_text "$f" && TEXT="$TEXT $f"
+done
+
+# __CX60x__ placeholders, not \x01 escapes: busybox sed does not know the escapes, and the placeholder
+# must not itself contain "mu300" in any case, or the substitutions below would rewrite it too.
+for f in $TEXT; do
+	sed -i \
+		-e 's#kanoqwq/mu300-linux#__CX60A__#g' \
+		-e 's#dikeckaan/mu300-linux#__CX60B__#g' \
+		-e 's#mu300dash#__CX60C__#g' \
+		-e 's#MU300_ZYV1.0.0B09#__CX60D__#g' \
+		-e 's/MU300_/CHANGXING60_/g' \
+		-e 's/MU300/changxing60/g' \
+		-e 's/mu300/changxing60/g' \
+		-e 's#__CX60A__#kanoqwq/mu300-linux#g' \
+		-e 's#__CX60B__#dikeckaan/mu300-linux#g' \
+		-e 's#__CX60C__#mu300dash#g' \
+		-e 's#__CX60D__#MU300_ZYV1.0.0B09#g' \
+		"$f" || log "sed failed on $f"
+done
+log "rewrote $(printf '%s\n' $TEXT | grep -c . ) files"
+
+# ---------------------------------------------------------------- 4. boot scripts, cron, netifd
+# rc.d is rebuilt from scratch rather than renamed: the symlink name encodes START, and the START of a
+# couple of these changed with the rename (bootpaths has to be first).
+if [ -d /etc/rc.d ]; then
+	rm -f /etc/rc.d/*mu300* /etc/rc.d/*MU300*
+	for f in /etc/init.d/changxing60-*; do
+		[ -x "$f" ] || continue
+		"$f" enable >/dev/null 2>&1 || log "could not enable $(basename "$f")"
+	done
+	log "rebuilt /etc/rc.d: $(ls /etc/rc.d | grep -c changxing60) changxing60 entries"
+fi
+
+# netifd finds a protocol handler by file name: proto 'mu300cell' would now have no /lib/netifd/proto/
+# mu300cell.sh to run, and the WAN would come up empty.
+if uci -q get network.wan >/dev/null 2>&1; then
+	[ "$(uci -q get network.wan.proto)" = mu300cell ] && {
+		uci set network.wan.proto=changxing60cell
+		uci commit network
+		log "network.wan.proto: mu300cell -> changxing60cell"
+	}
+fi
+
+# ---------------------------------------------------------------- 5. the disk area's own name
+# /mnt/<name>-disk/.mu300/boot-os is what the *boot image* reads to decide which system inside the
+# ext4 to come up in, before any of this rootfs is running. Two things read it and both have to be
+# on the new name before the old directory can go:
+#
+#   * boot/init in the boot image -- renamed, so a boot image built from this tree reads
+#     .changxing60. The image that was in boot_b when the rename was written still read .mu300,
+#     which is why the copy was made rather than a move; rebuild and flash it with
+#     tools/repack-ramdisk.py + tools/flash-boot-b.sh (docs/changxing60/rename.md) and the old
+#     directory is dead.
+#   * pick_root() in the same init, which treats the file as a *hint*: `for os in $want ubuntu
+#     openwrt`. An unreadable or missing boot-os is not fatal, it just falls through to openwrt,
+#     which is where this port lives. So removing .mu300 cannot make the device unbootable even if
+#     the boot image is still the old one.
+for DISK in /mnt/changxing60-disk /mnt/mu300-disk; do
+	[ -d "$DISK/.mu300" ] || continue
+	if [ ! -e "$DISK/.changxing60" ]; then
+		cp -a "$DISK/.mu300" "$DISK/.changxing60" && log "$DISK/.mu300 -> .changxing60 (copy)"
+	fi
+	rm -rf "$DISK/.mu300" && log "$DISK/.mu300 removed (the boot image reads .changxing60)"
+done
+
+# The mount point the old boot image created. Once boot_b is rebuilt, init mounts the disk area at
+# /mnt/changxing60-disk itself and /mnt/mu300-disk is an empty directory left over on the rootfs --
+# still a path carrying the old name, and nothing is behind it.
+rmdir /mnt/mu300-disk 2>/dev/null && log "removed the leftover /mnt/mu300-disk directory"
+
+# ---------------------------------------------------------------- 6. what is left
+# /mnt/<disk>/openwrt.old is the previous rootfs, kept whole as a rollback and never booted from; it is
+# full of the old names and always will be. Pruned, so that what this prints is worth reading.
+echo
+echo "--- paths still carrying the old name (expected: the protected upstream slugs, the two model"
+echo "    strings, /mnt/mu300-disk before the next boot, and the backups under /root) ---"
+find / -xdev \( -path /proc -o -path /sys -o -path /dev \
+	-o -path /root/rename-changxing60.backup -o -path /root/diag \
+	-o -path /opt/changxing60/android \
+	-o -path '*/openwrt.old' -o -path '*/openwrt' \) \
+	-prune -o -name '*mu300*' -print 2>/dev/null | sort
+echo
+echo "--- old name inside files ---"
+for f in $(scan /opt/changxing60/bin /opt/changxing60/lib /etc/init.d /etc/profile.d \
+		/etc/hotplug.d /etc/crontabs /lib/netifd /lib/preinit \
+		/usr/share/rpcd /usr/share/luci /www/luci-static/resources/view /root \
+		/etc/changxing60); do
+	is_text "$f" || continue
+	printf '%s: ' "$f"
+	grep -o -e '[A-Za-z0-9_/.-]*mu300[A-Za-z0-9_/.-]*' -e '[A-Za-z0-9_/.-]*MU300[A-Za-z0-9_/.-]*' "$f" | sort -u | tr '\n' ' '
+	echo
+done
+echo
+log "done"
+echo
+echo "The rootfs is renamed. The boot image is not: it still creates /run/mu300, mounts"
+echo "/mnt/mu300-disk, reads /newroot/etc/mu300/default-boot and names the USB gadget MU300LINUX."
+echo "Until boot_b is rebuilt from boot/init, /etc/init.d/changxing60-bootpaths covers the first two"
+echo "on every boot and the persist log at 56 MiB of boot_b shows MU300-LINUX lines. See"
+echo "docs/changxing60/rename.md for the two commands that finish it."

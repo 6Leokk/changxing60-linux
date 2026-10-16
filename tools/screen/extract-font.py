@@ -16,7 +16,7 @@ assert len(vals) == 4096, f"expected 4096 bytes, got {len(vals)}"
 with open(dst, "w") as f:
     f.write("/* Generated from Linux lib/fonts/font_8x16.c (GPL-2.0) by tools/screen/extract-font.py.\n"
             " * 256 glyphs x 16 rows; each row is one byte, MSB = leftmost pixel. */\n"
-            "#ifndef MU300_FONT8X16_H\n#define MU300_FONT8X16_H\n"
+            "#ifndef CHANGXING60_FONT8X16_H\n#define CHANGXING60_FONT8X16_H\n"
             "static const unsigned char font8x16[4096] = {\n")
     for i in range(0, 4096, 16):
         f.write("  " + ",".join("0x%02x" % v for v in vals[i:i+16]) + ",\n")

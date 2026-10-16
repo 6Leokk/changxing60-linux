@@ -1,0 +1,10 @@
+[Unit]
+Description=changxing60 temporary PD/DP dock test logger
+After=changxing60-display.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/changxing60-pd-log
+
+[Install]
+WantedBy=multi-user.target

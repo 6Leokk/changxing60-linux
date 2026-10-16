@@ -1,0 +1,17 @@
+{
+	"luci-app-changxing60sms": {
+		"description": "Grant access to the SMS page and SMS forwarding",
+		"read": {
+			"ubus": {
+				"changxing60sms": [ "list", "show", "job" ],
+				"changxing60fwd": [ "forward_get", "forward_log", "forward_status" ]
+			}
+		},
+		"write": {
+			"ubus": {
+				"changxing60sms": [ "send", "sync", "delete" ],
+				"changxing60fwd": [ "forward_set", "forward_test", "forward_gate", "forward_log_clear" ]
+			}
+		}
+	}
+}

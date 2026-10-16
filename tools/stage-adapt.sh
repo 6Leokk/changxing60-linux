@@ -29,8 +29,8 @@ ROOT=$(cd "$HERE/.." && pwd)
 ADB=${ADB:-/mnt/c/platform-tools/adb.exe}
 KREL=${KREL:-5.4.254-gb50db5b6224c}
 OV=$ROOT/openwrt/overlay
-VMS_SRC=$OV/opt/mu300/bin/vendor-modules
-TCTL_SRC=$OV/opt/mu300/bin/touch-ctl
+VMS_SRC=$OV/opt/changxing60/bin/vendor-modules
+TCTL_SRC=$OV/opt/changxing60/bin/touch-ctl
 TARBALL=$ROOT/work/adapt-modules.tar
 MANIFEST_TXT=$ROOT/work/adapt-modules.manifest
 BUILD=$ROOT/work/adapt-build
@@ -105,16 +105,16 @@ build() {
 
 	local f
 	for f in vendor-modules touch-ctl bootdiag; do
-		[ -f "$OV/opt/mu300/bin/$f" ] || die "missing $OV/opt/mu300/bin/$f"
-		install -m 755 "$OV/opt/mu300/bin/$f" "$BUILD/opt/$f"
+		[ -f "$OV/opt/changxing60/bin/$f" ] || die "missing $OV/opt/changxing60/bin/$f"
+		install -m 755 "$OV/opt/changxing60/bin/$f" "$BUILD/opt/$f"
 	done
-	install -m 755 "$OV/etc/init.d/mu300-hw" "$BUILD/etc/mu300-hw"
+	install -m 755 "$OV/etc/init.d/changxing60-hw" "$BUILD/etc/changxing60-hw"
 	# parse with the host's /bin/sh (dash) -- stricter than the box's busybox ash, so a pass here is
 	# not proof, but a failure here is proof the device would have choked
-	for f in "$BUILD/opt/vendor-modules" "$BUILD/opt/touch-ctl" "$BUILD/opt/bootdiag" "$BUILD/etc/mu300-hw"; do
+	for f in "$BUILD/opt/vendor-modules" "$BUILD/opt/touch-ctl" "$BUILD/opt/bootdiag" "$BUILD/etc/changxing60-hw"; do
 		sh -n "$f" || die "$(basename "$f") does not parse"
 	done
-	say "scripts: 3 into /opt/mu300/bin + etc/init.d/mu300-hw, all parse"
+	say "scripts: 3 into /opt/changxing60/bin + etc/init.d/changxing60-hw, all parse"
 
 	# --sort/--mtime: same inputs, same tarball, so a device-side hash mismatch can only mean transit
 	tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf "$TARBALL" -C "$BUILD" modules opt etc
@@ -156,7 +156,7 @@ cross_check() {
 	say "cross-checks: payload == loaders ($(echo "$got" | wc -l) modules; groups: $want)"
 
 	# 2. the default load set, read exactly as the boot path reads it
-	grep -q 'MU300_VENDOR_GROUPS:-crypto usbnet}' "$vms" || \
+	grep -q 'CHANGXING60_VENDOR_GROUPS:-crypto usbnet}' "$vms" || \
 		die "vendor-modules no longer defaults to 'crypto usbnet' -- misc in the default set is the CFI panic"
 	grep -q 'bisect_verdict' "$vms" || die "vendor-modules lost the bisect verdict"
 	grep -q 'usb_recover' "$bdiag" || die "bootdiag lost usb_recover (the late-UDC repair)"
@@ -166,16 +166,16 @@ cross_check() {
 	# 3. no init script or cron-run script may reach a touch module -- only touch-ctl may
 	local f p bad
 	for f in vendor-modules bootdiag extra-modules display-modules; do
-		p=$(overlay_file "opt/mu300/bin/$f")
+		p=$(overlay_file "opt/changxing60/bin/$f")
 		[ -n "$p" ] || continue
 		bad=$(sed 's/#.*//' "$p" | grep -nE 'zte[-_]tpd|spi[-_]sprd|lcd[-_]state[-_]notify' || true)
 		[ -z "$bad" ] || die "$p loads a touch module ($bad); touch is off by default"
 	done
 	grep -q 'zte_tpd' "$tctl" || die "touch-ctl no longer knows the touch modules"
-	local eh=$OV/etc/init.d/mu300-hw
-	grep -q '/opt/mu300/bin/vendor-modules' "$eh" || die "mu300-hw lost the vendor-modules hook"
-	grep -q 'mu300/bin/bootdiag' "$eh" || die "mu300-hw lost the bootdiag hook"
-	say "cross-checks: touch reachable only through touch-ctl, mu300-hw hooks in place"
+	local eh=$OV/etc/init.d/changxing60-hw
+	grep -q '/opt/changxing60/bin/vendor-modules' "$eh" || die "changxing60-hw lost the vendor-modules hook"
+	grep -q 'changxing60/bin/bootdiag' "$eh" || die "changxing60-hw lost the bootdiag hook"
+	say "cross-checks: touch reachable only through touch-ctl, changxing60-hw hooks in place"
 }
 
 print_manifest() {
@@ -184,48 +184,48 @@ print_manifest() {
 }
 
 # The point of the whole rebuild: prove the device is running these bytes, not older ones.  Reads what
-# mu300-android-stage-adapt.sh reported (INSTALLED/MODULE lines), so it can also be run afterwards on
+# changxing60-android-stage-adapt.sh reported (INSTALLED/MODULE lines), so it can also be run afterwards on
 # a saved report -- --verify-log.
 verify_report() { # verify_report FILE
 	local out f want got n=0
 	out=$(cat "$1")
 	local grp m h
 	for f in vendor-modules touch-ctl bootdiag; do
-		want=$(sha16 "$OV/opt/mu300/bin/$f")
-		got=$(echo "$out" | awk -v p="/opt/mu300/bin/$f" '$1=="INSTALLED" && $3==p {print $2}')
-		[ "$got" = "$want" ] || die "device /opt/mu300/bin/$f is ${got:-absent}, repo says $want -- the device is not running the repo's bytes"
-		say "  device == repo: /opt/mu300/bin/$f ($want)"
+		want=$(sha16 "$OV/opt/changxing60/bin/$f")
+		got=$(echo "$out" | awk -v p="/opt/changxing60/bin/$f" '$1=="INSTALLED" && $3==p {print $2}')
+		[ "$got" = "$want" ] || die "device /opt/changxing60/bin/$f is ${got:-absent}, repo says $want -- the device is not running the repo's bytes"
+		say "  device == repo: /opt/changxing60/bin/$f ($want)"
 	done
-	want=$(sha16 "$OV/etc/init.d/mu300-hw")
-	got=$(echo "$out" | awk '$1=="INSTALLED" && $3=="/etc/init.d/mu300-hw" {print $2}')
-	[ "$got" = "$want" ] || die "device /etc/init.d/mu300-hw is ${got:-absent}, repo says $want"
-	say "  device == repo: /etc/init.d/mu300-hw ($want)"
+	want=$(sha16 "$OV/etc/init.d/changxing60-hw")
+	got=$(echo "$out" | awk '$1=="INSTALLED" && $3=="/etc/init.d/changxing60-hw" {print $2}')
+	[ "$got" = "$want" ] || die "device /etc/init.d/changxing60-hw is ${got:-absent}, repo says $want"
+	say "  device == repo: /etc/init.d/changxing60-hw ($want)"
 	while IFS=$'\t' read -r grp m h; do
 		got=$(echo "$out" | awk -v mm="$m" '$1=="MODULE" && $3==mm {print $2}')
 		[ "$got" = "$h" ] || die "device reports module $m as ${got:-missing}, manifest says $h"
 		n=$((n + 1))
 	done < "$BUILD/opt/manifest.tsv"
 	say "  device == manifest: all $n modules"
-	echo "$out" | grep -q 'MU300-ADAPT-OK' || die "device-side install did not report OK"
+	echo "$out" | grep -q 'CHANGXING60-ADAPT-OK' || die "device-side install did not report OK"
 	say "STAGE-ADAPT-OK"
 }
 
 stage() {
 	[ "$(su_do 'getprop ro.boot.slot_suffix')" = "_a" ] || \
-		die "device is not running Android on slot a (this mounts the ext4 rootfs; see tools/mu300-dtb-fix.sh for the same rule)"
-	[ -f "$HERE/android-mount-mu300root.sh" ] || die "tools/android-mount-mu300root.sh is missing"
+		die "device is not running Android on slot a (this mounts the ext4 rootfs; see tools/changxing60-dtb-fix.sh for the same rule)"
+	[ -f "$HERE/android-mount-changxing60root.sh" ] || die "tools/android-mount-changxing60root.sh is missing"
 	say "pushing to the device ..."
 	su_do 'rm -f /data/local/tmp/adapt-modules.tar'
 	"$ADB" push "$TARBALL" /data/local/tmp/adapt-modules.tar >/dev/null || die "adb push tarball failed"
-	"$ADB" push "$HERE/android-mount-mu300root.sh" /data/local/tmp/android-mount-mu300root.sh >/dev/null
-	"$ADB" push "$HERE/mu300-android-stage-adapt.sh" /data/local/tmp/mu300-android-stage-adapt.sh >/dev/null
+	"$ADB" push "$HERE/android-mount-changxing60root.sh" /data/local/tmp/android-mount-changxing60root.sh >/dev/null
+	"$ADB" push "$HERE/changxing60-android-stage-adapt.sh" /data/local/tmp/changxing60-android-stage-adapt.sh >/dev/null
 	local have; have=$(sha256sum "$TARBALL" | cut -d' ' -f1)
 	[ "$(su_do 'sha256sum /data/local/tmp/adapt-modules.tar' | cut -d' ' -f1)" = "$have" ] || \
 		die "tarball changed in transit (sha256 mismatch on the device)"
 
 	say "running the device-side install (mounts the ext4 rootfs; ~1 min)"
 	local LOG=$ROOT/work/adapt-stage-$(date +%Y%m%d-%H%M).log
-	su_do 'sh /data/local/tmp/mu300-android-stage-adapt.sh' > "$LOG" 2>&1 || true
+	su_do 'sh /data/local/tmp/changxing60-android-stage-adapt.sh' > "$LOG" 2>&1 || true
 	cat "$LOG"
 	say "device report kept: $LOG"
 	verify_report "$LOG"
@@ -238,7 +238,7 @@ case "${1:-}" in
              build; cross_check; verify_report "$2" ;;
 --stage)     build; cross_check; stage
              echo
-             say "next: tools/mu300-dtb-fix.sh   (9 bytes in vendor_boot_b + arm slot b; no boot image touched)"
-             say "then:  $ADB reboot  →  tools/mu300-verify-usb.sh --wait" ;;
+             say "next: tools/changxing60-dtb-fix.sh   (9 bytes in vendor_boot_b + arm slot b; no boot image touched)"
+             say "then:  $ADB reboot  →  tools/changxing60-verify-usb.sh --wait" ;;
 *)           echo "usage: stage-adapt.sh [--manifest|--verify-log FILE|--stage]" >&2; exit 2 ;;
 esac
