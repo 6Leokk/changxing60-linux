@@ -35,6 +35,17 @@ RESETDUMP=/sys/devices/virtual/misc/wcn/devices/reset_dump
 REPAIRS=/tmp/hotspot-watch.repairs
 REBOOT_MARK=/tmp/hotspot-watch.rebooted
 
+# Same durable note as mobile-data's: /tmp does not survive the reboot, so the only record of who
+# asked for it is the logger ring, which does not either. One line on the ext4 first.
+SELFHEAL=/root/selfheal.log
+TAG=hotspot-watch
+note() {
+	printf '%s uptime=%s %s: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" \
+		"$(cut -d. -f1 /proc/uptime 2>/dev/null)" "$TAG" "$*" >> "$SELFHEAL" 2>/dev/null
+	tail -n 200 "$SELFHEAL" > "$SELFHEAL.new" 2>/dev/null && mv "$SELFHEAL.new" "$SELFHEAL" 2>/dev/null
+	true
+}
+
 # Empty when the firmware is alive and answering; a reason string when it is not.
 radio_down() {
 	[ -e "$ATCMD" ] || { echo "no $ATCMD"; return; }
@@ -77,10 +88,14 @@ repair() {
 			logger -t hotspot-watch "radio still down ($why) and already rebooted once; leaving it"
 		else
 			logger -t hotspot-watch "radio still down ($why) after $MAX_REPAIR repairs; rebooting"
+			note "radio still down ($why) after $MAX_REPAIR repairs (reset_dump=$(cat "$RESETDUMP" 2>/dev/null)): rebooting"
 			touch "$REBOOT_MARK"
 			sync
 			sleep 1
-			reboot
+			# MU300_HOTSPOT_REBOOT_CMD is a test seam, the same idea as mobile-data's
+			# MU300_REBOOT_CMD: it lets this decision be exercised on the box without taking
+			# the box down (see tools/hotspot-watch/test-repair.sh).
+			${MU300_HOTSPOT_REBOOT_CMD:-reboot}
 		fi
 	else
 		logger -t hotspot-watch "radio still down ($why)"

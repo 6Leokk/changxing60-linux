@@ -13,10 +13,12 @@
 # back on the management bridge.
 #
 # Started from cron (every minute), so a wedged init sequence cannot stop it. It retires itself: no
-# dumps after MAXDUMPS or MAXUPTIME, and no USB poking after MAXUPTIME either.
+# dumps after MAXDUMPS *per boot* or MAXUPTIME, no USB poking after MAXUPTIME either, and $D keeps
+# only its newest MAXKEEP files so that boots accumulate a bounded amount of evidence.
 D=/root/diag
 MAXDUMPS=10
 MAXUPTIME=900
+MAXKEEP=30      # files kept in $D across boots (see the retire block below); ~10 MB
 G=/sys/kernel/config/usb_gadget/linux
 
 up() { cut -d. -f1 /proc/uptime; }
@@ -72,7 +74,7 @@ usb_recover() {
 
 # ---------------------------------------------------------------- evidence
 dump() {
-	echo "=== bootdiag uptime=$(up)s date=$(date 2>/dev/null) kernel=$(uname -r)"
+	echo "=== bootdiag uptime=$(up)s date=$(date 2>/dev/null) kernel=$(uname -r) boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)"
 	echo "--- loadavg / mem"; cat /proc/loadavg; free 2>/dev/null || cat /proc/meminfo | head -4
 	echo "--- modules"; awk '{print $1}' /proc/modules | sort | tr '\n' ' '; echo
 	echo "--- udc"; ls /sys/class/udc 2>&1
@@ -86,6 +88,10 @@ dump() {
 	echo "--- wifi iface"; ubus list 2>/dev/null | grep -i 'wifi\|hostapd\|wireless' | tr '\n' ' '; echo
 	echo "--- wan"; ubus call network.interface.wan status 2>&1 | head -40
 	echo "--- sipa"; cat /sys/kernel/debug/sipa/rm_res 2>&1 | head -20; cat /tmp/mu300-wan-health 2>&1
+	# The one line that says *why* the previous boot ended, written by whoever called reboot (see the
+	# note() in mobile-data / hotspot-watch). It lives on the ext4, so it survives the reboot that the
+	# volatile logger ring does not.
+	echo "--- selfheal"; tail -n 10 /root/selfheal.log 2>&1
 	echo "--- ip rules"; ip rule 2>&1; ip -6 route 2>&1 | head -10
 	echo "--- logread"; logread 2>&1 | tail -c 120000
 	echo "--- dmesg"; dmesg 2>&1 | tail -c 200000
@@ -96,10 +102,26 @@ dump() {
 mkdir -p $D 2>/dev/null
 u=$(up)
 
-# dumps: bounded, so this cannot fill the rootfs on a box that stays up
-n=$(ls $D 2>/dev/null | grep -c 's\.log$')
+# Dumps: the per-boot count must live somewhere volatile -- /tmp -- and not in the dump directory
+# itself. $D is on the ext4 and the names are uptime-keyed, so every boot rewrites the *same* ten
+# names and counting them pins the total at MAXDUMPS from the first boot on. That is how this channel
+# went quiet on 2026-10-15 and stayed quiet for a day, which is exactly the kind of silence these
+# dumps exist to break.
+#
+# The bound then has to be kept by hand, because "one boot overwrites the last boot's files" is only
+# true when the names collide, and they usually do not: the names come from the uptime of the first
+# cron tick after boot, which shifts with how long the boot took, so a boot typically lands beside the
+# previous one rather than on top of it (measured 2026-10-16: 00313..00853 one boot, 00197..00317 the
+# next, 13 files for two boots). Ten dumps is ~3.3 MB, and this box reboots 20-25 times a day, so
+# that is ~80 MB a day of a rootfs nobody is watching. Keep the newest MAXKEEP instead: a boot's
+# dumps then survive the next boot by ~20 minutes, which is what makes "what happened at the end of
+# the previous boot" answerable.
+n=$(cat /tmp/bootdiag.dumps 2>/dev/null || echo 0)
+case "$n" in ''|*[!0-9]*) n=0 ;; esac
 if [ "$u" -lt "$MAXUPTIME" ] && [ "$n" -lt "$MAXDUMPS" ]; then
+	echo $((n + 1)) > /tmp/bootdiag.dumps
 	dump > $D/$(printf '%05d' "$u")s.log 2>&1
+	ls -t $D/*.log 2>/dev/null | tail -n +$((MAXKEEP + 1)) | while read -r f; do rm -f "$f"; done
 fi
 
 # USB: worth retrying for a while after boot, then stop touching the hardware

@@ -235,32 +235,67 @@ REBOOT_MARK=/var/run/mu300-wan-rebooted
 CP_TOOL=/opt/mu300/bin/modem-ioctl
 CP_DEV=${MU300_MODEM_DEV:-/dev/modem}   # MU300_MODEM_DEV is a test seam (see tools/mobile-data/test-escalate.sh)
 CP_MARK=/var/run/mu300-wan-cp-reset      # set while a CP restart has been spent on this outage
+# The CP's AP-side run flag, out of the modem loader's debugfs (sprd_modem_loader.c:1213). This is the
+# only witness that the CP actually moved: `stop` is open-loop -- four regmap pokes and 200 ms of
+# msleeps (soc_modem_stop) -- so a rc of 0 means the ioctl was accepted, never that the CP stopped.
+# Reading it is what separates "the lever was refused" from "the lever moved and the call stayed dead".
+CP_STATE=${MU300_MODEM_STATE:-/sys/kernel/debug/modem/modem}
+
+cp_state() {
+    local s
+    # `|| s=` for set -e: a missing debugfs node fails the substitution, and this must not be fatal.
+    s=$(sed -n 's/^run_state: \([0-9]*\).*/\1/p' "$CP_STATE" 2>/dev/null) || s=
+    [ -n "$s" ] || s=?
+    echo "$s"
+}
 
 cp_reset() {
+    local cp_out cp_rc state0 state1 state2
     [ "${MU300_CP_RESET:-1}" = 1 ] || return 1
-    [ -x "$CP_TOOL" ] || { echo "cp-reset: $CP_TOOL missing" >&2; return 1; }
-    [ -c "$CP_DEV" ] || { echo "cp-reset: $CP_DEV missing" >&2; return 1; }
+    [ -x "$CP_TOOL" ] || { note "cp-reset refused: $CP_TOOL is not executable"; echo "cp-reset: $CP_TOOL missing" >&2; return 1; }
+    [ -c "$CP_DEV" ] || { note "cp-reset refused: $CP_DEV is not a character device"; echo "cp-reset: $CP_DEV missing" >&2; return 1; }
     # [v] keeps the grep from matching this shell's own command line.
     if ! ps w 2>/dev/null | grep -q "[v]endor/bin/modem_control"; then
+        note "cp-reset refused: modem_control is not running (the PM may cut power)"
         echo "cp-reset: modem_control is not running, refusing (the PM may cut power)" >&2
         return 1
     fi
-    echo "cp-reset: stopping the CP" >&2
-    "$CP_TOOL" stop >&2 || true
+    # Both the ioctl's exit status and its one-line report used to go to the volatile ring behind a
+    # `|| true`, and that pair is exactly what tells the two failure modes apart: a *refused* stop (the
+    # lever never moved, so the wedge surviving it says nothing about the lever) versus a stop that
+    # worked and a stack that did not rebuild (the lever works and is not enough). The last wedge --
+    # 2026-10-16, bad for ~300 s, reboot at uptime 1597 s -- cannot be attributed at all from the
+    # kernel side, and the tempting inference is wrong: `modem run = %d!` is a dev_info
+    # (sprd_modem_loader.c:806) while quiet-console pins printk to `4 4 1 4`, so the console capture
+    # only ever carries ERR and above -- the *absence* of that line there proves nothing -- and the
+    # dmesg ring does not survive the reboot either. Nothing on the box said which of "never called",
+    # "refused preflight" or "ioctl failed" it was. Now the ext4 does, and run_state says whether the
+    # CP actually moved.
+    state0=$(cp_state)
+    cp_out=$("$CP_TOOL" stop 2>&1) && cp_rc=0 || cp_rc=$?
+    state1=$(cp_state)
+    echo "cp-reset: stopping the CP: [$cp_out] rc=$cp_rc state $state0->$state1" >&2
+    note "cp-reset: stop rc=$cp_rc run_state $state0->$state1 out=[$cp_out]"
     sleep 3
-    echo "cp-reset: starting the CP" >&2
-    "$CP_TOOL" start >&2 || true
+    cp_out=$("$CP_TOOL" start 2>&1) && cp_rc=0 || cp_rc=$?
+    state2=$(cp_state)
+    echo "cp-reset: starting the CP: [$cp_out] rc=$cp_rc state $state1->$state2" >&2
+    note "cp-reset: start rc=$cp_rc run_state $state1->$state2 out=[$cp_out]"
     # The stack rebuilds on its own; give it ~90 s and watch for the call to come back.
     local i=0
     while [ $i -lt 90 ]; do
         sleep 3
         i=$((i + 3))
         if link_up && probe_ok; then
+            # Also worth recording when it *works*: this is the one case where the box healed itself
+            # without a reboot, and last time it worked nobody could tell from the ext4 that it had.
             echo "cp-reset: data call back by itself after ${i}s" >&2
+            note "cp-reset: the call came back by itself after ${i}s"
             return 0
         fi
     done
     echo "cp-reset: CP restarted but the call did not return within ${i}s" >&2
+    note "cp-reset: the call did not return within ${i}s"
     return 1
 }
 
@@ -294,6 +329,19 @@ bad_clock() {
     echo "${now%.*}"
 }
 
+# Every escalation below ends in either a CP restart or a reboot, and both of those destroy the
+# evidence of what asked for them: /var/run and /tmp are tmpfs, and the logger ring goes with the
+# reboot. On 2026-10-16 that cost an hour of reading a ramoops log to work out that this script, and
+# not hotspot-watch, had restarted the box. So write it down on the ext4 first -- one line, bounded,
+# readable long after the fact and picked up by bootdiag's next dump.
+SELFHEAL=/root/selfheal.log
+TAG=mobile-data
+note() {
+    { printf '%s uptime=%s %s: %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" \
+        "$(cut -d. -f1 /proc/uptime 2>/dev/null)" "$TAG" "$*"; } >> "$SELFHEAL" || true
+    tail -n 200 "$SELFHEAL" > "$SELFHEAL.new" 2>/dev/null && mv "$SELFHEAL.new" "$SELFHEAL" 2>/dev/null || true
+}
+
 maybe_reboot() {  # $1 = bad_clock value, $2 = uptime of the repair that is (or was) in flight
     local now age st=0 cp_tried=0
     [ "${1:-0}" -ne 0 ] || return 0     # the call looks usable: nothing to escalate
@@ -316,6 +364,7 @@ maybe_reboot() {  # $1 = bad_clock value, $2 = uptime of the repair that is (or 
     if [ "${MU300_CP_RESET:-1}" = 1 ] && [ ! -e "$CP_MARK" ]; then
         cp_tried=1
         touch "$CP_MARK"
+        note "call unusable for ${age}s, repairs not helping: restarting the CP"
         echo "call unusable for ${age}s, repairs not helping: restarting the CP" >&2
         cp_reset && return 0            # it worked; watch() sees the call back on the next tick
     elif [ -e "$CP_MARK" ]; then
@@ -332,6 +381,7 @@ maybe_reboot() {  # $1 = bad_clock value, $2 = uptime of the repair that is (or 
     fi
     [ "$st" -eq 1 ] || return 0         # it answered (0), or it must not be asked (2)
     echo "call unusable for ${age}s, repairs not helping and no answer to AT: rebooting" >&2
+    note "call unusable for ${age}s, repairs not helping and no answer to AT (at_state=$st, cp_restart_spent=$cp_tried): rebooting"
     touch "$REBOOT_MARK"
     sync
     sleep 1
