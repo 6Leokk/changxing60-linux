@@ -1,5 +1,17 @@
 # Linux on the ZTE F50 / MU300 (Unisoc T760)
 
+> **changxing60 fork note.** This branch continues [dikeckaan/mu300-linux](https://github.com/dikeckaan/mu300-linux)
+> (credit to the upstream author and the related e5/UMS9621 projects) on a ZTE **7552N / P720S20** board,
+> renamed **`changxing60`** throughout (see the rename rationale in the companion docs repo). The shipped
+> rootfs pivoted from Ubuntu to a **custom OpenWrt** (built by `openwrt/build-rootfs.sh`, ext4 over a
+> loop device in unused UFS space, `boot_b` payload), plus: cellular WAN self-healing (SIPA), a 5 GHz
+> hotspot with pinned factory BSSID, split LAN (USB 192.168.77.1 mgmt / 192.168.8.1 hotspot), IPv6
+> dual-stack, on-device 480×854 status page, SMS stack, LuCI zh-CN, and a guard patch for the vendor
+> PCM driver. **No real credentials live in this repo** — root password / hotspot PSK etc. are supplied
+> via `$CHANGXING60_PASSWORD[_FILE]` or local `~/.changxing60-*` files; the image ships with the stock
+> empty root password. Full documentation lives in the companion `zte7552n` docs repo
+> (`docs/changxing60/`, English/Chinese mixed).
+
 Ubuntu 26.04 LTS with systemd, SSH, telnet, a USB serial console, a working modem/PM co-processor and
 Wi-Fi on the ZTE F50 5G mobile hotspot (hardware MU300, Unisoc T760 / UMS9620). It runs a custom
 5.4.254 kernel built from ZTE's GPL source and boots next to Android without changing the partition table.
