@@ -8,8 +8,8 @@
 # however, loaded in RAM by Android's own audio HAL on every Android boot. The kernel exposes what it
 # holds: /dev/vbc_turningN has a .read, and it returns the same hdr[]/data[] arrays that a write (or
 # request_firmware) fills. So the way to get the blobs is to let Android load them and then read them
-# back out. This script is that read. Run it on Android; run it on OpenWrt too, where it will
-# correctly report that nothing is loaded.
+# back out. This script is that read. Run it on Android with CHANGXING60_VBC_ALLOW_UNLOADED=1 (see
+# below); on OpenWrt it only reads once the loader's per-boot marker exists.
 #
 # THE ABI, from the driver (kernel_modules/kernel5.4/audio_driver/sprd/dai/vbc/v4/vbc_dai/vbc-dai.c):
 #
@@ -37,9 +37,17 @@
 #      the right length. The header is therefore not needed to trim -- it is needed to CHECK, and this
 #      script fails the profile if the two disagree.
 #
-# AND THE ONE THING THIS CANNOT DO. A profile that nothing has loaded has data[id] == NULL and the
-# read fails with ENOMEM ("profile %s data is NULL!"). That is the normal answer on OpenWrt and is
-# reported as such, not as a broken node.
+# WHEN NOTHING IS LOADED, PROFILE 0 IS A KERNEL CRASH, NOT AN ENOMEM. This header used to say that an
+# unloaded profile answers -ENOMEM ("profile %s data is NULL!") and that this is the normal OpenWrt
+# answer. It is true for profiles 1-3 -- their reads check data[id] first. It is FALSE for profile 0:
+# vbc_turning_structure_read() dereferences the NULL pointer with no check (fault address 0x18), and
+# with panic_on_oops=1 on this board a plain `dd if=/dev/vbc_turning0 bs=262144` oopsed the kernel and
+# rebooted it -- measured 2026-10-17 when the boot service snapshotted before loading anything
+# (docs/changxing60/audio-oops.md, pstore in rescue/dumps/2026-10-17-guard-boot-panic/). So reading
+# turning0 is gated: it happens only when /tmp/changxing60-vbc-loaded exists -- touched by
+# changxing60-vbc-load right after a successful audio_structure write, and cleared by every boot --
+# or when CHANGXING60_VBC_ALLOW_UNLOADED=1 says you know the kernel holds it (an Android boot, where
+# you cannot create that marker). Without either, turning0 is reported as refused and not read.
 #
 #   changxing60-vbc-dump [OUTDIR]     default OUTDIR /tmp/vbc-profiles
 #
@@ -48,6 +56,10 @@
 set -u
 
 OUT=${1:-/tmp/vbc-profiles}
+MARKER=${CHANGXING60_VBC_LOADED:-/tmp/changxing60-vbc-loaded}
+ALLOW_UNLOADED=${CHANGXING60_VBC_ALLOW_UNLOADED:-0}
+# Override for host tests only; on the device this is /dev/vbc_turning, the real nodes.
+DEVS=${CHANGXING60_VBC_DEV_PREFIX:-/dev/vbc_turning}
 # 256 KiB is one read. The largest profile on this family is tens of KiB; a bigger buffer than the
 # profile costs nothing but zeros, and a smaller one silently truncates the payload (the driver
 # copies min(requested, payload) and reports the short read as success).
@@ -63,19 +75,39 @@ mkdir -p "$OUT" 2>/dev/null || { echo "changxing60-vbc-dump: cannot create $OUT"
 # read back perfectly. hexdump is in busybox and in toybox (Android), so it is the one that is there
 # on both sides of this procedure. `1/4 "%u\n"` is one 4-byte unit per line, unsigned decimal.
 u32() {
-    hexdump -s "$2" -n 4 -e '1/4 "%u\n"' "$1" 2>/dev/null | head -1
+    if command -v hexdump >/dev/null 2>&1; then
+        hexdump -s "$2" -n 4 -e '1/4 "%u\n"' "$1" 2>/dev/null | head -1
+    else
+        # Only reached on a host that has no hexdump (this rootfs always does, and the od that
+        # hosts have does not exist here). Same little-endian u32, for tools/voice/test-vbc-load.sh.
+        od -An -tu4 -j "$2" -N 4 "$1" 2>/dev/null | tr -d ' ' | head -1
+    fi
 }
 
 got=0
 i=0
 for name in audio_structure dsp_vbc cvs dsp_smartamp; do
-    dev=/dev/vbc_turning$i
+    dev=$DEVS$i
     raw=$OUT/$name.raw
     bin=$OUT/$name.bin
+    node=$i
     i=$((i + 1))
 
     if [ ! -e "$dev" ]; then
         echo "$name: $dev does not exist"
+        continue
+    fi
+
+    # turning0's FULL read is the one read an unloaded kernel cannot survive: reads over 24 bytes
+    # go to the data branch, and vbc_turning_structure_read() dereferences the NULL there (small
+    # reads stay in the header branch and are safe -- voice-audio's 24-byte probe relies on that).
+    # The dd below asks for $MAX, so it is the unsafe shape. Refuse before it unless the loader's
+    # marker or an explicit override says the structure is in memory.
+    if [ "$node" = 0 ] && [ ! -f "$MARKER" ] && [ "$ALLOW_UNLOADED" != 1 ]; then
+        echo "$name: refused -- $MARKER absent, nothing has loaded audio_structure this boot"
+        echo "$name:   a full-size read of $dev would be a kernel oops; set"
+        echo "$name:   CHANGXING60_VBC_ALLOW_UNLOADED=1 only on a boot where you know the"
+        echo "$name:   profile is loaded (an Android boot, where the marker cannot exist)"
         continue
     fi
 
@@ -125,11 +157,13 @@ VBC profiles read back from /dev/vbc_turning0..3.
 
 Each <name>.bin is the exact byte string to write back to the same node:
 
-    dd if=<name>.bin of=/dev/vbc_turning<N> bs=65536
+    dd if=<name>.bin of=/dev/vbc_turning<N> bs=<file size, at least> count=1
 
-with N = 0 audio_structure, 1 dsp_vbc, 2 cvs, 3 dsp_smartamp. The kernel checks the "audio_profile"
-magic itself (vbc_turning_profile_loading), so a file that is not a real profile is rejected with
--EINVAL rather than loaded.
+with N = 0 audio_structure, 1 dsp_vbc, 2 cvs, 3 dsp_smartamp. bs must be at least the file size:
+the driver treats ONE write() as ONE complete profile and checks the "audio_profile" magic at the
+front of every write, so a blob split across writes by a smaller bs has its tail rejected -EINVAL.
+bs=65536 looked fine for the two smaller profiles and only failed on dsp_vbc, which is exactly the
+shape of bug that gets mistaken for a bad blob (measured 2026-10-16).
 
 Layout: 16-byte magic "audio_profile", u32 num_mode, u32 len_mode, then num_mode*len_mode bytes.
 
@@ -141,5 +175,7 @@ if [ "$got" -gt 0 ]; then
     echo "changxing60-vbc-dump: $got profile(s) in $OUT"
     exit 0
 fi
-echo "changxing60-vbc-dump: no profile is loaded (run this on an Android boot, where the audio HAL loads them)" >&2
+echo "changxing60-vbc-dump: nothing readable -- no profile loaded, turning0 refused, or (rare) the loaded ones all failed the header cross-check" >&2
+echo "  on OpenWrt: run changxing60-vbc-load first (it sets $MARKER)" >&2
+echo "  on Android: CHANGXING60_VBC_ALLOW_UNLOADED=1 $0 (only if the audio HAL has actually loaded)" >&2
 exit 1

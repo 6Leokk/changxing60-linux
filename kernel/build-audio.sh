@@ -38,6 +38,11 @@
 #   audio-pcm-pointer-agcp-access  No DMA position read while the AGCP domain is asleep.
 #                                  MUST come after audio-pcm-period-timer (its hunk #1
 #                                  expects the tick fields that patch adds).
+#   audio-pcm-prealloc-guard       Refuse buffer_bytes above the stream's actual
+#                                  preallocated buffer (the hw:0,0 capture FE lives on a
+#                                  7680-byte IRAM carve while the core allows 228 KiB --
+#                                  the 2026-10-16 arecord oops, docs audio-oops.md).
+#                                  Same file as the two patches above; comes after them.
 #   audio-fe-dai-formats           The DSP front ends offered only the formats/layouts of
 #                                  the DSP; add the host-side ones the ALSA route needs.
 #   audio-sprd-card-dummy-on-defer A codec that never arrives must not take the whole
@@ -70,6 +75,7 @@ apply() { # apply PATCH_DIR MARKER...
 apply audio-mcdt-enable-clock "enabled the agcp mcdt clock"
 apply audio-pcm-period-timer sprd_pcm_period_tick
 apply audio-pcm-pointer-agcp-access last_pointer
+apply audio-pcm-prealloc-guard "exceeds preallocated"
 apply audio-fe-dai-formats fe_dai_uses_mcdt
 apply audio-sprd-card-dummy-on-defer dummy_on_defer
 

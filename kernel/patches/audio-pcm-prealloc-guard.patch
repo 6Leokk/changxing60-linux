@@ -1,0 +1,57 @@
+sprd-dmaengine-pcm: refuse buffer_bytes larger than the preallocated DMA buffer
+
+2026-10-17, our own. The 2026-10-16 box-reset was an `arecord` oops inside the ALSA core's
+anti-leak memset in snd_pcm_hw_params() (pc __memset, lr snd_pcm_hw_params, Comm arecord,
+fault at dma_area + exactly 2 pages): docs/changxing60/audio-oops.md.
+
+Mechanism, confirmed on this board: the normal-capture FE (FE_DAI_ID_NORMAL_AP01, `hw:0,0`)
+sits on a fixed IRAM carve described by DT `sprd,normal-captue-data` = (0x56806000, 0x1e00)
+- 7680 bytes, page-rounded vmap = 2 pages. But hw_params sets `runtime->dma_bytes = totsize`
+from the app's request, and runtime->hw.buffer_bytes_max is DEEPBUFFER_PLAYBACK_BUFFER_BYTES_MAX
+(228 KiB), so the core happily refines requests far past the carve and then memsets them.
+The crash asked for 40896. Same shape in the no_dma branch for hostless FEs against their
+128 KiB DDR32 prealloc.
+
+The guard returns -EINVAL before either assignment when the request exceeds the stream's own
+substream->dma_buffer (set unconditionally by sprd_pcm_preallocate_dma_ddr32_buffer() in
+sprd_pcm_open, so it is always valid by hw_params time). Reject, not clamp:
+sprd_pcm_config_dma() re-derives its scatter list from params, so a shrunk dma_bytes alone
+would still let the DMA overrun the carve. Streams whose requests fit - including every
+playback path measured so far and the voice FEs - are unaffected.
+
+--- a/sprd/platform/dmaengine_pcm/sprd-dmaengine-pcm.c
++++ b/sprd/platform/dmaengine_pcm/sprd-dmaengine-pcm.c
+@@ -1163,6 +1163,33 @@
+ 
+ 	sp_asoc_pr_info("(pcm) %s, cpudai_id=%d\n", __func__,
+ 			srtd->cpu_dai->id);
++
++	/*
++	 * changxing60: refuse buffer_bytes larger than this stream's preallocated
++	 * DMA buffer. The ALSA core lets apps ask for up to
++	 * DEEPBUFFER_PLAYBACK_BUFFER_BYTES_MAX (228 KiB), but the memory actually
++	 * handed out is far less: the normal-capture FE sits on a fixed IRAM carve
++	 * whose size comes from the DT (0x56806000 + 0x1e00 = 7680 bytes on this
++	 * board, ~2 pages mapped), and every other stream on the AUDIO_BUFFER /
++	 * I2S_BUFFER prealloc. Both runtime->dma_bytes assignments below (the DMA
++	 * path and no_dma) take the *requested* size, and the core then memsets
++	 * runtime->dma_bytes over runtime->dma_area at the end of
++	 * snd_pcm_hw_params() to scrub kernel data leaks -- 2026-10-16 an
++	 * `arecord -D hw:0,0` asking 40896 bytes wrote past the 2-page vmap and
++	 * oopsed the box with CONFIG_PANIC_ON_OOPS=y (docs/changxing60/audio-oops.md).
++	 * Reject instead of clamping: sprd_pcm_config_dma() re-derives its
++	 * scatter list from params, so a silently shrunk dma_bytes would still let
++	 * the DMA itself overrun the carve. Requests that fit are unaffected.
++	 */
++	if (substream->dma_buffer.area &&
++	    totsize > substream->dma_buffer.bytes) {
++		pr_err("%s: buffer_bytes %zu exceeds preallocated %zu (%s %s), refusing\n",
++			__func__, totsize, substream->dma_buffer.bytes,
++			sprd_dai_pcm_name(srtd->cpu_dai),
++			PCM_DIR_NAME(substream->stream));
++		return -EINVAL;
++	}
++
+ 	if (be_rtd && be_rtd->cpu_dai->id == AGCP_IIS0_TX)
+ 		dma_data = snd_soc_dai_get_dma_data(be_rtd->cpu_dai, substream);
+ 	else

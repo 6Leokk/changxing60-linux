@@ -42,6 +42,18 @@
 # this board reboots itself when the WAN wedges, and re-writing a profile the driver is not currently
 # using is not worth the risk of doing at the wrong moment.
 #
+# WHY THE SNAP IS GATED (measured the hard way, 2026-10-17). The "what does the kernel hold right
+# now" snapshot reads /dev/vbc_turning0 before writing anything, and when nothing is loaded that
+# read is not an error path: vbc_turning_structure_read() dereferences the NULL data pointer at
+# vbc_dai.c's structure branch (fault address 0x18) while the DSP/NXP/SMARTPA reads check and answer
+# -ENOMEM. vbc_turning0 is the one character device whose read can kill this kernel: the first boot
+# that ran this service oopsed in dd at exactly that read, and panic_on_oops turned it into a reboot
+# (docs/changxing60/audio-oops.md; pstore archived under rescue/dumps/2026-10-17-guard-boot-panic/).
+# So reads happen only when a per-boot marker says audio_structure is known to be in the kernel:
+# this script touches $MARKER right after a successful audio_structure write, /tmp clearing on boot
+# restores "unsafe" because the modules are freshly loaded then. The same marker gates
+# changxing60-vbc-dump when it runs standalone.
+#
 #   changxing60-vbc-load              load and verify (quiet unless something is wrong)
 #   changxing60-vbc-load --check      say what would happen, write nothing
 #   changxing60-vbc-load --verbose    name every profile as it goes
@@ -54,6 +66,9 @@ set -u
 FW=${CHANGXING60_VBC_FW:-/lib/firmware}
 LOG=${CHANGXING60_VBC_LOG:-/root/vbc-load.log}
 DUMP=${CHANGXING60_VBC_DUMP:-/opt/changxing60/bin/changxing60-vbc-dump}
+MARKER=${CHANGXING60_VBC_LOADED:-/tmp/changxing60-vbc-loaded}
+# Override for host tests only; on the device this is /dev/vbc_turning, the real nodes.
+DEVS=${CHANGXING60_VBC_DEV_PREFIX:-/dev/vbc_turning}
 CHECK=0
 VERBOSE=0
 for a in "$@"; do
@@ -61,7 +76,7 @@ for a in "$@"; do
         --check)      CHECK=1 ;;
         --verbose|-v) VERBOSE=1 ;;
         --dir)        shift; FW=${1:-} ;;
-        -h|--help)    sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)    sed -n '2,63p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "changxing60-vbc-load: unknown option $a" >&2; exit 2 ;;
     esac
 done
@@ -78,9 +93,17 @@ say() { [ "$VERBOSE" = 1 ] && echo "$*"; return 0; }
 [ "$CHECK" = 1 ] || : > "$LOG" 2>/dev/null
 log "start: fw=$FW check=$CHECK"
 
-# What the kernel holds right now, one file per loaded profile. Its exit status is 1 when nothing is
-# loaded, which is the normal first-boot answer and not an error here.
+# What the kernel holds right now, one file per loaded profile. Gated on $MARKER: an ungated read
+# of /dev/vbc_turning0 with nothing loaded is a kernel oops (see the header), and the marker is the
+# only thing that says "this boot has audio_structure in the kernel, the read is the safe -ENOMEM
+# path at worst" -- so without it the snapshot is skipped, the idempotence check degrades to
+# "load everything", and nothing is read back.
 snap() {
+    if [ ! -f "$MARKER" ]; then
+        rm -rf "$1" 2>/dev/null
+        log "snap: skipped, no $MARKER (nothing known-loaded this boot)"
+        return 0
+    fi
     rm -rf "$1" 2>/dev/null
     "$DUMP" "$1" >/dev/null 2>&1
     return 0
@@ -103,7 +126,7 @@ snap "$TMP/before"
 todo=0
 i=0
 for name in $NAMES; do
-    dev=/dev/vbc_turning$i
+    dev=$DEVS$i
     i=$((i + 1))
     blob=$FW/$name
     if [ ! -e "$dev" ]; then
@@ -140,6 +163,10 @@ for name in $NAMES; do
     fi
     say "load  $name -> $dev ($size bytes)"
     log "wrote: $name ($size bytes)"
+    # audio_structure in the kernel is what makes turning0 readable: the driver's write path fills
+    # the structure that its read path dereferences unchecked. Set the marker from this moment, not
+    # after verification -- the readback below has to be allowed to read.
+    [ "$name" = audio_structure ] && touch "$MARKER" 2>/dev/null
 done
 
 if [ "$CHECK" = 1 ]; then
