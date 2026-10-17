@@ -16,8 +16,8 @@
 #   2. git filter-repo --replace-text over it with the rules file below
 #   3. a hard verification sweep: every pattern in the credential-pattern file, -a binary-aware,
 #      across every revision of the clone. Any hit aborts before anything leaves the machine.
-#   4. push OUR branches (mainline-6.18, 7552n-port) + tags to the GitHub repo (idempotent); the
-#      fork base's `main` is not mirrored -- see the push step
+#   4. push OUR line (mainline-5.4) + tags to the GitHub repo (idempotent); no other branch is
+#      mirrored -- see the push step
 #
 # NEITHER SECRET-BEARING FILE IS IN THE REPO. The replace rules quote the real MACs and the pattern
 # file quotes every credential the policy covers; both live outside the checkout
@@ -67,12 +67,12 @@ HITS=$(git grep -a -l $ARGS $(git rev-list --all) 2>/dev/null || true)
 $HITS"
 say "sweep clean ($(printf '%s\n' "$ARGS" | wc -w) patterns, all revisions)"
 
-say "pushing our branches + tags to $GITHUB_URL"
-# We publish only this project's own lines: mainline-6.18 (the port) and 7552n-port (its early
-# history). The fork base's `main` is deliberately NOT mirrored here anymore -- this repo stands on
-# its own default branch (2026-10-18), upstream stays reachable at its own project page.
-git push -q "$GITHUB_URL" refs/heads/mainline-6.18:refs/heads/mainline-6.18 \
-	refs/heads/7552n-port:refs/heads/7552n-port || die "branch push failed"
+say "pushing our line + tags to $GITHUB_URL"
+# The repo has exactly one line we publish: mainline-5.4 (renamed from mainline-6.18 on 2026-10-18,
+# named after the production kernel 5.4.254). The old `mainline-6.18`, the early-history branch
+# `7552n-port`, and the fork base's `main` are all ancestors of the tip or not ours to mirror --
+# nothing else goes out.
+git push -q "$GITHUB_URL" refs/heads/mainline-5.4:refs/heads/mainline-5.4 || die "branch push failed"
 git push -q --tags "$GITHUB_URL" || say "tag push failed (branches are out; tags can follow)"
 
 cd /

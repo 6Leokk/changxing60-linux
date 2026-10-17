@@ -8,8 +8,9 @@ LAN, a self-drawn 480×854 status page on the internal MIPI panel, an SMS stack 
 panel, six hand-written LuCI panels (zh-CN), and watchers that recover the modem stack when it
 wedges — a reboot recovers, and a Linux boot that fails twice falls back to Android by itself.
 
-This repository stands on its own default branch, `mainline-6.18` — the ZTE 7552N port and nothing
-else; it tracks no upstream. It began as a fork of [mu300-linux](https://github.com/dikeckaan/mu300-linux)
+This repository stands on its own default branch, `mainline-5.4` (named for the production kernel
+line it runs, 5.4.254) — the ZTE 7552N port and nothing else; it tracks no upstream. It began as a
+fork of [mu300-linux](https://github.com/dikeckaan/mu300-linux)
 (a ZTE F50 / MU300 Linux port, same SoC family), which supplied the starting base — the boot/slot
 mechanism and the earliest rootfs experiments — and every 7552N / `changxing60` feature was developed
 in this project. The F50-era Ubuntu 26.04 line still builds and is selectable
