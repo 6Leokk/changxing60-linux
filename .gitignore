@@ -21,6 +21,11 @@ tools/gpu/cltest
 # (tools/modem/changxing60-modemd.c + build.sh, and the modem-ioctl test helper.)
 tools/modem/changxing60-modemd
 tools/modem-ioctl
+# The Chinese catalog we regenerate from tools/i18n/{zh-cn.json,build-i18n.py,lmo.py} (all tracked).
+# The SHIPPING copy that build-rootfs.sh cp's into the image lives at
+# openwrt/overlay/usr/lib/lua/luci/i18n/changxing60.zh-cn.lmo and IS tracked there (the overlay is
+# mounted read-only in the build container, so it can't be regenerated at build time).
+tools/i18n/changxing60.zh-cn.lmo
 # Vendored third-party proxy cores, obtained from their upstream releases, not from this repo:
 #   clash/bin/mihomo    -- the OpenClash core (clash/ is a vendored OpenClash tree; config.yaml IS tracked)
 #   .../bin/sing-box    -- 86 MiB; container/build-rootfs.sh line 14 refuses to build without it and

@@ -1,0 +1,30 @@
+#!/bin/sh
+# First boot: set LuCI's interface language to Simplified Chinese.
+#
+# The catalogs under /usr/lib/lua/luci/i18n/ (the official luci-i18n-base-zh-cn
+# pack plus our own changxing60.zh-cn.lmo, covering the five custom views) are
+# loaded by the ucode dispatcher (determine_request_language in
+# /usr/share/ucode/luci/dispatcher.uc) via load_catalog(lang, i18ndir), which
+# scans that directory for *.<lang>.lmo and loads every match.
+#
+# Two things must be set, and ONLY setting luci.languages.main does NOT work:
+#  - luci.main.lang is the ACTIVE language the dispatcher uses. When it is
+#    "auto" (the default), the dispatcher picks a language from the browser
+#    Accept-Language header, but ONLY for languages registered under
+#    luci.languages; if none match, it falls back to "en". So auto never
+#    resolves to Chinese unless we also register it.
+#  - luci.languages.zh_cn registers Simplified Chinese in the language dropdown
+#    (and makes auto-detect work). The option NAME is the locale code, the
+#    VALUE is the human-readable label.
+# Forcing luci.main.lang=zh_cn (instead of auto) makes the device always serve
+# Chinese regardless of the browser; load_catalog("zh-cn") then matches our
+# *.zh-cn.lmo files (the dispatcher maps zh_cn -> zh-cn by replacing _ with -).
+#
+# Idempotent. uci-defaults scripts are deleted once they exit 0, but the
+# settings persist in /etc/config/luci. There is no failure mode a retry would
+# fix, so exit 0 is fine.
+uci -q delete luci.languages.main        # drop the malformed entry if present
+uci -q set luci.languages.zh_cn='简体中文' # register in the dropdown + auto-detect
+uci -q set luci.main.lang='zh_cn'        # force active language
+uci -q commit luci
+exit 0
