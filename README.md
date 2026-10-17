@@ -1,216 +1,162 @@
-# Linux on the ZTE F50 / MU300 (Unisoc T760)
+# Native OpenWrt on the ZTE 7552N "changxing60" (Unisoc T760 5G hotspot)
 
-> **changxing60 fork note.** This branch continues [dikeckaan/mu300-linux](https://github.com/dikeckaan/mu300-linux)
-> (credit to the upstream author and the related e5/UMS9621 projects) on a ZTE **7552N / P720S20** board,
-> renamed **`changxing60`** throughout (see the rename rationale in the companion docs repo). The shipped
-> rootfs pivoted from Ubuntu to a **custom OpenWrt** (built by `openwrt/build-rootfs.sh`, ext4 over a
-> loop device in unused UFS space, `boot_b` payload), plus: cellular WAN self-healing (SIPA), a 5 GHz
-> hotspot with pinned factory BSSID, split LAN (USB 192.168.77.1 mgmt / 192.168.8.1 hotspot), IPv6
-> dual-stack, on-device 480×854 status page, SMS stack, LuCI zh-CN, and a guard patch for the vendor
-> PCM driver. **No real credentials live in this repo** — root password / hotspot PSK etc. are supplied
-> via `$CHANGXING60_PASSWORD[_FILE]` or local `~/.changxing60-*` files; the image ships with the stock
-> empty root password. Full documentation lives in the companion `zte7552n` docs repo
-> (`docs/changxing60/`, English/Chinese mixed).
+A complete, self-healing **OpenWrt 25.12** port for the ZTE 7552N (P720S20) 5G hotspot — board name
+`changxing60`, SoC Unisoc T760 (UMS9620). It boots **next to the stock Android, in the spare A/B
+slot**: no repartitioning, no `boot_a` write, no GPT change, ever. Cellular WAN (5G NSA/LTE) with
+IPv6 dual-stack, a 5 GHz VHT80 hotspot with the factory BSSID pinned, a split management/tethering
+LAN, a self-drawn 480×854 status page on the internal MIPI panel, an SMS stack with a web control
+panel, six hand-written LuCI panels (zh-CN), and watchers that recover the modem stack when it
+wedges — a reboot recovers, and a Linux boot that fails twice falls back to Android by itself.
 
-Ubuntu 26.04 LTS with systemd, SSH, telnet, a USB serial console, a working modem/PM co-processor and
-Wi-Fi on the ZTE F50 5G mobile hotspot (hardware MU300, Unisoc T760 / UMS9620). It runs a custom
-5.4.254 kernel built from ZTE's GPL source and boots next to Android without changing the partition table.
+This project targets the 7552N; it was started with the ZTE F50 / MU300 port
+[dikeckaan/mu300-linux](https://github.com/dikeckaan/mu300-linux) (same SoC family) as a reference —
+see References at the end. The original Ubuntu 26.04 line still builds and is selectable
+(`changxing60-os ubuntu|openwrt`), but everything below is about the OpenWrt line, which is what this
+repo ships and runs. The dated engineering log — measurements, failures, retracted conclusions — lives
+in the companion docs repository **[6Leokk/zte7552n](https://github.com/6Leokk/zte7552n)**.
 
-> **Türkçe özet:** ZTE F50 / MU300 (Unisoc T760) üzerinde, Android'e ve bölüm tablosuna dokunmadan,
-> ZTE'nin GPL kaynağından derlenmiş 5.4.254 kernel ile Ubuntu 26.04 LTS (systemd, SSH, telnet, USB seri
-> konsol, modem ve Wi-Fi) çalıştırmak için gereken her şey. Ayrıntılar İngilizce; teknik bulguların tamamı
-> [`docs/FINDINGS.md`](docs/FINDINGS.md) içinde.
+## The web admin
 
-> **Warning.** This writes to `boot_b` and to the `misc` partition, and creates a filesystem in unused eMMC space.
-> It requires an unlocked/verification-bypassed device with root on Android and a working SPD download-mode
-> recovery path. You can brick your device. Nothing here is endorsed by ZTE or Unisoc.
+Services → six custom panels, each backed by an rpcd ucode service that re-reads what it wrote
+("the reply is the state, not the hope"), translated to Chinese with a hand-built `.lmo` catalog:
 
-## Status
+| Overview (zh-CN) | Cellular status | Boot target (OpenWrt ↔ Android) |
+|---|---|---|
+| ![LuCI overview](docs/screenshots/luci-overview.png) | ![Cell status panel](docs/screenshots/panel-net.png) | ![Boot target panel](docs/screenshots/panel-boot.png) |
+
+The boot-target panel is the safe way to switch systems: it wraps the one script allowed to touch the
+`misc` bootloader-control block, shows the 32 bytes *read back after the write*, and keeps "arm" and
+"reboot" as two separate buttons. `android` is a one-way door from inside Linux — the documented way
+home is `tools/changxing60-back-to-openwrt.sh` from a PC (it re-stages the driver payload, fixes 9
+DTB bytes in `vendor_boot_b`, arms slot b, and verifies the USB gadget comes back).
+
+## Status (measured, not aspirational)
 
 | Feature | State |
 |---|---|
-| Custom kernel (5.4.254, ZTE U30 Air source + fragment) | ✅ boots, 86 vendor modules rebuilt from source |
-| Boot without touching `boot_a`, GPT or `userdata` | ✅ slot b one-shot trial, init restores slot a |
-| USB Ethernet (ECM) + DHCP | ✅ `192.168.77.1`, host gets `192.168.77.2-9` |
-| USB serial console (CDC-ACM) | ✅ `serial-getty@ttyGS0` |
-| Ubuntu 26.04.1 LTS, systemd 259 | ✅ `running` (kernel 5.4 = systemd minimum baseline) |
-| SSH and telnet | ✅ |
-| PM co-processor watchdog / no power cut after ~290 s | ✅ via Android `modem_control` in a chroot |
-| Modem firmware boot (`Modem Alive`) | ✅ |
-| Wi-Fi (SC2355 / Marlin3) | ✅ station scan and access-point mode (`hostapd` AP-ENABLED) |
-| Mobile data (5G NSA/LTE) | ✅ AT commands + `sipa_eth0`, about 75 Mbit/s down / 10 Mbit/s up measured |
-| Internet sharing to USB (NAT) | ✅ host behind `usb0` reaches the internet through the modem; a watchdog reconnects after modem resets |
-| Wi-Fi hotspot out of the box | ✅ hostapd on `wlan0` on its own `br-wifi`/192.168.8.0/24, while the USB gadget keeps `br-lan`/192.168.77.0/24 as a management link (address only, no router/DNS); SSID/password imported from Android or generated; `BAND=5` (802.11ac, 80 MHz, channels 36-48/149-165) or `BAND=2.4`; one band at a time |
-| Modem NV persistence (`cp_diskserver`), `refnotify` | ✅ Android daemons in the chroot |
-| Thermal throttling, status LEDs, SIM tray, DVFS drivers | ✅ `changxing60-extra-modules` (blue LED = mobile data up) |
-| Default boot to Linux with automatic fallback | ✅ `changxing60-next-boot linux\|android`; a Linux boot that never completes rolls back to Android |
-| Boot-target switch from the web admin (Services → 启动目标 / "Boot target") | ✅ 6th LuCI panel (2026-10-17): `rpc.changxing60boot` wraps the same `changxing60-next-boot` script, shows the misc bytes read back after every write, and keeps arming and rebooting as two separate buttons; `android` is one-way from inside Linux — the documented way home is `tools/changxing60-back-to-openwrt.sh` from a PC |
-| RAM | ✅ 1473 MiB usable (464 MiB is the modem firmware's, unavoidable); unused logo/sysdump reservations freed, zram swap |
-| OpenWrt 25.12 (selectable next to Ubuntu, `changxing60-os`) | ✅ procd boot, modem, cellular WAN (`proto changxing60cell`, APN in LuCI), firewall4 NAT, 5 GHz Wi-Fi (UCI/LuCI), USB LAN, SSH; ~140 MiB RAM used |
-| Internal MIPI panel (BOE, 480×854 portrait) | ✅ `sprd-drm.ko` built as an external module (DPU0 + DSI; it is *not* missing from the tree — the F50 config just leaves `CONFIG_DRM_SPRD` off), plus a self-drawn status page with a LuCI QR (`tools/screen/`). The power key toggles the backlight. **Touch is deliberately not loaded.** |
-| Internal audio | ✗ no speaker/mic path; the AW883xx amplifier does not answer on I2C. The AGDSP can be booted with firmware from another device (Android community modules), Linux port pending |
-| Bluetooth (SC2355) | ✅ BlueZ `hci0` powered, scanning works: `sprdbt_tty` (PCIe H4) + `changxing60-bt-init` vendor PSKey/RF upload + link-policy kernel patch |
-| GPU (Mali-G57) | ✅ OpenCL 3.0 (headless): `mali_kbase` r40p0 built from source + Android's Mali userspace in the vendor chroot (`android-gpu-run`) |
+| Custom kernel 5.4.254 (ZTE GPL source + fragment, ThinLTO) | ✅ boots slot b; vendor `wlan_combo` + `mali_kbase` + DRM built out of tree |
+| OpenWrt 25.12 rootfs (`openwrt/build-rootfs.sh`, ext4 in free UFS space) | ✅ procd, ~140 MiB RAM used; 167 modules at parity with the running device |
+| Cellular WAN, 5G NSA/LTE (`proto changxing60cell`) | ✅ IPv4 + IPv6 dual-stack; 4-stream 88–99 Mbps down at a client behind its NAT |
+| SIPA wedge self-healing | ⚠ the vendor modem stack wedges probabilistically; watchers detect, recover, worst case reboot — [mechanism documented](https://github.com/6Leokk/zte7552n/blob/main/docs/changxing60/sipa-wedge.md) |
+| 5 GHz AP (`hostapd`, ch36 VHT80) | ✅ real clients associate and surf; BSSID = factory MAC, pinned every boot from `prodnv` |
+| Split LAN by design | ✅ USB gadget `br-lan` 192.168.77.1/24 = management only (no GW/DNS pushed — a Windows PC would otherwise lose its own uplink); hotspot `br-wifi` 192.168.8.1/24 |
+| Six LuCI panels + zh-CN i18n | ✅ network / USB link / SMS / calls / forwarding / boot target |
+| SMS receive + forward, web send | ✅ real traffic; **call audio is suspended** — vendor DSP answers pending ([evidence log](https://github.com/6Leokk/zte7552n/blob/main/docs/changxing60/telephony.md)) |
+| Internal 480×854 MIPI panel | ✅ self-drawn status page, power-key backlight cycling, double-buffered; touch deliberately off |
+| zram, thermal zones, charge-current pins (bq2560x) | ✅ ~215 mA average whole-board on battery (6 h 53 m measured run) |
+| Bluetooth (SC2355), Mali-G57 headless OpenCL | ✅ via vendor chroot (`android-vendor/extract-*.sh`) |
+| Ubuntu 26.04 line (the MU300-era line) | ✅ still builds and installs alongside (`changxing60-os`) |
 
-## How it works
+## Flashing it on your own 7552N
 
-```
-LK (slot b, tries=2) ─► custom 5.4 kernel + vendor_boot DTB
-   └─► initramfs /init (boot/init)
-         ├─ load 86 modules in a fixed order (boot/module-order.txt)
-         ├─ misc: restore slot a, unless the rootfs says default-boot=linux
-         ├─ bind USB gadget: ECM (usb0 up immediately) + ACM console
-         ├─ losetup -o 27762098176 /dev/mmcblk0 → ext4 "changxing60root" (free space after userdata)
-         └─ switch_root → systemd
-               ├─ changxing60-vendor   : Android modem_control in a chroot (disarms PM watchdog, boots modem)
-               ├─ changxing60-lan      : br-lan (usb0) 192.168.77.1 + dnsmasq DHCP (no router/DNS)
-               ├─ changxing60-wifi     : br-wifi (wlan0) 192.168.8.1 + dnsmasq DHCP/DNS
-               ├─ changxing60-wifi     : pcie-sprd, wcn_bsp, sprd_wlan_combo
-               ├─ changxing60-mobile-data : AT on /dev/stty_nr1, sipa_eth0, nftables NAT
-               ├─ changxing60-bluetooth : sprdbt_tty, changxing60-bt-init (PSKey/RF), btattach → bluetoothd
-               └─ ssh.socket, telnetd, serial-getty@ttyGS0
+Everything device-specific comes **out of your device**, not out of this repo: proprietary vendor
+libraries, firmware blobs, the Android property regions, your serial-bearing images. What the repo
+provides is the kernel build, the rootfs builder, the boot-image builder and the installer that ties
+them together. You need root on the stock Android (the device has boot-verification bypass in place)
+and a working SPD download-mode recovery path. Nothing writes `boot_a`, the GPT, or `userdata`.
+
+```sh
+# 1. kernel (Docker; see "Building from source" below)  -> out/{Image,modules,...}
+# 2. everything else, device on rooted Android over adb:
+./install.sh
 ```
 
-Read [`docs/FINDINGS.md`](docs/FINDINGS.md) for the reasoning behind each step (LK slot rules, LZ4 ramdisk,
-USB dependency chain, the PM watchdog, the `modem_control` process-name check, macOS ECM link state, …).
+`install.sh` checks the device, finds the free UFS region after `userdata`, pulls the vendor files it
+needs into `work/` (**stays on your host; property regions are same-length neutralized on the way in** —
+your serial/EMMC-id never reaches an image), builds the rootfs + boot image, asks you to confirm with
+`INSTALL`, writes `boot_b`, arms slot b and reboots. First boot seeds the network (split LAN, WAN,
+firewall zones) via `etc/uci-defaults`; you then configure your own hotspot SSID/PSK and your own root
+password in LuCI — the shipped image is stock (empty password) on purpose.
+
+**Prebuilt assets** (for the frozen 2026-10-17 state, matching the device this project runs): see the
+[Releases page](https://github.com/6Leokk/changxing60-linux/releases) — the rootfs tarball, the slot-b
+boot image, the 32-byte `misc` block, and SHA256SUMS. The tarball contains Unisoc/ZTE firmware needed
+for Wi-Fi/modem operation; it is distributed here for convenience and will be pulled on a rights
+holder's request. `vendor_boot_b` (the stock ZTE image patched by 9 DTB bytes) is **not** distributed —
+`tools/changxing60-back-to-openwrt.sh` and `boot/` show how to produce yours.
+
+> **Never flash generic OpenWrt arm64 images or use `sysupgrade` on this device** — they target
+> generic disks and would overwrite the eMMC/UFS layout. The installed OpenWrt blocks sysupgrade.
+> `apk upgrade` is fine except `kernel`/`kmod-*` (this runs its own 5.4 build).
+
+## Switching systems
+
+| From → to | How |
+|---|---|
+| OpenWrt → Android | LuCI → Services → 启动目标 (boot target), or `changxing60-next-boot android`, then reboot |
+| Android → OpenWrt | `tools/changxing60-back-to-openwrt.sh` from a PC (payload → 9 DTB bytes → arm slot b → reboot → verify USB); if `boot_b` still holds the trial image it is a pure 32-byte misc write (`boot/android-boot-linux.sh`) |
+| Any boot, automatic | every completed OpenWrt boot re-arms slot b (~70 s uptime); two failed boots roll back to Android by themselves |
+
+Don't reboot twice within the first ~70 s of an OpenWrt boot — the re-arm has not run yet and the
+tries counter falls back to Android. Physical fallback: long-press power (PMIC behavior on this
+revision is not measured).
+
+## Building from source
+
+* **Kernel** — ZTE's 5.4 GPL release (mirrored at
+  [dikeckaan/zte-ums9620-kernel-5.4.254](https://github.com/dikeckaan/zte-ums9620-kernel-5.4.254)):
+  `kernel/build-linux.sh` merges `changxing60-linux.fragment`, ThinLTO builds `Image` + modules.
+  Out-of-tree: `kernel/build-wlan.sh` (realme C51/C53 `wlan_combo` GPL source + our patches),
+  `kernel/build-mali-54.sh` (mali r40p0), `kernel/build-internal-display.sh` (`sprd-drm` as a module).
+  Stage with `python3 tools/stage-modules.py` — it copies the *transitive closure* of what the rootfs
+  loads and fails loudly on omissions; hand-copying "all `*.ko`" is how zram/thermal/wcn drivers
+  silently stayed out of the image for weeks.
+* **Rootfs** — `openwrt/build-rootfs.sh [OUT.tar.gz]`: OpenWrt armsr base (checksum-verified) + this
+  repo's `openwrt/overlay/` (scripts, panels, i18n) + staged modules/firmware/vendor subset. Run it
+  via `install.sh`, or directly with `CHANGXING60_INPUTS=<abs path to work/>`; it guards required
+  inputs and warns when `out/modules` is newer than the staged set.
+* **Boot image** — `boot/build-boot-image.py` assembles the Android-format `boot_b` payload (kernel +
+  `boot/init` ramdisk + module-order). Never a `boot_a` write.
+* **Host tooling** — `tools/`: `check-scripts.sh` (196 static guards over every shell/ucode/js file
+  the image ships — quoting traps, x-bits, LuCI module-vs-global `ReferenceError` classes),
+  `luci-view-check.js` (executes each LuCI view the way luci.js compiles it), `deploy-pending.sh`
+  (push changed management files to a live device with per-file md5 receipts),
+  `net-scope-test.sh` / `net-down-test.sh` (throughput and DHCP scope probes),
+  `i18n/` (`.lmo` catalog builder + zh-CN deploy), `stage-modules.py`.
+* **Publishing** — `tools/publish-github.sh`: GitHub only ever receives a sanitized clone (see
+  Credentials below), verified pattern-clean across every revision before the push.
 
 ## Repository layout
 
 | Path | Contents |
 |---|---|
-| `kernel/` | Docker build env, stock F50 config, `changxing60-linux.fragment`, build scripts, Wi-Fi driver patch |
-| `boot/` | `init`, `module-order.txt`, `build-boot-image.py`, `flash-trial.sh` |
-| `rootfs/` | Ubuntu 26.04 `Dockerfile`, `assemble.sh`, systemd units and helper scripts (`overlay/`) |
-| `android-vendor/` | Scripts to extract the Android runtime subset from *your* device, permission generator |
-| `tools/` | `logdw` (liblog sink), SSH/SCP/telnet/serial helpers, log collector, Android-side mount helper |
-| `docs/` | Findings and notes |
+| `boot/` | `init` (module loader + root mount), `module-order.txt`, `build-boot-image.py`, `flash-trial.sh`, `android-boot-linux.sh` |
+| `kernel/` | build env, stock config + fragment, patches (wlan_combo, marlin3 link policy, mem-skip, regdb cert, PCM guard), build scripts |
+| `openwrt/` | `build-rootfs.sh` + `overlay/` — the shipped image: init scripts, uci-defaults, LuCI views + rpcd ucode + acl/menu + zh-CN `.lmo` |
+| `rootfs/` | the upstream Ubuntu 26.04 line (Dockerfile, systemd units) — still selectable |
+| `android-vendor/` | extract the Android runtime subset / GPU userspace **from your device**; property regions neutralized on extraction |
+| `tools/` | host-side: guards, deploy, tests, i18n build, module staging, publish |
+| `docs/` | `FINDINGS.md` (engineering log, started upstream and continued here) and screenshots |
+| `install.sh` | the one-command installer (checks → pull → build → write `boot_b` + arm slot b) |
 
-Related: the kernel source used here is mirrored at
-[`dikeckaan/zte-ums9620-kernel-5.4.254`](https://github.com/dikeckaan/zte-ums9620-kernel-5.4.254)
-(ZTE U30 Air GPL release, 5.4.254).
+## Credentials & privacy policy
 
-**Not included** (proprietary or device-specific): stock partition images, Android vendor binaries and libraries,
-`/dev/__properties__`, Wi-Fi/modem firmware, device dumps and identifiers. The scripts extract these from your own device.
+No credentials of any live device are in this repository or its history: root passwords, hotspot PSKs,
+IMEI/serials, Bluetooth/Wi-Fi MACs and machine codes are kept host-side (`$CHANGXING60_PASSWORD[_FILE]`
+or `~/.changxing60-*`). History predating that policy is rewritten at publish time by
+`tools/publish-github.sh` (filter-repo over a throwaway clone + a pattern sweep across every revision
+that aborts the push on any hit). The shipped image's root account has an empty password — stock
+behaviour, deliberately: set your own before connecting the device to anything.
 
-## Requirements
+## References
 
-* A rooted MU300/F50 with the boot verification bypass (Android must already boot a modified `boot` image),
-  `adb` access, and a tested SPD/BROM recovery path.
-* macOS or Linux host with Docker (arm64 native or emulation), Python 3, `lz4`, `adb`.
-* Your own dumps: `boot_a.img` and the first 4 KiB of `misc` (`dd if=/dev/block/by-name/misc bs=4096 count=1`).
+Projects this port referenced or drew from:
 
-## Quick install
+* [**dikeckaan/mu300-linux**](https://github.com/dikeckaan/mu300-linux) — the ZTE F50 / MU300 port
+  (same SoC family). Its history is the base this repo's branch carries (the boot/slot mechanism and
+  the earliest `openwrt/` rootfs line come from it). All changxing60/7552N work — panels, i18n,
+  self-healing, the internal screen, SMS, the publish tooling — was developed in this project.
+* [**dikeckaan/zte-ums9620-kernel-5.4.254**](https://github.com/dikeckaan/zte-ums9620-kernel-5.4.254)
+  — mirror of ZTE's GPL kernel release; a build input (see *Building from source*).
+* **The e5 / UMS9621 port community** (kanoqwq et al.) — sister-device reference for modem handling
+  and CP recovery; comparison in the docs repo.
+* **realme C51/C53 `wlan_combo` GPL source** — the vendor Wi-Fi driver built out of tree.
 
-With the kernel built (step 1 below; outputs in `out/`: `Image`, `modules/`, `modules.builtin*`), the device in rooted
-Android and Docker running:
+## License
 
-```sh
-./install.sh
-```
-
-The installer
-* checks the device and finds the unpartitioned eMMC space after the last partition (or the existing `changxing60root` ext4),
-* asks which systems to install (Ubuntu, OpenWrt or both), which one boots, whether Linux is the default boot, whether to
-  copy Android's hotspot name/password and whether to include the GPU userspace, and asks for a password
-  (`ubuntu` user on Ubuntu, `root` on OpenWrt),
-* pulls the vendor files it needs from the device into `work/` (never into the repository), builds both root filesystems
-  and the boot image, and shows a summary that must be confirmed with `INSTALL`,
-* unpacks the systems to `/ubuntu` and `/openwrt` on the Linux filesystem, writes `boot_b` and arms slot b, and reboots.
-
-Only the Linux region, `boot_b` and 32 bytes of `misc` are written; `boot_a`, the GPT and `userdata` stay untouched. After
-installation: `changxing60-os ubuntu|openwrt` switches systems, `changxing60-next-boot android` returns to Android. Hotspot, cellular
-data and USB sharing are configured on first boot and stay editable (`/etc/changxing60/hotspot.conf` on Ubuntu, UCI/LuCI on
-OpenWrt). `CHANGXING60_REUSE_BUILD=1` reuses the root filesystems built by a previous run.
-
-**Never flash OpenWrt firmware images or use sysupgrade on this device** (they target generic arm64 disks and would
-overwrite the eMMC); the installed OpenWrt blocks it. Updating packages with `apk upgrade` is fine, except `kernel`/`kmod-*`
-(this device runs its own 5.4 kernel).
-
-## Build and run
-
-### 1. Kernel
-```sh
-git clone https://github.com/dikeckaan/zte-ums9620-kernel-5.4.254   # or the Enceka U30 Air repo
-docker build -t changxing60-kbuild kernel/
-docker volume create changxing60-kernel
-docker run --rm -v changxing60-kernel:/src -v "$PWD/../zte-ums9620-kernel-5.4.254":/tree changxing60-kbuild cp -a /tree /src/zte-u30air
-cp kernel/f50-stock-B09.config kernel/device.config
-docker run --rm -v changxing60-kernel:/src -v "$PWD/kernel":/work changxing60-kbuild bash /work/build-linux.sh
-```
-`build-linux.sh` merges `changxing60-linux.fragment` into the stock config, switches to ThinLTO and builds `Image` + modules
-into `/src/out-linux`. Copy `Image` and `modules.builtin*` to `out/`, then stage the modules with
-`sudo python3 tools/stage-modules.py`: it copies the transitive closure of the modules the rootfs scripts load
-(wifi-start, extra-modules, zram-start) plus `boot/module-order.txt`, strips the debug info, and fails if one of them is
-missing. Copying "all `*.ko`" by hand is how `wcn_bsp`, `zram` and the thermal drivers stayed out of the image for
-weeks -- the build had them, the rootfs silently did not.
-
-Wi-Fi driver: extract `kernel_modules/kernel5.4/wcn/wlan/wlan_combo` from the realme C51/C53 AndroidT kernel source into
-the volume as `/src/ext-wlan_combo`, then run `kernel/build-wlan.sh` (applies the `patches/wlan_combo-*.patch` files).
-
-Kernel patches: apply `kernel/patches/bluetooth-marlin3-link-policy.patch`, `of-reserved-mem-skip.patch` and `regdb-wens-certificate.patch` to the kernel tree
-before building, and `echo -gb50db5b6224c > .scmversion` so the release string does not get a `-dirty` suffix.
-
-GPU: copy `kernel_modules/kernel5.4/gpu/natt/mali` from the realme tree (master branch) to `/src/ext-mali` and run
-`kernel/build-mali.sh`; pull the userspace with `android-vendor/extract-gpu-subset.sh` and build `tools/gpu/cltest` with
-`tools/gpu/build.sh <dir with libc.so libdl.so libOpenCL.so>`.
-
-Bluetooth: build `sprdbt_tty.ko` from the same realme tree (`wcn/bluetooth/driver/tty-pcie`, `BSP_BOARD_UNISOC_WCN_SOCKET=pcie`)
-and the vendor-init tool: `docker run --rm -v "$PWD/tools/bt-init":/w changxing60-kbuild gcc -O2 -static -o /w/changxing60-bt-init /w/changxing60-bt-init.c`.
-
-### 2. Android vendor subset (from your device)
-```sh
-android-vendor/extract-subset.sh android-subset
-python3 android-vendor/gen-ueventd-perms.py android-subset/vendor/etc/ueventd.rc <vendor init *.rc> > android-vendor/ueventd-perms.sh
-```
-
-### 3. Boot image
-```sh
-docker build -t changxing60-ubuntu:26.04 rootfs/
-docker run --rm changxing60-ubuntu:26.04 cat /bin/busybox > busybox && chmod +x busybox   # static, has mdev/losetup/switch_root/telnetd
-docker run --rm -v "$PWD/tools/logdw":/w changxing60-kbuild gcc -O2 -static -o /w/logdw /w/logdw.c
-python3 boot/build-boot-image.py --stock-boot dumps/boot_a.img --misc-head dumps/misc-head.bin \
-  --kernel out/Image --modules out/modules --busybox busybox --logdw tools/logdw/logdw \
-  --ueventd-perms android-vendor/ueventd-perms.sh --android-subset android-subset --out boot-linux-slotb.img
-```
-
-### 4. Root filesystem on the free eMMC region
-1. Check on *your* device that the space after `userdata` is really unallocated (compare the last partition end with
-   the GPT's last usable LBA) and adjust `ROOT_OFFSET` in `boot/init` and `tools/android-mount-changxing60root.sh`.
-2. On Android (root), create the filesystem through a bounded loop device and verify offset/size first.
-3. Assemble and deploy:
-```sh
-cid=$(docker create changxing60-ubuntu:26.04); docker export $cid > rootfs/base.tar; docker rm $cid
-docker run --rm -v "$PWD/rootfs":/w -v "$PWD/out/modules":/kmods:ro -v "$PWD/out":/kout:ro \
-  -v "$PWD/firmware":/firmware:ro -v "$PWD/android-subset":/android-subset:ro -v "$PWD/tools/logdw/logdw":/logdw:ro \
-  -v "$PWD/tools/bt-init/changxing60-bt-init":/bt-init:ro changxing60-ubuntu:26.04 bash /w/assemble.sh
-```
-Push `changxing60-ubuntu-26.04-rootfs.tar.gz` to the device and extract it with `tools/android-mount-changxing60root.sh`.
-`firmware/` holds `wcnmodem.bin`, `gnssmodem.bin` and `wifi_board_config*.ini` from the device's `/odm/firmware`, plus
-`bt_configure_pskey.ini` and `bt_configure_rf.ini` from `/vendor/etc`.
-
-### 5. Boot Linux
-```sh
-boot/flash-trial.sh boot-linux-slotb.img
-```
-After about 50 s: `ssh ubuntu@192.168.77.1` (password `ubuntu`, **change it**), `telnet 192.168.77.1`, or
-`screen /dev/cu.usbmodem* 115200`. `sudo /opt/changxing60/bin/mobile-data status|up [APN]|down|sim-reset` controls the modem (`changxing60-mobile-data-watch` reconnects automatically unless you ran `down`). `sudo reboot` returns to Android. If a trial fails, collect logs from Android with
-`tools/collect-logs.sh`.
-
-Make Linux the default (inside Linux):
-```sh
-sudo changxing60-next-boot linux     # every successful boot re-arms slot b (changxing60-boot-ok.service)
-sudo changxing60-next-boot android   # next reboot goes to Android and stays there
-sudo changxing60-next-boot status
-```
-Hotspot settings live in `/etc/changxing60/hotspot.conf` (`SSID=`, `PSK=`, `BAND=5|2.4`, `CHANNEL=auto|n`, `COUNTRY=`); `tools/android-import-hotspot.sh`
-copies the current Android hotspot into it before the first boot, otherwise a random password is generated and shown at login.
-
-From Android, `boot/android-boot-linux.sh boot-linux-slotb.img` boots the image already on `boot_b` again without reflashing.
-If Linux ever fails before `changxing60-boot-ok` runs, LK sees `tries_remaining=1` on the next boot and falls back to Android.
-
-## Credits and licenses
-
-* Kernel source: ZTE GPL release for the U30 Air (mirrored by Enceka), Unisoc drivers therein — GPL-2.0.
-* Wi-Fi driver source: realme C51/C53 AndroidT kernel release (`wlan_combo`) — GPL-2.0; the patch in `kernel/patches` is GPL-2.0.
-* Scripts, tools and documentation in this repository: MIT (see `LICENSE`).
-* Stock firmware, Android vendor components and bootloaders belong to their owners and are not distributed here.
+* Scripts, tools, LuCI panels and documentation in this repository: MIT (see `LICENSE`). The upstream
+  copyright notice inside `LICENSE` stays because MIT requires preserving it for the base commits.
+* Kernel sources and the `wlan_combo` driver remain GPL-2.0 (ZTE/unisoc/realme releases, linked above).
+* Stock firmware, vendor binaries and bootloaders belong to their owners and are not distributed
+  from this repo (the release tarball's firmware note above is the only exception, by device-owner
+  convenience). Nothing here is endorsed by ZTE or Unisoc; you can brick your device.
