@@ -73,7 +73,12 @@ say "pushing our line + tags to $GITHUB_URL"
 # `7552n-port`, and the fork base's `main` are all ancestors of the tip or not ours to mirror --
 # nothing else goes out.
 git push -q "$GITHUB_URL" refs/heads/mainline-5.4:refs/heads/mainline-5.4 || die "branch push failed"
-git push -q --tags "$GITHUB_URL" || say "tag push failed (branches are out; tags can follow)"
+# Tags: push ONLY our own (frozen-*) -- a bare `--tags` would re-publish the fork base's ~40 daily
+# v2026.* tags and its test leftovers, which are upstream's release ceremony, not ours. (Moved a
+# frozen tag before: the push is per-tag and --force, so a re-creatable release target still lands.)
+for t in $(git tag -l 'frozen-*'); do
+	git push -q --force "$GITHUB_URL" "refs/tags/$t" || say "tag push failed for $t (branches are out)"
+done
 
 cd /
 rm -rf "$WORK"
