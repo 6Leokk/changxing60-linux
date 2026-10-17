@@ -19,7 +19,7 @@
 // a shim that is not a real DOM is expected to break in a hundred ways that are not our business. A
 // ReferenceError is never one of them: it means a name does not exist, which is true in the browser too.
 //
-//   tools/luci-view-check.js FILE...     (exit 1 if any file raises ReferenceError)
+//   tools/luci-view-check.js FILE...     (exit 1 if any file raises ReferenceError, or dereferences undefined)
 'use strict';
 
 const fs = require('fs');
@@ -100,17 +100,34 @@ function check(file) {
 	// inside a method (dom.content in render()), so merely loading the file is not enough to reach it.
 	const seen = new Set();
 	const found = [];
+	// Which errors belong to the page and which to the stand-ins (see the header): a name that does not
+	// exist (ReferenceError), or a dereference of undefined (this proxy answers every named property with
+	// another proxy, so `x.y` on a stand-in is never undefined -- an undefined-dereference must come from
+	// a value the page itself left unset, which is exactly how usb.js died in the browser on 2026-10-17).
+	const isPageBug = (e) => (e instanceof ReferenceError) ||
+		(e instanceof TypeError && /Cannot read properties of undefined \(reading/.test(e.message));
 	const walk = (obj, depth) => {
 		if (depth > 3 || obj == null || seen.has(obj)) return;
 		seen.add(obj);
+		// Lifecycle order matters: a browser always runs render() before draw()/refresh(), and those
+		// methods read the elements render built. Calling them standalone trips the very
+		// undefined-dereference we hunt, as harness noise. Render first -- and report that call too,
+		// because swallowing it would hide crashes in render's own path (which is where the usb.js one was).
+		let renderedHere = false;
+		if (depth === 0 && typeof obj.render === 'function') {
+			renderedHere = true;
+			try { obj.render(any('loadResult')); }
+			catch (e) { if (isPageBug(e)) found.push(`render(): ${e.message}`); }
+		}
 		for (const key of Object.keys(obj)) {
 			let v;
 			try { v = obj[key]; } catch { continue; }
 			if (typeof v !== 'function') { if (v && typeof v === 'object') walk(v, depth + 1); continue; }
+			if (renderedHere && key === 'render') continue;
 			try {
-				v.call(obj);
+				v.call(obj, any('arg'));
 			} catch (e) {
-				if (e instanceof ReferenceError) found.push(`${key}(): ${e.message}`);
+				if (isPageBug(e)) found.push(`${key}(): ${e.message}`);
 			}
 		}
 	};
@@ -134,7 +151,7 @@ function check(file) {
 		if (asyncRefs.length) err = [err, ...asyncRefs].filter(Boolean).join('; ');
 		if (err) { fail++; console.log(`FAIL ${file}\n       ${err}`); }
 	}
-	if (fail) { console.log(`\n${fail} file(s) raise ReferenceError`); process.exit(1); }
+	if (fail) { console.log(`\n${fail} file(s) raise a page bug (ReferenceError / undefined-dereference)`); process.exit(1); }
 	// Exit explicitly rather than falling off the end: a page is free to leave something pending, and a
 	// script that hangs instead of printing its verdict is indistinguishable from one still thinking.
 	process.exit(0);

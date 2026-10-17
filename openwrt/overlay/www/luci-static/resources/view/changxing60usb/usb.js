@@ -64,7 +64,10 @@ return view.extend({
 	// state, and leaving a stale radio checked would be the page lying about the device.
 	draw: function(d) {
 		var self = this;
-		this.data = d || {};
+		// normalise once, up front: `this.data` is the fallback for re-draws that arrive without a
+		// payload, and d is read everywhere below — if either side is undefined the page must still
+		// paint (buttons unpressed, fields em-dashed), not die on `d.mode`.
+		this.data = d = d || this.data || {};
 
 		if (d && d.error) {
 			this.statusBox.replaceChildren(E('div', { 'class': 'alert-message error' }, d.error));
@@ -143,7 +146,10 @@ return view.extend({
 		);
 	},
 
-	render: function() {
+	// render(d): the framework hands us the load() result as d — taking it is not cosmetic. Ignoring it
+	// meant the first paint read an unset this.data (undefined -> TypeError on d.mode) and threw away the
+	// { error } default that resolveDefault prepared for a dead backend.
+	render: function(d) {
 		this.modeBox = E('div', {});
 		this.statusBox = E('div', {});
 
@@ -158,7 +164,7 @@ return view.extend({
 			this.statusBox
 		]);
 
-		this.draw(this.data);
+		this.draw(d);
 		return ret;
 	},
 

@@ -113,7 +113,9 @@ return view.extend({
 	// the state, and leaving a stale one highlighted would be the page lying about the device.
 	draw: function(d) {
 		var self = this;
-		this.data = d || {};
+		// normalise once, up front (same fix as usb.js on 2026-10-17): the page must paint even when d
+		// is undefined -- the old shape guarded `d && d.error` then read `d.target` unguarded.
+		this.data = d = d || this.data || {};
 
 		if (d && d.error) {
 			this.statusBox.replaceChildren(E('div', { 'class': 'alert-message error' }, d.error));
@@ -166,7 +168,9 @@ return view.extend({
 		);
 	},
 
-	render: function() {
+	// render(d): take the framework's load result -- ignoring it meant the first paint read an unset
+	// this.data (TypeError on d.target) and threw away the load() default prepared for a dead backend.
+	render: function(d) {
 		this.applyBox = E('div', {});
 		this.statusBox = E('div', {});
 
@@ -183,7 +187,7 @@ return view.extend({
 			this.statusBox
 		]);
 
-		this.draw(this.data);
+		this.draw(d);
 		return ret;
 	},
 
