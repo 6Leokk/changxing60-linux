@@ -8,9 +8,11 @@ LAN, a self-drawn 480×854 status page on the internal MIPI panel, an SMS stack 
 panel, six hand-written LuCI panels (zh-CN), and watchers that recover the modem stack when it
 wedges — a reboot recovers, and a Linux boot that fails twice falls back to Android by itself.
 
-This project targets the 7552N; it was started with the ZTE F50 / MU300 port
-[dikeckaan/mu300-linux](https://github.com/dikeckaan/mu300-linux) (same SoC family) as a reference —
-see References at the end. The original Ubuntu 26.04 line still builds and is selectable
+This repository stands on its own default branch, `mainline-6.18` — the ZTE 7552N port and nothing
+else; it tracks no upstream. It began as a fork of [mu300-linux](https://github.com/dikeckaan/mu300-linux)
+(a ZTE F50 / MU300 Linux port, same SoC family), which supplied the starting base — the boot/slot
+mechanism and the earliest rootfs experiments — and every 7552N / `changxing60` feature was developed
+in this project. The F50-era Ubuntu 26.04 line still builds and is selectable
 (`changxing60-os ubuntu|openwrt`), but everything below is about the OpenWrt line, which is what this
 repo ships and runs. The dated engineering log — measurements, failures, retracted conclusions — lives
 in the companion docs repository **[6Leokk/zte7552n](https://github.com/6Leokk/zte7552n)**.
@@ -93,8 +95,8 @@ revision is not measured).
 
 ## Building from source
 
-* **Kernel** — ZTE's 5.4 GPL release (mirrored at
-  [dikeckaan/zte-ums9620-kernel-5.4.254](https://github.com/dikeckaan/zte-ums9620-kernel-5.4.254)):
+* **Kernel** — ZTE's 5.4 GPL release (community mirror:
+  [zte-ums9620-kernel-5.4.254](https://github.com/dikeckaan/zte-ums9620-kernel-5.4.254)):
   `kernel/build-linux.sh` merges `changxing60-linux.fragment`, ThinLTO builds `Image` + modules.
   Out-of-tree: `kernel/build-wlan.sh` (realme C51/C53 `wlan_combo` GPL source + our patches),
   `kernel/build-mali-54.sh` (mali r40p0), `kernel/build-internal-display.sh` (`sprd-drm` as a module).
@@ -123,7 +125,7 @@ revision is not measured).
 | `boot/` | `init` (module loader + root mount), `module-order.txt`, `build-boot-image.py`, `flash-trial.sh`, `android-boot-linux.sh` |
 | `kernel/` | build env, stock config + fragment, patches (wlan_combo, marlin3 link policy, mem-skip, regdb cert, PCM guard), build scripts |
 | `openwrt/` | `build-rootfs.sh` + `overlay/` — the shipped image: init scripts, uci-defaults, LuCI views + rpcd ucode + acl/menu + zh-CN `.lmo` |
-| `rootfs/` | the upstream Ubuntu 26.04 line (Dockerfile, systemd units) — still selectable |
+| `rootfs/` | the F50-era Ubuntu 26.04 line from the fork base (Dockerfile, systemd units) — still selectable |
 | `android-vendor/` | extract the Android runtime subset / GPU userspace **from your device**; property regions neutralized on extraction |
 | `tools/` | host-side: guards, deploy, tests, i18n build, module staging, publish |
 | `docs/` | `FINDINGS.md` (engineering log, started upstream and continued here) and screenshots |
@@ -140,16 +142,15 @@ behaviour, deliberately: set your own before connecting the device to anything.
 
 ## References
 
-Projects this port referenced or drew from:
+Where parts of this project came from, or what it drew on:
 
-* [**dikeckaan/mu300-linux**](https://github.com/dikeckaan/mu300-linux) — the ZTE F50 / MU300 port
-  (same SoC family). Its history is the base this repo's branch carries (the boot/slot mechanism and
-  the earliest `openwrt/` rootfs line come from it). All changxing60/7552N work — panels, i18n,
-  self-healing, the internal screen, SMS, the publish tooling — was developed in this project.
-* [**dikeckaan/zte-ums9620-kernel-5.4.254**](https://github.com/dikeckaan/zte-ums9620-kernel-5.4.254)
-  — mirror of ZTE's GPL kernel release; a build input (see *Building from source*).
-* **The e5 / UMS9621 port community** (kanoqwq et al.) — sister-device reference for modem handling
-  and CP recovery; comparison in the docs repo.
+* **[mu300-linux](https://github.com/dikeckaan/mu300-linux)** — the ZTE F50 / MU300 port this repo was
+  forked from; that project's commits form the starting base (boot/slot mechanism, earliest
+  `openwrt/` line). Everything 7552N-specific was developed in this project.
+* **[zte-ums9620-kernel-5.4.254](https://github.com/dikeckaan/zte-ums9620-kernel-5.4.254)** —
+  community mirror of ZTE's GPL kernel release; a build input (see *Building from source*).
+* **The e5 / UMS9621 port projects** — sister-device reference for modem handling and CP recovery;
+  comparison in the docs repo.
 * **realme C51/C53 `wlan_combo` GPL source** — the vendor Wi-Fi driver built out of tree.
 
 ## License
