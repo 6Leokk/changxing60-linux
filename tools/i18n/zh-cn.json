@@ -1,5 +1,5 @@
 {
-  "_comment": "Chinese (zh-cn) translations for the 5 changxing60 LuCI views. 185 msgids not already covered by the official luci-i18n-base-zh-cn catalog. Placeholders %s/%d/{text} etc. are preserved verbatim; 3GPP/protocol acronyms stay in English by convention. Edit freely; rebuild with tools/i18n/build-i18n.py.",
+  "_comment": "Chinese (zh-cn) translations for the 6 changxing60 LuCI views. 185 msgids not already covered by the official luci-i18n-base-zh-cn catalog. Placeholders %s/%d/{text} etc. are preserved verbatim; 3GPP/protocol acronyms stay in English by convention. Edit freely; rebuild with tools/i18n/build-i18n.py.",
 
   "%d message(s) waiting to be delivered": "%d 条消息等待投递",
   "%d message(s), %d unread - page %d of %d": "%d 条消息，%d 条未读 - 第 %d 页 / 共 %d 页",
@@ -185,5 +185,31 @@
   "sent": "已发送",
   "smtp.example.com": "smtp.example.com",
   "state %s": "状态 %s",
-  "unread": "未读"
+  "unread": "未读",
+
+  "Android": "Android",
+  "Boot target": "启动目标",
+  "Default boot": "默认启动系统",
+  "Reboot now": "立即重启",
+  "Switch to Android": "切换到 Android",
+  "OpenWrt (Linux)": "OpenWrt（Linux）",
+  "Running right now": "当前正在运行",
+  "Bootloader control (misc)": "引导控制字（misc）",
+  "Slot a info": "slot a 控制字节",
+  "Slot b info": "slot b 控制字节",
+  "Rebooting the device": "正在重启设备",
+  "Applying the boot target": "正在写入启动目标",
+  "The device is rebooting": "设备正在重启",
+  "Boot OpenWrt (slot b, safe default)": "启动 OpenWrt（slot b，安全默认）",
+  "Boot Android (its own system)": "启动 Android（自带系统）",
+  "Boot Android on the next reboot?": "下次重启进入 Android？",
+  "Writing the bootloader control bytes...": "正在写入引导控制字…",
+  "The device is going down...": "设备正在下线…",
+  "The boot target service did not answer": "启动目标服务无应答",
+  "The boot target is now %s. It takes effect on the next reboot.": "启动目标已设为 %s，下次重启生效。",
+  "Armed with retry counts, and every successful Linux boot re-arms it: if a future boot ever fails twice in a row, the bootloader falls back to Android by itself. This is the normal state.": "带重试计数装入，且每次 Linux 成功开机都会重新装入：若将来连续两次启动失败，引导器会自动落回 Android。这是常态。",
+  "The next reboot -- and later ones -- land in stock Android, where there is no Linux and no web page. Bringing OpenWrt back takes a PC with the USB cable: tools/changxing60-back-to-openwrt.sh.": "下次（及其后的）重启将进入原生 Android，那里没有 Linux、也没有网页。带回 OpenWrt 需要一台接 USB 线的电脑：tools/changxing60-back-to-openwrt.sh。",
+  "OpenWrt answers on 192.168.77.1 again in about four minutes. If the boot target was Android, this page will not come back: run tools/changxing60-back-to-openwrt.sh from a PC over the USB cable to arm Linux again.": "OpenWrt 约四分钟后会在 192.168.77.1 上重新应答。若启动目标是 Android，本页面不会回来：把 USB 线接电脑，运行 tools/changxing60-back-to-openwrt.sh 重新装入 Linux。",
+  "Android is the device's own system: once a reboot lands there, this page -- and Linux as a whole -- is gone, and no click from inside it can bring Linux back. The way back is the USB cable to a PC: run tools/changxing60-back-to-openwrt.sh from the changxing60-linux repository and it re-arms slot b and reboots; the manual 32-byte recipe is in docs/changxing60/reboot-boot-slot.md. If a Linux boot ever fails twice in a row, the bootloader also falls back to Android by itself.": "Android 是设备自带的系统：一旦重启落到那里，本页面——乃至整个 Linux——就没了，在页面里怎么点也无法把 Linux 带回来。回去的路是把 USB 线接电脑：在 changxing60-linux 仓库运行 tools/changxing60-back-to-openwrt.sh，它会重新装入 slot b 并重启；手改 32 字节的配方见 docs/changxing60/reboot-boot-slot.md。若 Linux 连续两次起不来，引导器也会自己落回 Android。",
+  "This device boots one of two systems: the OpenWrt Linux installed in the spare flash area (slot b) or the stock Android (slot a). Which one the next reboot lands in is decided by 32 bytes of the misc partition; this page writes them through changxing60-next-boot and shows them read back after every write. Arming and rebooting are separate buttons: nothing here restarts anything by itself.": "这台设备二选一启动：装在空闲闪存区的 OpenWrt（slot b）或原生 Android（slot a）。下次重启落在哪套由 misc 分区的 32 字节决定；本页通过 changxing60-next-boot 写入，并在每次写入后回读展示。装入与重启是两个独立按钮：本页不会自行重启任何东西。"
 }

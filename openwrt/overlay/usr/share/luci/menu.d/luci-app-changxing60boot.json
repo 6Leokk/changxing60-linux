@@ -1,0 +1,13 @@
+{
+	"admin/services/changxing60boot": {
+		"title": "Boot target",
+		"order": 65,
+		"action": {
+			"type": "view",
+			"path": "changxing60boot/boot"
+		},
+		"depends": {
+			"acl": [ "luci-app-changxing60boot" ]
+		}
+	}
+}

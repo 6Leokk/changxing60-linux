@@ -44,6 +44,7 @@ Wi-Fi on the ZTE F50 5G mobile hotspot (hardware MU300, Unisoc T760 / UMS9620). 
 | Modem NV persistence (`cp_diskserver`), `refnotify` | ✅ Android daemons in the chroot |
 | Thermal throttling, status LEDs, SIM tray, DVFS drivers | ✅ `changxing60-extra-modules` (blue LED = mobile data up) |
 | Default boot to Linux with automatic fallback | ✅ `changxing60-next-boot linux\|android`; a Linux boot that never completes rolls back to Android |
+| Boot-target switch from the web admin (Services → 启动目标 / "Boot target") | ✅ 6th LuCI panel (2026-10-17): `rpc.changxing60boot` wraps the same `changxing60-next-boot` script, shows the misc bytes read back after every write, and keeps arming and rebooting as two separate buttons; `android` is one-way from inside Linux — the documented way home is `tools/changxing60-back-to-openwrt.sh` from a PC |
 | RAM | ✅ 1473 MiB usable (464 MiB is the modem firmware's, unavoidable); unused logo/sysdump reservations freed, zram swap |
 | OpenWrt 25.12 (selectable next to Ubuntu, `changxing60-os`) | ✅ procd boot, modem, cellular WAN (`proto changxing60cell`, APN in LuCI), firewall4 NAT, 5 GHz Wi-Fi (UCI/LuCI), USB LAN, SSH; ~140 MiB RAM used |
 | Internal MIPI panel (BOE, 480×854 portrait) | ✅ `sprd-drm.ko` built as an external module (DPU0 + DSI; it is *not* missing from the tree — the F50 config just leaves `CONFIG_DRM_SPRD` off), plus a self-drawn status page with a LuCI QR (`tools/screen/`). The power key toggles the backlight. **Touch is deliberately not loaded.** |

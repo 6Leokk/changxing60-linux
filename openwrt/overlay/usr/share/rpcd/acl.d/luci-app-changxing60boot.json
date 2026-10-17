@@ -1,0 +1,15 @@
+{
+	"luci-app-changxing60boot": {
+		"description": "Grant access to the boot target page",
+		"read": {
+			"ubus": {
+				"changxing60boot": [ "status" ]
+			}
+		},
+		"write": {
+			"ubus": {
+				"changxing60boot": [ "set", "reboot" ]
+			}
+		}
+	}
+}

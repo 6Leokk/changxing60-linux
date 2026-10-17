@@ -79,17 +79,40 @@ def main():
     args = sys.argv[1:]
     out = DEFAULT_OUT
     base = None
-    for i, a in enumerate(args):
-        if a == '--verify' and i + 1 < len(args):
+    # `--verify <path>` consumed as a pair: a bare loop over the args lets the value of --verify
+    # fall through into the elif as well, and the first positional is the output path -- so
+    # `build-i18n.py ours.lmo --verify base.lmo` wrote our catalog OVER base.lmo (2026-10-17,
+    # on a live checkout). Refuse more than one output path, loudly.
+    positional, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a == '--verify':
+            if i + 1 >= len(args):
+                print("usage: %s [out.lmo] [--verify base.zh-cn.lmo]" % sys.argv[0], file=sys.stderr)
+                sys.exit(2)
             base = args[i + 1]
-        elif not a.startswith('--'):
-            out = a
+            i += 2
+            continue
+        if a.startswith('--'):
+            print("unknown option %r" % a, file=sys.stderr)
+            sys.exit(2)
+        positional.append(a)
+        i += 1
+    if len(positional) > 1:
+        print("refusing: %d output paths given (%r); expected at most one, plus '--verify base'"
+              % (len(positional), positional), file=sys.stderr)
+        sys.exit(2)
+    if positional:
+        out = positional[0]
     # default base lookup: sibling overlay copy
     if base is None:
         cand = os.path.join(HERE, '..', '..', 'openwrt', 'overlay',
                             'usr', 'lib', 'lua', 'luci', 'i18n', 'base.zh-cn.lmo')
         if os.path.exists(cand):
             base = os.path.abspath(cand)
+    if base and os.path.abspath(base) == os.path.abspath(out):
+        print("refusing: --verify target is the same file we are writing (%r)" % out, file=sys.stderr)
+        sys.exit(2)
     table, blob = build(out)
     verify(table, blob, base)
     # sanity: show a few sample lookups the way the loader would resolve them
