@@ -66,6 +66,25 @@ apply() {
 }
 
 # --- the hotspot gets its own bridge and its own address -------------------------------
+# Standalone-safe seeding first. This image ships no /etc/config/network at all (the armsr base has
+# none and upstream's defaultconfig generator is not in the rootfs -- checked 2026-10-17 against the
+# flash tarball), `uci set` refuses to write options into a package or section that does not exist,
+# and with `set -e` above the script then dies *here*, before the bottom-of-file commits, so even the
+# writes that had succeeded stayed in uci's staging file and evaporated. That is conflicts.md B1 in
+# full: not just ap0 at S10, but every first write on a virgin tree. When the sections exist (any
+# normal install, and the uci-defaults pass that now seeds them), each guard below is a no-op.
+touch /etc/config/network
+uci -q show network.lan >/dev/null 2>&1 || {
+	uci -q set network.brlan=device
+	uci -q set network.brlan.name='br-lan'
+	uci -q set network.brlan.type='bridge'
+	uci -q set network.lan=interface
+	uci -q set network.lan.proto='static'
+	uci -q set network.lan.device='br-lan'
+	uci -q set network.lan.ipaddr="$LAN_IP"
+	uci -q set network.lan.netmask='255.255.255.0'
+}
+uci -q show network.wan >/dev/null 2>&1 || uci -q set network.wan=interface
 uci -q set network.brwifi=device
 uci -q set network.brwifi.name='br-wifi'
 uci -q set network.brwifi.type='bridge'
@@ -75,7 +94,19 @@ uci -q set network.wifi.proto='static'
 uci -q set network.wifi.ipaddr="$WIFI_IP"
 uci -q set network.wifi.netmask='255.255.255.0'
 uci -q set network.wifi.ip6assign='60'     # parity: Wi-Fi clients kept their IPv6 addresses
-uci -q set wireless.ap0.network='wifi'     # the AP leaves the management bridge
+# the AP leaves the management bridge. On a virgin first boot this script runs from uci-defaults at
+# S10, two levels *before* openwrt-wifi-config (S12, via changxing60-hw) creates /etc/config/wireless
+# and its ap0 section -- and `uci set` on a section that does not exist exits 1, which under `set -e`
+# above used to abort the whole script right here: every write below it (the firewall zone that puts
+# the hotspot where fw4 accepts it, dhcp.wifi, the management link's no-gateway options, the IPv6
+# relay) stayed in uci's staging file and was never committed, exactly once, because uci-defaults has
+# no second run (docs/changxing60/conflicts.md B1; the visible failure was clients associating,
+# finishing the handshake and getting nothing). So: make the file and the section exist if nobody has
+# yet. openwrt-wifi-config regenerates this file via `wifi config` and sets ap0 from its own batch
+# afterwards, so both orders land on the same result.
+touch /etc/config/wireless
+uci -q show wireless.ap0 >/dev/null 2>&1 || uci -q set wireless.ap0=wifi-iface
+uci -q set wireless.ap0.network='wifi'
 
 # --- the management link hands out an address and nothing else -------------------------
 # An option listed with no value is how dnsmasq is told to send it empty: the client gets no

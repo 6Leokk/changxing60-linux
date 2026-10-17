@@ -18,6 +18,13 @@ wifi config >/dev/null 2>&1
 touch /etc/config/wireless
 radio=$(uci -q show wireless | sed -n "s/^wireless\.\([^.=]*\)=wifi-device$/\1/p" | head -1)
 [ -n "$radio" ] || { radio=radio0; uci set wireless.radio0=wifi-device; uci set wireless.radio0.type=mac80211; uci set wireless.radio0.phy=phy0; }
+# bss_load_update_period=0 and chan_util_avg_period=0 stop hostapd rewriting the beacon every 6 s
+# (BSS load) and every 50 s (channel utilization): on this chip a beacon-content rewrite asserts the
+# CP2 firmware, cp_asserted latches and the whole radio stays dead until a reboot (measured
+# 2026-10-13). The running device has had both zeroed since then, but the fix lived only in its uci
+# -- a virgin flash re-armed it (docs/changxing60/conflicts.md E2, and E2b for chan_util, which the
+# scan of 2026-10-17 found as a second device-only pin in the same family). It belongs in the image,
+# next to the SSID.
 uci -q batch <<UCI
 set wireless.$radio.band='$band'
 set wireless.$radio.channel='$CHANNEL'
@@ -34,6 +41,8 @@ set wireless.ap0.ifname='wlan0'
 set wireless.ap0.ssid='$SSID'
 set wireless.ap0.encryption='psk2'
 set wireless.ap0.key='$PSK'
+set wireless.ap0.bss_load_update_period='0'
+set wireless.ap0.chan_util_avg_period='0'
 UCI
 uci commit wireless
 touch /etc/changxing60/wifi-configured

@@ -142,6 +142,17 @@ push "$top/tools/screen/out/keyinject"                   /tmp/keyinject
 # while the LuCI half of the page is picked up by the panel pass below like every other panel.
 push "$top/rootfs/overlay/opt/changxing60/bin/changxing60-usb-mode" /tmp/changxing60-usb-mode
 
+# The scripts the 2026-10-17 conflict scan touches (docs/changxing60/conflicts.md section 9). None of
+# these was ever named here, so until now a host-side fix to any of them had NO route to a running
+# device -- the same silence the init.d glob was added to kill on 2026-10-16, one directory over.
+# The list is deliberately explicit: these six boot-run scripts are the ones with device-visible state.
+push "$top/rootfs/overlay/opt/changxing60/bin/net-split"            /tmp/net-split
+push "$top/rootfs/overlay/opt/changxing60/bin/openwrt-wifi-config"  /tmp/openwrt-wifi-config
+push "$top/rootfs/overlay/opt/changxing60/bin/hotspot-watch"        /tmp/hotspot-watch
+push "$top/rootfs/overlay/opt/changxing60/bin/wifi-fix"             /tmp/wifi-fix
+push "$top/rootfs/overlay/opt/changxing60/bin/ndp-learn"            /tmp/ndp-learn
+push "$top/openwrt/overlay/opt/changxing60/bin/vendor-modules"      /tmp/vendor-modules
+
 # ---- the LuCI panels, as one pass over the tree ----
 # Every panel is the same four parts and all four are needed before the page works: the ucode is the
 # backend rpcd loads, the ACL is what lets the page call it, the menu is what makes it appear at all,
@@ -225,7 +236,8 @@ echo
 echo "== installing =="
 ssh_try "$HOST" 'set -e
 for f in power-policy extra-modules android-run android-gpu-run android-vendor-start \
-         changxing60-cp-reset changxing60-wedge-watch; do
+         changxing60-cp-reset changxing60-wedge-watch \
+         net-split openwrt-wifi-config hotspot-watch wifi-fix ndp-learn vendor-modules; do
 	[ -e /tmp/$f ] || continue
 	cp /tmp/$f /opt/changxing60/bin/$f; chmod 755 /opt/changxing60/bin/$f
 done
@@ -324,6 +336,28 @@ for b in "${INITD_BASE[@]}"; do
         echo "  ok    /etc/init.d/$b"
     else
         echo "  STALE /etc/init.d/$b (host $loc, device ${dev:-absent})"
+    fi
+done
+
+echo "--- every pushed /opt/changxing60/bin script is on the device byte for byte ---"
+# The init.d pass above learned this the hard way; the bin scripts had the same gap until the 2026-10-17
+# conflict fixes. A stale copy here does not look stale from the device either: the boot runs the file,
+# so whatever the file says is what everybody believes. The md5 pair is the only witness.
+# (vendor-modules lives in openwrt/overlay, everything else in rootfs/overlay -- two trees, one /bin.)
+BIN_PUSHED="net-split openwrt-wifi-config hotspot-watch wifi-fix ndp-learn vendor-modules \
+power-policy extra-modules android-run android-gpu-run android-vendor-start"
+for rel in $BIN_PUSHED; do
+    case "$rel" in
+    vendor-modules) src="$top/openwrt/overlay/opt/changxing60/bin/$rel" ;;
+    *)              src="$top/rootfs/overlay/opt/changxing60/bin/$rel" ;;
+    esac
+    [ -e "$src" ] || continue
+    loc=$(md5sum "$src" | cut -d' ' -f1)
+    dev=$(ssh_try "$HOST" "md5sum /opt/changxing60/bin/$rel 2>/dev/null | cut -d' ' -f1")
+    if [ -n "$dev" ] && [ "$dev" = "$loc" ]; then
+        echo "  ok    /opt/changxing60/bin/$rel"
+    else
+        echo "  STALE /opt/changxing60/bin/$rel (host $loc, device ${dev:-absent})"
     fi
 done
 

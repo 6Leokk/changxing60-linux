@@ -26,6 +26,7 @@ grep -q '^repair() {' "$LIB" || { echo "$SRC: repair() is not in the extracted l
 REBOOTLOG=$T/reboot.log; LOGGERLOG=$T/logger.log
 REPAIRS=$T/repairs
 REBOOT_MARK=$T/rebooted
+WIFI_LOCK=$T/wifi.lock       # never let a test mkdir the real /var/run lock
 SELFHEAL=$T/selfheal.log      # the durable note must not be written to the real /root from a test
 RESETDUMP=$T/reset_dump
 ATCMD=$T/atcmd
@@ -47,7 +48,7 @@ ok()   { pass=$((pass+1)); printf '  PASS  %s\n' "$1"; }
 bad()  { fail=$((fail+1)); printf '  FAIL  %s\n' "$1"; }
 want() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (want $3, got $2)"; fi; }
 
-reset() { rm -f "$REBOOTLOG" "$LOGGERLOG" "$REPAIRS" "$REBOOT_MARK" "$SELFHEAL"; WHY=; }
+reset() { rm -f "$REBOOTLOG" "$LOGGERLOG" "$REPAIRS" "$REBOOT_MARK" "$SELFHEAL" "${WIFILOG:-}"; rm -rf "$WIFI_LOCK"; WHY=; }
 rebooted() { [ -s "$REBOOTLOG" ]; }
 noted()    { grep -c -- "$1" "$SELFHEAL" 2>/dev/null || true; }
 
@@ -112,6 +113,44 @@ WHY="atcmd probe failed"
 repair "$WHY" 2>/dev/null
 want "unwritable log still reboots" "$(rebooted && echo yes || echo no)" "yes"
 want "the per-boot mark is still set" "$([ -e "$REBOOT_MARK" ] && echo yes || echo no)" "yes"
+
+echo
+echo "== the wifi repair lock (shared with wifi-fix, conflicts.md B3)"
+
+# Record what wifi calls actually happen from here on (the lock tests need to see a skipped one).
+WIFILOG=$T/wifi.log
+wifi() { echo "wifi $*" >> "$WIFILOG"; }
+
+# 7. An ordinary repair takes the lock and gives it back -- wifi-fix could run right after.
+reset
+WHY="atcmd probe failed"
+repair "$WHY"
+want "repair ran" "$(cat "$REPAIRS" 2>/dev/null || echo -)" "1"
+want "down/up happened" "$(grep -c '^wifi down' "$WIFILOG")" "1"
+want "no lock left held" "$([ -e "$WIFI_LOCK" ] && echo yes || echo no)" "no"
+
+# 8. Lock held by a live process (wifi-fix mid-repair at boot): this cycle is skipped entirely --
+#    no second wifi down/up stacked on the first, and the skip must not burn a repair from the
+#    MAX_REPAIR ladder, because it is not a failed repair.
+#    (the holder is this harness's own shell -- `sleep 300 &` would not do, sleep is stubbed out)
+reset
+WHY="atcmd probe failed (firmware not downloaded)"
+mkdir -p "$WIFI_LOCK"; echo "$$" > "$WIFI_LOCK/pid"
+repair "$WHY"
+want "live owner -> no wifi call" "$([ -e "$WIFILOG" ] && echo yes || echo no)" "no"
+want "live owner -> counter untouched" "$([ -e "$REPAIRS" ] && echo yes || echo no)" "no"
+want "live owner -> the skip is in the ring" "$(grep -c 'skipping this cycle' "$LOGGERLOG")" "1"
+want "live owner -> someone else's lock stays" "$([ -d "$WIFI_LOCK" ] && echo yes || echo no)" "yes"
+rm -rf "$WIFI_LOCK"
+
+# 9. A lock whose owner died (kill -9 of wifi-fix, reboot into old code): stale, taken over.
+reset; rm -f "$WIFILOG"
+WHY="atcmd probe failed (firmware not downloaded)"
+mkdir -p "$WIFI_LOCK"; echo 999999 > "$WIFI_LOCK/pid"
+repair "$WHY"
+want "stale lock -> the repair proceeds" "$(cat "$REPAIRS" 2>/dev/null || echo -)" "1"
+want "stale lock -> down/up happened" "$(grep -c '^wifi down' "$WIFILOG")" "1"
+want "stale lock -> released again" "$([ -e "$WIFI_LOCK" ] && echo yes || echo no)" "no"
 
 echo
 echo "== $pass passed, $fail failed"

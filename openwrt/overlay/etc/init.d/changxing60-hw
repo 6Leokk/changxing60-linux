@@ -10,6 +10,14 @@ boot() {
 	# matches; see docs/changxing60/drivers.md. The touchscreen is NOT one of them -- it stays opt-in
 	# through touch-ctl, see the note in that script.
 	/opt/changxing60/bin/vendor-modules >>/tmp/changxing60-vendor-modules.log 2>&1
+	# charge-fix re-pins the bq2560x registers the vendor probe leaves at POR defaults (ITERM/VREG/
+	# ICHG/IINLIM -- see the charging doc; the chip sat at 960 mA input on USB detection otherwise).
+	# Like bootdiag below, this line used to live only in the hand-edited crontab of an already
+	# installed device, so a fresh flash charged at ~0.5 A again and nothing reported it.
+	if [ -f /etc/crontabs/root ] || [ -d /etc/crontabs ]; then
+		grep -q 'changxing60/bin/charge-fix' /etc/crontabs/root 2>/dev/null || \
+			echo '* * * * * /opt/changxing60/bin/charge-fix >/dev/null 2>&1' >> /etc/crontabs/root
+	fi
 	# bootdiag writes the evidence a post-switch_root failure leaves nowhere else (WCN/hostapd/netifd,
 	# the wedge watch) into /root/diag, and attaches a UDC that only turns up after the initramfs gave
 	# up. It is driven by cron because a wedged init queue would stall an init script. Re-asserted
@@ -67,11 +75,33 @@ boot() {
 			uci -q commit wireless
 		}
 	fi
+	# And re-pin the beacon-rewriting options off on every boot, whatever wrote the config: hostapd's
+	# defaults make it rewrite the beacon every 6 s (BSS load) and every 50 s (channel utilization),
+	# and on this chip each rewrite asserts the CP2 firmware until the radio is dead (measured
+	# 2026-10-13). openwrt-wifi-config above now writes both for virgin installs; this catches every
+	# install that predates that line, plus any later LuCI write that drops them.
+	if uci -q get wireless.ap0 >/dev/null 2>&1; then
+		for o in bss_load_update_period chan_util_avg_period; do
+			[ "$(uci -q get wireless.ap0.$o)" = "0" ] || {
+				uci -q set wireless.ap0.$o='0'
+				uci -q commit wireless
+			}
+		done
+	fi
 	# Deliberately no `wifi down; wifi up` here. changxing60-hw is S12 and netifd is S20, so there is no
 	# netifd to serve the ubus object yet and every `wifi` call answers "Command failed: Not found"
 	# (four such lines, one per call, used to land in /tmp/changxing60-wifi-start.log) while the AP came up
 	# fine a moment later under netifd, with the country and the pinned MAC already in place. An AP
 	# that still ends up without a beacon is repaired by changxing60-post's wififix, which runs after netifd.
+	#
+	# Re-assert the LAN split here, after ap0 exists. net-split's only uci-defaults caller runs at S10,
+	# two levels before this script creates the wireless config it reads (conflicts.md B1 -- on a virgin
+	# flash that ordering alone lost the whole split). Without --apply net-split only writes uci, and
+	# netifd (S20) has not read anything yet, so a fresh install lands on the same config today's
+	# installs run; idempotently re-asserting it every boot makes the split the pinned state the rest of
+	# this file already treats everything else as.
+	sh /opt/changxing60/bin/net-split >>/tmp/changxing60-net-split.log 2>&1 || \
+		logger -t changxing60-hw "net-split failed (rc=$?) -- the hotspot may have no firewall zone and no client will get an address"
 }
 
 start() {

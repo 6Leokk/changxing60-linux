@@ -34,6 +34,9 @@ ATCMD=/sys/devices/virtual/misc/wcn/devices/atcmd
 RESETDUMP=/sys/devices/virtual/misc/wcn/devices/reset_dump
 REPAIRS=/tmp/hotspot-watch.repairs
 REBOOT_MARK=/tmp/hotspot-watch.rebooted
+# Shared with changxing60-post's one-shot wifi-fix: whoever holds it owns the `wifi down; wifi up`
+# sequence (see repair() for why two at once are not allowed).
+WIFI_LOCK=/var/run/changxing60-wifi.lock
 
 # Same durable note as mobile-data's: /tmp does not survive the reboot, so the only record of who
 # asked for it is the logger ring, which does not either. One line on the ext4 first.
@@ -69,12 +72,28 @@ repair() {
 		logger -t hotspot-watch "$1, but already repaired $n times; not retrying"
 		return
 	fi
+	# Mutual exclusion with the startup repair, not a timed grace (docs/changxing60/conflicts.md B3):
+	# changxing60-post's wifi-fix does the same `wifi down; wifi up` at boot, and the old 50 s sleep
+	# only kept them apart if wifi-fix finished inside it -- a slow driver reload breaks that. Take a
+	# lock instead; if a live process already holds it, the AP is being repaired right now, so skip
+	# this cycle without counting it as a repair (the next one re-checks the radio).
+	if ! mkdir "$WIFI_LOCK" 2>/dev/null; then
+		lp=$(cat "$WIFI_LOCK/pid" 2>/dev/null) || lp=
+		if [ -n "$lp" ] && kill -0 "$lp" 2>/dev/null; then
+			logger -t hotspot-watch "$1, but repair already running (pid $lp); skipping this cycle"
+			return
+		fi
+		rm -rf "$WIFI_LOCK"                      # owner died mid-repair without releasing
+		mkdir "$WIFI_LOCK" 2>/dev/null || { logger -t hotspot-watch "wifi lock busy; skipping"; return; }
+	fi
+	echo $$ > "$WIFI_LOCK/pid"
 	logger -t hotspot-watch "$1 -- restarting wifi (repair $((n + 1))/$MAX_REPAIR)"
 	echo $((n + 1)) > "$REPAIRS"
 	wifi down
 	sleep 2
 	wifi up
 	sleep 15
+	rm -rf "$WIFI_LOCK"                          # released before the reboot decision below
 	why=$(radio_down)
 	if [ -z "$why" ]; then
 		logger -t hotspot-watch "radio back"
@@ -107,8 +126,8 @@ repair() {
 	echo reset > "$RESETDUMP"
 logger -t hotspot-watch "watching (interval ${INTERVAL}s, reset_dump=$(cat "$RESETDUMP" 2>/dev/null))"
 
-# changxing60-post's wififix is still running its own startup repair for the first ~50 s; do not race it
-# into thinking the AP is broken.
+# Warmup, not race protection: the first checks would read a still-starting hostapd as broken.
+# Overlap with changxing60-post's one-shot wifi-fix is now excluded by $WIFI_LOCK in repair().
 sleep "${CHANGXING60_HOTSPOT_GRACE:-50}"
 
 while :; do

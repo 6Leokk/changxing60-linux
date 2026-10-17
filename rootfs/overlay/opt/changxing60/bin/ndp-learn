@@ -115,6 +115,21 @@ learn_once() {
     return 0
 }
 
+# bearer_setting_up: something is attaching the bearer right now. The mobile-data attach lock covers
+# the AT side (netifd's changxing60cell.sh runs `mobile-data up`, which holds that lock across the
+# registration wait that can run two minutes -- see mobile-data's up_locked); netifd's own pending
+# flag covers setups the lock would miss (mobile-data's own watch calling ifup, a manual ifup). A
+# lock left behind by a kill -9 is not believed: its owner pid is checked, so the re-solicit below
+# cannot be starved forever.
+ATTACH_LOCK=/var/run/changxing60-attach.lock
+bearer_setting_up() {
+    if [ -d "$ATTACH_LOCK" ]; then
+        p=$(cat "$ATTACH_LOCK/pid" 2>/dev/null)
+        [ -n "$p" ] && kill -0 "$p" 2>/dev/null && return 0
+    fi
+    ubus -S call network.interface."${CHANGXING60_WAN:-wan}" status 2>/dev/null | grep -q '"pending": *true'
+}
+
 case ${1:-} in
     --prefix) bearer_prefix; exit 0 ;;
     --once) learn_once; exit 0 ;;
@@ -137,13 +152,26 @@ while :; do
     # the advertisement's lifetimes are infinite, so the address does not expire and no renewal
     # traffic is needed. It is here for the redial case and for a boot that missed the RA.
     if ! ip -6 addr show "$BEARER_IF" 2>/dev/null | grep -q 'scope global'; then
-        echo 2 > /proc/sys/net/ipv6/conf/$BEARER_IF/accept_ra 2>/dev/null
-        echo 1 > /proc/sys/net/ipv6/conf/$BEARER_IF/disable_ipv6 2>/dev/null
-        sleep 1
-        echo 0 > /proc/sys/net/ipv6/conf/$BEARER_IF/disable_ipv6 2>/dev/null
-        sleep 2
-        prefix=$(bearer_prefix)
-        [ -n "$prefix" ] && logger -t ndp-learn "bearer re-solicited, prefix $prefix"
+        # Gate (docs/changxing60/conflicts.md B4): "no global address" is also true while the bearer
+        # is still being brought up -- the condition holds for the whole of changxing60cell.sh's
+        # registration wait -- and this used to fire on ~every 10 s tick of it. The disable_ipv6
+        # 1->0 flip tears the bearer's IPv6 state down and back up underneath the attach that is
+        # still configuring it, which cancels the solicitation the proto sent at the end of setup
+        # and can make it miss the very answer it is waiting for. While setup runs these sysctls are
+        # left alone entirely; setup finishes with its own solicitation anyway, and this loop picks
+        # up the result one tick later. One log line per attach window, not one per tick.
+        if bearer_setting_up; then
+            [ -n "$held_logged" ] || { logger -t ndp-learn "bearer is being set up; leaving its IPv6 alone"; held_logged=1; }
+        else
+            held_logged=
+            echo 2 > /proc/sys/net/ipv6/conf/$BEARER_IF/accept_ra 2>/dev/null
+            echo 1 > /proc/sys/net/ipv6/conf/$BEARER_IF/disable_ipv6 2>/dev/null
+            sleep 1
+            echo 0 > /proc/sys/net/ipv6/conf/$BEARER_IF/disable_ipv6 2>/dev/null
+            sleep 2
+            prefix=$(bearer_prefix)
+            [ -n "$prefix" ] && logger -t ndp-learn "bearer re-solicited, prefix $prefix"
+        fi
     fi
     sleep 10
 done

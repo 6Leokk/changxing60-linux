@@ -13,9 +13,26 @@
 #     BSSID leaves hostapd "ENABLED" in ubus while nothing goes out on air
 [ -e /sys/class/net/wlan0 ] || exit 0        # chip did not init at all; a restart will not help
 [ -e /sys/class/ieee80211/phy0 ] || exit 0
+# Same repair, same lock. hotspot-watch can also be firing `wifi down; wifi up` (its own first pass
+# comes after a 50 s grace, but a slow boot puts this past it -- a timed grace is a guess, a lock is
+# not, and a second concurrent down/up on top of the first is exactly the stacked-restart pattern
+# that wedged the attach side once before; see mobile-data's ATTACH_LOCK comment). Whoever loses
+# leaves the radio to the holder: both repair the same failure the same way.
+WIFI_LOCK=/var/run/changxing60-wifi.lock
 bssid=$(ubus call hostapd.wlan0 get_status 2>/dev/null | sed -n 's/.*"bssid": "\([^"]*\)".*/\1/p')
 case "$bssid" in
     ""|00:00:00:00:00:00)
+        if ! mkdir "$WIFI_LOCK" 2>/dev/null; then
+            p=$(cat "$WIFI_LOCK/pid" 2>/dev/null) || p=
+            if [ -n "$p" ] && kill -0 "$p" 2>/dev/null; then
+                logger -t changxing60-post "wifi: AP not beaconing but a repair already runs (pid $p); leaving it to them"
+                exit 0
+            fi
+            rm -rf "$WIFI_LOCK"                    # owner died without cleaning up
+            mkdir "$WIFI_LOCK" 2>/dev/null || exit 0
+        fi
+        echo $$ > "$WIFI_LOCK/pid"
+        trap 'rm -rf "$WIFI_LOCK"' EXIT INT TERM
         logger -t changxing60-post "wifi: AP not beaconing (bssid=${bssid:-missing}), restarting"
         wifi down
         wifi up

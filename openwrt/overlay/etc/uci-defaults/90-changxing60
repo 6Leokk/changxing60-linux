@@ -1,6 +1,25 @@
 #!/bin/sh
 # First boot: LAN split into a USB management link and a Wi-Fi hotspot, cellular WAN through the
 # modem, hostname, USB console.
+#
+# Seed the two config files this script writes into but the image does not ship. The armsr base
+# carries no /etc/config/{network,system} AND upstream's defaultconfig generator (90-defaultconfig)
+# is not in this rootfs -- verified 2026-10-17 against openwrt/changxing60-openwrt-rootfs.tar.gz:
+# /etc/config holds only uhttpd rpcd luci dhcp dropbear socat openssl firewall. `uci set` refuses to
+# write options into a package or section that does not exist (rc=1, nothing staged), so on a virgin
+# first boot every line below silently failed until net-split -- and the sections net-split needs
+# (lan's fields, wan.proto) were not there for it either. Where a real install already has the
+# sections, every guard is a no-op.
+touch /etc/config/network /etc/config/system
+uci -q show network.lan >/dev/null 2>&1 || {
+	uci -q set network.brlan=device
+	uci -q set network.brlan.name='br-lan'
+	uci -q set network.brlan.type='bridge'
+	uci -q set network.lan=interface
+	uci -q set network.lan.proto='static'
+	uci -q set network.lan.device='br-lan'
+}
+uci -q show system.@system[0] >/dev/null 2>&1 || uci -q add system system >/dev/null
 uci -q batch <<UCI
 set system.@system[0].hostname='changxing60'
 set system.@system[0].description='Changxing 60 (ZTE 7552N) - OpenWrt'

@@ -93,6 +93,10 @@ group_misc() {
 # the last module of the set (see bisect_verdict) instead of looping on the same panic.
 load_good() {
 	[ -f "$GOOD" ] || return 0
+	# Segment the log by boot: bisect_verdict must only ever judge boots that are OVER. The boot id
+	# is random and unique, so the marker needs no timestamp; it must be written *before* TRYING, or
+	# the unpaired TRYING it protects would itself be the thing a cut-off log has to judge.
+	echo "=== boot $(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" >> "$BISECT_LOG"
 	echo "TRYING good-set : $(wc -l < $GOOD) modules" >> "$BISECT_LOG"
 	sync
 	echo "== vendor-good ($(wc -l < $GOOD) modules)"
@@ -106,11 +110,27 @@ load_good() {
 }
 
 # verdict_of_previous_boot: a boot that died while loading left TRYING with no verdict behind it.
+# Only boots that are over may be judged: the bisect runs in the *current* boot, where the kernel is
+# alive by construction, yet load_good writes "TRYING good-set" seconds before its 15 s settle sleep
+# ends -- so judging the whole log tail could read this boot's own pending pair and permanently
+# blacklist a healthy module (conflicts.md B2: one cron tick landing inside that window, on a box that
+# is fine). The boot marker written by load_good cuts the log: everything at or after the current
+# boot's marker is this boot's unfinished business and never verdict material; a TRYING with no OK in
+# the material *before* it is exactly what it looks like -- the previous kernel died mid-load.
 bisect_verdict() {
-	last_try=$(grep '^TRYING ' "$BISECT_LOG" 2>/dev/null | tail -1 | awk '{print $2}')
+	[ -f "$BISECT_LOG" ] || return 0
+	bootline=$(grep -n "^=== boot $(cat /proc/sys/kernel/random/boot_id 2>/dev/null)" "$BISECT_LOG" 2>/dev/null | tail -1 | cut -d: -f1)
+	if [ -n "$bootline" ]; then
+		# lines strictly before the current boot's marker belong to finished boots
+		log_before=$(sed -n "1,$((bootline - 1))p" "$BISECT_LOG")
+	else
+		# no marker yet (the log pre-dates this guard): judge the whole log, as before
+		log_before=$(cat "$BISECT_LOG")
+	fi
+	last_try=$(printf '%s\n' "$log_before" | grep '^TRYING ' | tail -1 | awk '{print $2}')
 	# Both endings count here: OK (everything went in) and SKIPPED (nothing went in, so nothing was
 	# proven).  Only a TRYING with neither behind it means the kernel died inside that window.
-	last_done=$(grep -E '^(OK|SKIPPED) ' "$BISECT_LOG" 2>/dev/null | tail -1 | awk '{print $2}')
+	last_done=$(printf '%s\n' "$log_before" | grep -E '^(OK|SKIPPED) ' | tail -1 | awk '{print $2}')
 	[ -n "$last_try" ] || return 0
 	[ "$last_try" = "$last_done" ] && return 0
 	if [ "$last_try" = good-set ]; then
